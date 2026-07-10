@@ -339,6 +339,14 @@ Der Client liefert bereinigte fachliche Exceptions. Controller und Worker müsse
 - Admin-Aktionen brauchen WHMCS-Rollenprüfung und CSRF-Schutz.
 - Unlink entfernt standardmäßig nur die lokale Zuordnung und verlangt eine Bestätigung. Remote-Löschen gehört nicht in den normalen Recovery-Pfad.
 
+## Admin-Assets
+
+WHMCS bindet die Styles und das kleine Vanilla-JavaScript ausschließlich auf der
+Addonseite über `AdminAreaHeadOutput` und `AdminAreaFooterOutput` ein. Die Hooks
+lesen die versionierten Dateien aus dem Modulverzeichnis und geben sie innerhalb
+der bereits authentifizierten Adminantwort aus. Damit benötigt die Installation
+keine öffentliche Webserver-Ausnahme für `/modules/addons/sevdesk/assets`.
+
 ## Wann mehr Architektur gerechtfertigt wäre
 
 Ein externer Worker oder Broker ist erst gerechtfertigt, wenn mindestens einer der folgenden Fälle nachweislich eintritt:

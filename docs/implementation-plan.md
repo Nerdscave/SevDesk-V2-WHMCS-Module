@@ -218,6 +218,23 @@ Offen sind noch die Prüfungen, die eine echte Zielumgebung brauchen: der verpfl
 - CSRF- und Adminrollenprüfung für alle Mutationen.
 - relevante WHMCS-Hooks registrieren; Hooks deduplizieren und ausschließlich Jobs einplanen.
 - Mapping-Manager mit bestätigtem lokalen Unlink und ohne implizites Remote-Löschen bereitstellen.
+- Modul-CSS und Vanilla-JavaScript über `AdminAreaHeadOutput` beziehungsweise
+  `AdminAreaFooterOutput` in die authentifizierte WHMCS-Antwort einbetten. Direkte
+  öffentliche Asset-URLs sind keine Voraussetzung, weil produktive Webserver den
+  Zugriff auf `/modules` häufig sperren.
+- Die Einrichtung zeigt sechs benannte Steuerprofile als getrennte Karten. Das
+  Erlöskonto wird aus der Receipt-Guidance-Auswahl gewählt; TaxRule, Freigabestatus,
+  Anwendungsgrenze und Blockierungsgrund bleiben dabei sichtbar.
+- Eine gespeicherte Konto-ID, die in der aktuellen Guidance fehlt, muss als
+  ausgewählte Warnoption erhalten bleiben. Ist die Guidance nicht erreichbar,
+  bleibt ein numerischer Fallback verfügbar; Speichern darf keine bestehende ID
+  unbemerkt verwerfen.
+- Kontextinformationen sind mit Tastatur und Maus erreichbar und werden zusätzlich
+  als sichtbarer Hilfetext angeboten. Steuerliche Freigaben bleiben explizite
+  Checkboxen und werden nicht durch die Kontoauswahl impliziert.
+- Die Modulrouten erscheinen als klassische Registerkarten mit sichtbarer aktiver
+  Kante. Sie bleiben semantisch normale Seitenlinks mit `aria-current`; bei wenig
+  Platz scrollt die Leiste horizontal und blendet keine Beschriftungen aus.
 
 ### UX-Abnahme
 
@@ -225,6 +242,12 @@ Offen sind noch die Prüfungen, die eine echte Zielumgebung brauchen: der verpfl
 - Fehlertext nennt konkrete Rechnung und Ursache, aber keine Token/PII.
 - Seite kann neu geladen werden, ohne Job oder Auswahl zu verlieren.
 - Ein abgelaufener Proxyrequest erzeugt keinen unbekannten Exportzustand.
+- Dashboard und Einrichtung bleiben bei schmalen Adminfenstern lesbar; Status wird
+  nicht ausschließlich durch Farbe vermittelt.
+- Alle Steuerprofile lassen sich ohne Kenntnis interner AccountDatev-IDs auswählen,
+  sofern Receipt Guidance verfügbar ist.
+- Der aktive Navigationstab ist auch nach einem Seitenwechsel in einer horizontal
+  gescrollten Leiste sichtbar und vollständig per Tastatur erreichbar.
 
 ### Exit-Kriterium
 

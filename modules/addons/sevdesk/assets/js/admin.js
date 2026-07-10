@@ -33,6 +33,28 @@
         return Math.min(Math.max(value, minimum), maximum);
     }
 
+    function revealActiveNavigationTab() {
+        var navigation = root.querySelector('.sd-nav');
+        var activeTab = navigation ? navigation.querySelector('.sd-nav-link[aria-current="page"]') : null;
+
+        if (!navigation || !activeTab) {
+            return;
+        }
+
+        window.requestAnimationFrame(function () {
+            var navigationRect = navigation.getBoundingClientRect();
+            var activeRect = activeTab.getBoundingClientRect();
+
+            if (activeRect.left >= navigationRect.left && activeRect.right <= navigationRect.right) {
+                return;
+            }
+
+            navigation.scrollLeft += activeRect.left
+                - navigationRect.left
+                - ((navigationRect.width - activeRect.width) / 2);
+        });
+    }
+
     each('[data-dismiss-alert]', function (button) {
         button.addEventListener('click', function () {
             var alert = button.closest('.sd-alert');
@@ -402,6 +424,7 @@
         schedule(interval);
     }
 
+    revealActiveNavigationTab();
     initConditionalFields();
     initSelections();
     initCorrectionForm();

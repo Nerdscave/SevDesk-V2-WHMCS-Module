@@ -1,5 +1,6 @@
 /* Scoped foundation: no global WHMCS styles are replaced. */
 .sd-admin {
+    --sd-canvas: #f3f6f5;
     --sd-ink: #1f2933;
     --sd-muted: #66737f;
     --sd-subtle: #8a97a3;
@@ -16,13 +17,17 @@
     --sd-info: #3b6e8f;
     --sd-radius: 8px;
     --sd-radius-lg: 12px;
-    --sd-shadow: 0 8px 24px rgba(31, 41, 51, 0.07);
+    --sd-shadow: 0 14px 34px rgba(31, 58, 52, 0.08);
+    --sd-shadow-soft: 0 2px 9px rgba(31, 58, 52, 0.045);
+    background: var(--sd-canvas);
+    border: 1px solid #e1e8e5;
+    border-radius: 14px;
     color: var(--sd-ink);
     font-family: inherit;
     line-height: 1.5;
     margin: 0 auto;
     max-width: 1480px;
-    padding: 4px 0 44px;
+    padding: 4px clamp(16px, 2.2vw, 30px) 48px;
 }
 
 .sd-admin *,
@@ -49,7 +54,7 @@
 
 .sd-admin h1 {
     color: var(--sd-ink);
-    font-size: 28px;
+    font-size: 30px;
     font-weight: 650;
     letter-spacing: -0.025em;
     line-height: 1.15;
@@ -77,7 +82,12 @@
     border-radius: 6px;
     font-weight: 600;
     line-height: 1.45;
+    min-height: 36px;
     transition: background-color 160ms ease, border-color 160ms ease, box-shadow 160ms ease, color 160ms ease, transform 160ms ease;
+}
+
+.sd-admin .btn-sm {
+    min-height: 30px;
 }
 
 .sd-admin .btn:active {
@@ -123,12 +133,14 @@
 }
 
 .sd-admin .form-control {
+    background-color: #fff;
     border-color: var(--sd-line-strong);
     border-radius: 6px;
     box-shadow: none;
     color: var(--sd-ink);
-    min-height: 36px;
-    transition: border-color 160ms ease, box-shadow 160ms ease;
+    font-size: 13px;
+    min-height: 40px;
+    transition: background-color 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
 }
 
 .sd-admin .form-control:focus {
@@ -138,6 +150,47 @@
 
 .sd-admin .form-control::placeholder {
     color: #9ba5ae;
+}
+
+.sd-admin select.form-control {
+    height: 40px;
+    line-height: 1.3;
+    padding-right: 12px;
+}
+
+.sd-admin select.form-control:hover,
+.sd-admin input.form-control:hover,
+.sd-admin textarea.form-control:hover {
+    border-color: #aeb9c2;
+}
+
+.sd-admin select.form-control:disabled,
+.sd-admin input.form-control:disabled,
+.sd-admin textarea.form-control:disabled {
+    background-color: #eef2f1;
+    color: var(--sd-muted);
+    cursor: not-allowed;
+}
+
+.sd-admin input[type="number"].form-control,
+.sd-admin input[type="date"].form-control {
+    font-variant-numeric: tabular-nums;
+}
+
+.sd-admin textarea.form-control {
+    height: auto;
+}
+
+.sd-admin .form-control.input-sm,
+.sd-admin select.form-control.input-sm {
+    font-size: 12px;
+    height: 32px;
+    min-height: 32px;
+}
+
+.sd-admin .form-control.input-lg {
+    height: 46px;
+    min-height: 46px;
 }
 
 .sd-admin :focus-visible {
@@ -167,7 +220,7 @@
     display: flex;
     gap: 28px;
     justify-content: space-between;
-    padding: 22px 2px 20px;
+    padding: 28px 4px 23px;
 }
 
 .sd-page-heading {
@@ -192,8 +245,10 @@
 .sd-panel-lead {
     color: var(--sd-muted);
     font-size: 14px;
+    line-height: 1.55;
     margin-bottom: 0;
     max-width: 68ch;
+    text-wrap: pretty;
 }
 
 .sd-page-meta {
@@ -222,49 +277,68 @@
 .sd-module-mark {
     align-items: center;
     background: var(--sd-ink);
-    border-radius: 6px;
+    border-radius: 9px;
     color: #fff;
     display: inline-flex;
     font-size: 10px;
     font-weight: 800;
-    height: 34px;
+    height: 38px;
     justify-content: center;
     letter-spacing: 0.08em;
-    width: 38px;
+    width: 42px;
 }
 
 /* Primary module navigation */
 .sd-nav {
-    align-items: center;
-    background: var(--sd-surface);
-    border: 1px solid var(--sd-line);
-    border-radius: var(--sd-radius);
-    display: flex;
-    gap: 2px;
-    margin-bottom: 18px;
+    border-bottom: 1px solid var(--sd-line-strong);
+    display: block;
+    margin-bottom: 22px;
     overflow-x: auto;
-    padding: 5px;
+    overflow-y: hidden;
+    padding: 0 4px;
+    scroll-padding-inline: 24px;
     scrollbar-width: thin;
+}
+
+.sd-nav-tabs {
+    align-items: flex-end;
+    display: flex;
+    gap: 3px;
+    list-style: none;
+    margin: 0;
+    min-width: max-content;
+    padding: 0;
+}
+
+.sd-nav-item {
+    flex: 0 0 auto;
+    margin: 0;
+    padding: 0;
 }
 
 .sd-nav-link {
     align-items: center;
-    border-radius: 5px;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 7px 7px 0 0;
     color: #53616d !important;
     display: inline-flex;
-    flex: 0 0 auto;
     font-size: 12px;
     font-weight: 600;
     gap: 7px;
-    min-height: 36px;
-    padding: 7px 10px;
+    margin-bottom: -1px;
+    min-height: 43px;
+    padding: 9px 13px 10px;
+    position: relative;
     text-decoration: none !important;
-    transition: background-color 160ms ease, color 160ms ease, transform 160ms ease;
+    transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease, transform 160ms ease;
 }
 
 .sd-nav-link:hover,
 .sd-nav-link:focus {
-    background: var(--sd-surface-soft);
+    background: #eef3f1;
+    border-color: #dbe4e0;
+    border-bottom-color: var(--sd-line-strong);
     color: var(--sd-ink) !important;
 }
 
@@ -273,8 +347,18 @@
 }
 
 .sd-nav-link.is-active {
-    background: var(--sd-surface-accent);
+    background: var(--sd-surface);
+    border-color: var(--sd-line-strong);
+    border-bottom-color: var(--sd-surface);
+    box-shadow: inset 0 3px 0 var(--sd-accent);
     color: var(--sd-accent-dark) !important;
+    z-index: 1;
+}
+
+.sd-nav-link.is-active:hover,
+.sd-nav-link.is-active:focus {
+    background: var(--sd-surface);
+    border-bottom-color: var(--sd-surface);
 }
 
 .sd-main {
@@ -426,6 +510,7 @@
     background: var(--sd-surface);
     border: 1px solid var(--sd-line);
     border-radius: var(--sd-radius-lg);
+    box-shadow: var(--sd-shadow-soft);
     padding: 22px;
 }
 
@@ -851,29 +936,31 @@
 .sd-form-layout {
     align-items: start;
     display: grid;
-    gap: 20px;
-    grid-template-columns: minmax(0, 1fr) 300px;
+    gap: 22px;
+    grid-template-columns: minmax(0, 1fr) 310px;
 }
 
 .sd-form-main {
     display: grid;
-    gap: 18px;
+    gap: 20px;
 }
 
 .sd-form-section {
-    padding: 25px;
+    padding: 28px;
 }
 
 .sd-form-section-heading {
     border-bottom: 1px solid var(--sd-line);
     justify-content: flex-start;
-    margin-bottom: 21px;
-    padding-bottom: 17px;
+    margin-bottom: 23px;
+    padding-bottom: 19px;
 }
 
 .sd-form-section-heading p {
     color: var(--sd-muted);
     margin-bottom: 0;
+    max-width: 74ch;
+    text-wrap: pretty;
 }
 
 .sd-step {
@@ -892,7 +979,7 @@
 }
 
 .sd-field {
-    margin-bottom: 18px;
+    margin-bottom: 20px;
 }
 
 .sd-field:last-child {
@@ -905,21 +992,23 @@
     display: block;
     font-size: 12px;
     font-weight: 650;
-    margin-bottom: 6px;
+    line-height: 1.4;
+    margin-bottom: 7px;
 }
 
 .sd-help {
     color: var(--sd-muted);
     display: block;
-    font-size: 10.5px;
-    line-height: 1.45;
-    margin-top: 5px;
+    font-size: 11px;
+    line-height: 1.5;
+    margin-top: 6px;
+    text-wrap: pretty;
 }
 
 .sd-field-grid,
 .sd-account-grid {
     display: grid;
-    gap: 16px;
+    gap: 18px;
     grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
@@ -932,7 +1021,7 @@
     border: 1px solid var(--sd-line);
     border-radius: 8px;
     margin: 0;
-    padding: 14px;
+    padding: 16px;
 }
 
 .sd-sublabel {
@@ -957,7 +1046,7 @@
     background: var(--sd-surface-soft);
     border: 1px solid var(--sd-line);
     border-radius: 8px;
-    padding: 13px 14px;
+    padding: 15px 16px;
 }
 
 .sd-field--danger-zone {
@@ -1048,6 +1137,374 @@
     border-radius: 8px;
     margin: -8px 0 18px;
     padding: 13px;
+}
+
+.sd-section-heading--setup {
+    align-items: flex-start;
+    border-top: 1px solid var(--sd-line);
+    margin: 28px 0 16px;
+    padding-top: 24px;
+}
+
+.sd-section-heading--setup .sd-kicker {
+    margin-bottom: 4px;
+}
+
+.sd-section-heading--setup h3 {
+    font-size: 17px;
+    margin-bottom: 4px;
+}
+
+.sd-field-grid--policies {
+    align-items: stretch;
+    margin-bottom: 18px;
+}
+
+.sd-policy-card {
+    background: #f8faf9;
+    border-color: #d8e3df;
+    display: flex;
+    flex-direction: column;
+    margin: 0;
+    min-width: 0;
+    padding: 17px 18px;
+}
+
+.sd-policy-card:hover,
+.sd-policy-card:focus-within {
+    border-color: #b8cec7;
+}
+
+.sd-policy-card__heading {
+    align-items: flex-start;
+    border-bottom: 1px solid #e1e8e5;
+    display: flex;
+    gap: 12px;
+    justify-content: space-between;
+    margin-bottom: 14px;
+    padding-bottom: 12px;
+}
+
+.sd-policy-card__heading .sd-label {
+    color: var(--sd-ink);
+    font-size: 13px;
+    margin: 1px 0 0;
+}
+
+.sd-policy-card__heading .sd-status {
+    flex: 0 0 auto;
+}
+
+.sd-policy-card > label:not(.sd-switch) {
+    font-size: 11px;
+    margin-bottom: 5px;
+}
+
+.sd-policy-card .sd-help {
+    margin-top: 10px;
+}
+
+.sd-policy-card .sd-help i {
+    color: var(--sd-info);
+    margin-right: 4px;
+}
+
+/* Tax profiles keep the original module's selectable account model, but expose
+   the safety state and explanation without turning the page into a flat form. */
+.sd-tax-profile {
+    background: #fff !important;
+    border: 1px solid var(--sd-line-strong) !important;
+    border-radius: 10px !important;
+    box-shadow: 0 1px 2px rgba(31, 58, 52, 0.035);
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    padding: 0 0 18px !important;
+    transition: border-color 170ms ease, box-shadow 170ms ease, transform 170ms ease;
+}
+
+@media (hover: hover) {
+    .sd-tax-profile:hover {
+        border-color: #b2c8c1 !important;
+        box-shadow: 0 7px 18px rgba(31, 58, 52, 0.07);
+        transform: translateY(-1px);
+    }
+}
+
+.sd-tax-profile:focus-within {
+    border-color: var(--sd-accent) !important;
+    box-shadow: 0 0 0 3px rgba(22, 117, 104, 0.1), 0 7px 18px rgba(31, 58, 52, 0.06);
+}
+
+.sd-tax-profile__header {
+    align-items: flex-start;
+    background: #f7f9f8;
+    border-bottom: 1px solid var(--sd-line);
+    border-radius: 9px 9px 0 0;
+    display: flex;
+    gap: 14px;
+    justify-content: space-between;
+    padding: 16px 18px 14px;
+}
+
+.sd-tax-profile__header > div {
+    min-width: 0;
+}
+
+.sd-tax-profile__header .sd-kicker {
+    font-size: 9px;
+    margin-bottom: 3px;
+}
+
+.sd-tax-profile__header h3 {
+    font-size: 15px;
+    margin: 0;
+    text-wrap: balance;
+}
+
+.sd-tax-profile__header .sd-status {
+    flex: 0 0 auto;
+    margin-top: 1px;
+}
+
+.sd-tax-profile__body {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    padding: 0 18px;
+}
+
+.sd-tax-profile__description {
+    color: var(--sd-muted);
+    font-size: 11.5px;
+    line-height: 1.55;
+    margin: 15px 18px 2px;
+    text-wrap: pretty;
+}
+
+.sd-tax-profile__description code {
+    background: #eef2f1;
+    border-radius: 3px;
+    color: #3e514b;
+    font-size: 0.92em;
+    padding: 1px 4px;
+}
+
+.sd-tax-profile > label:not(.sd-check-control),
+.sd-tax-profile__body > label:not(.sd-check-control) {
+    margin: 15px 18px 6px;
+}
+
+.sd-tax-profile > .form-control {
+    margin-left: 18px;
+    margin-right: 18px;
+    width: calc(100% - 36px);
+}
+
+.sd-tax-profile__body > .form-control {
+    width: 100%;
+}
+
+.sd-tax-profile > .sd-help {
+    margin: 6px 18px 0;
+}
+
+.sd-tax-profile__body > .sd-help {
+    margin-left: 0;
+    margin-right: 0;
+}
+
+.sd-tax-profile > .sd-sublabel,
+.sd-tax-profile__body > .sd-sublabel {
+    border-top: 1px solid #edf0ef;
+    margin-top: 17px;
+    padding-top: 14px;
+}
+
+.sd-tax-rule-heading {
+    align-items: center;
+    border-top: 1px solid #edf0ef;
+    display: flex;
+    gap: 6px;
+    justify-content: flex-start;
+    margin: 17px 18px 6px;
+    padding-top: 14px;
+}
+
+.sd-tax-rule-heading .sd-sublabel {
+    margin: 0;
+}
+
+.sd-tax-profile .sd-tax-rule-input {
+    max-width: 170px;
+}
+
+.sd-tax-profile > .sd-check-control--compact,
+.sd-tax-profile__body > .sd-check-control--compact {
+    background: #fbf8ef;
+    border-top-color: #ead9ac;
+    color: #5f4d2c;
+    margin: 16px 0 -18px !important;
+    padding: 14px 18px 16px;
+}
+
+.sd-tax-profile__meta {
+    align-items: center;
+    border-top: 1px solid var(--sd-line);
+    color: var(--sd-muted);
+    display: flex;
+    flex-wrap: wrap;
+    font-size: 10px;
+    gap: 7px 12px;
+    margin-top: 16px;
+    padding-top: 12px;
+}
+
+.sd-info-note {
+    align-items: flex-start;
+    background: #f1f6f8;
+    border: 1px solid #d1e0e7;
+    border-radius: 8px;
+    color: #365567;
+    display: flex;
+    font-size: 11px;
+    gap: 9px;
+    line-height: 1.5;
+    padding: 11px 13px;
+}
+
+.sd-info-note > i {
+    color: var(--sd-info);
+    flex: 0 0 auto;
+    margin-top: 3px;
+}
+
+.sd-info-dot {
+    color: var(--sd-info);
+    cursor: help;
+    display: inline-flex;
+    font-size: 12px;
+    margin-left: 3px;
+    vertical-align: 1px;
+}
+
+.sd-info {
+    display: inline-flex;
+    margin-left: 4px;
+    position: relative;
+    vertical-align: middle;
+}
+
+.sd-info-trigger {
+    align-items: center;
+    background: #eef4f6;
+    border: 1px solid #cbdce4;
+    border-radius: 50%;
+    color: var(--sd-info);
+    cursor: help;
+    display: inline-flex;
+    font-size: 10px;
+    height: 20px;
+    justify-content: center;
+    list-style: none;
+    line-height: 1;
+    padding: 0;
+    transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease, transform 150ms ease;
+    width: 20px;
+}
+
+.sd-info-trigger::-webkit-details-marker {
+    display: none;
+}
+
+.sd-info-trigger::marker {
+    content: "";
+}
+
+.sd-info-trigger:hover,
+.sd-info-trigger:focus-visible,
+.sd-info[open] > .sd-info-trigger {
+    background: #dfecef;
+    border-color: #94b4c3;
+    color: #2f607b;
+    transform: translateY(-1px);
+}
+
+.sd-info-popover {
+    background: #26343d;
+    border: 1px solid #43525c;
+    border-radius: 7px;
+    bottom: calc(100% + 9px);
+    box-shadow: 0 10px 26px rgba(24, 38, 46, 0.2);
+    color: #f5f8f9;
+    display: block;
+    font-size: 11px;
+    font-weight: 500;
+    left: 50%;
+    line-height: 1.5;
+    max-width: calc(100vw - 48px);
+    opacity: 0;
+    padding: 10px 12px;
+    pointer-events: none;
+    position: absolute;
+    text-align: left;
+    text-transform: none;
+    transform: translate(-50%, 4px);
+    transition: opacity 150ms ease, transform 150ms ease, visibility 150ms ease;
+    visibility: hidden;
+    white-space: normal;
+    width: 290px;
+    overflow-wrap: anywhere;
+    z-index: 30;
+}
+
+.sd-info-popover strong,
+.sd-info-popover span {
+    display: block;
+}
+
+.sd-info-popover strong {
+    color: #fff;
+    font-size: 11px;
+    margin-bottom: 3px;
+}
+
+.sd-info-popover span {
+    color: #dbe3e7;
+}
+
+.sd-info:hover .sd-info-popover,
+.sd-info:focus-within .sd-info-popover,
+.sd-info[open] > .sd-info-popover,
+.sd-info-trigger:hover + .sd-info-popover,
+.sd-info-trigger:focus + .sd-info-popover,
+.sd-info-trigger[aria-expanded="true"] + .sd-info-popover {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translate(-50%, 0);
+    visibility: visible;
+}
+
+.sd-tax-profile .sd-info-popover,
+.sd-policy-card .sd-info-popover {
+    left: auto;
+    right: 0;
+    transform: translateY(4px);
+}
+
+.sd-tax-profile .sd-info:hover .sd-info-popover,
+.sd-tax-profile .sd-info:focus-within .sd-info-popover,
+.sd-tax-profile .sd-info[open] > .sd-info-popover,
+.sd-tax-profile .sd-info-trigger:hover + .sd-info-popover,
+.sd-tax-profile .sd-info-trigger:focus + .sd-info-popover,
+.sd-tax-profile .sd-info-trigger[aria-expanded="true"] + .sd-info-popover,
+.sd-policy-card .sd-info:hover .sd-info-popover,
+.sd-policy-card .sd-info:focus-within .sd-info-popover,
+.sd-policy-card .sd-info[open] > .sd-info-popover,
+.sd-policy-card .sd-info-trigger:hover + .sd-info-popover,
+.sd-policy-card .sd-info-trigger:focus + .sd-info-popover,
+.sd-policy-card .sd-info-trigger[aria-expanded="true"] + .sd-info-popover {
+    transform: translateY(0);
 }
 
 .sd-form-aside {
@@ -1844,20 +2301,16 @@
 /* WHMCS is often used in narrower admin frames; collapse early and predictably. */
 @media (max-width: 1180px) {
     .sd-nav-link {
-        padding-left: 9px;
-        padding-right: 9px;
-    }
-
-    .sd-nav-link span {
-        display: none;
+        padding-left: 11px;
+        padding-right: 11px;
     }
 
     .sd-nav-link i {
-        font-size: 14px;
+        font-size: 13px;
     }
 
     .sd-form-layout {
-        grid-template-columns: minmax(0, 1fr) 270px;
+        grid-template-columns: minmax(0, 1fr) 280px;
     }
 
     .sd-filter-bar {
@@ -1876,8 +2329,8 @@
 
 @media (max-width: 900px) {
     .sd-admin {
-        padding-left: 2px;
-        padding-right: 2px;
+        padding-left: 16px;
+        padding-right: 16px;
     }
 
     .sd-summary-strip,
@@ -1917,6 +2370,10 @@
     .sd-account-grid,
     .sd-health-grid {
         grid-template-columns: 1fr;
+    }
+
+    .sd-tax-profile__description {
+        max-width: 76ch;
     }
 
     .sd-preflight {
@@ -1968,6 +2425,13 @@
 }
 
 @media (max-width: 640px) {
+    .sd-admin {
+        border-radius: 10px;
+        padding-bottom: 36px;
+        padding-left: 10px;
+        padding-right: 10px;
+    }
+
     .sd-page-header {
         align-items: flex-start;
         padding-top: 14px;
@@ -1981,8 +2445,11 @@
         font-size: 24px;
     }
 
-    .sd-nav-link span {
-        display: inline;
+    .sd-nav-link {
+        font-size: 11px;
+        gap: 6px;
+        padding-left: 10px;
+        padding-right: 10px;
     }
 
     .sd-summary-strip,
@@ -2009,6 +2476,76 @@
     .sd-job-counts,
     .sd-meta-list {
         grid-template-columns: 1fr;
+    }
+
+    .sd-policy-card__heading,
+    .sd-tax-profile__header {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .sd-tax-profile__header .sd-status,
+    .sd-policy-card__heading .sd-status {
+        margin-top: 2px;
+    }
+
+    .sd-tax-profile__description {
+        margin-left: 15px;
+        margin-right: 15px;
+    }
+
+    .sd-tax-profile > label:not(.sd-check-control),
+    .sd-tax-profile__body > label:not(.sd-check-control) {
+        margin-left: 15px;
+        margin-right: 15px;
+    }
+
+    .sd-tax-profile > .form-control {
+        margin-left: 15px;
+        margin-right: 15px;
+        width: calc(100% - 30px);
+    }
+
+    .sd-tax-profile > .sd-help {
+        margin-left: 15px;
+        margin-right: 15px;
+    }
+
+    .sd-tax-profile > .sd-check-control--compact,
+    .sd-tax-profile__body > .sd-check-control--compact {
+        padding-left: 15px;
+        padding-right: 15px;
+    }
+
+    .sd-info-popover,
+    .sd-tax-profile .sd-info-popover,
+    .sd-policy-card .sd-info-popover {
+        left: 0;
+        max-width: calc(100vw - 56px);
+        right: auto;
+        transform: translateY(4px);
+        width: 250px;
+    }
+
+    .sd-info:hover .sd-info-popover,
+    .sd-info:focus-within .sd-info-popover,
+    .sd-info[open] > .sd-info-popover,
+    .sd-info-trigger:hover + .sd-info-popover,
+    .sd-info-trigger:focus + .sd-info-popover,
+    .sd-info-trigger[aria-expanded="true"] + .sd-info-popover,
+    .sd-tax-profile .sd-info:hover .sd-info-popover,
+    .sd-tax-profile .sd-info:focus-within .sd-info-popover,
+    .sd-tax-profile .sd-info[open] > .sd-info-popover,
+    .sd-tax-profile .sd-info-trigger:hover + .sd-info-popover,
+    .sd-tax-profile .sd-info-trigger:focus + .sd-info-popover,
+    .sd-tax-profile .sd-info-trigger[aria-expanded="true"] + .sd-info-popover,
+    .sd-policy-card .sd-info:hover .sd-info-popover,
+    .sd-policy-card .sd-info:focus-within .sd-info-popover,
+    .sd-policy-card .sd-info[open] > .sd-info-popover,
+    .sd-policy-card .sd-info-trigger:hover + .sd-info-popover,
+    .sd-policy-card .sd-info-trigger:focus + .sd-info-popover,
+    .sd-policy-card .sd-info-trigger[aria-expanded="true"] + .sd-info-popover {
+        transform: translateY(0);
     }
 
     .sd-filter-submit .btn {

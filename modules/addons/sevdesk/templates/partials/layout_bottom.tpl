@@ -10,5 +10,3 @@
 
     <div class="sr-only" aria-live="polite" aria-atomic="true" data-live-region></div>
 </div>
-
-<script src="../modules/addons/sevdesk/assets/js/admin.js?v=2.0.0" defer></script>

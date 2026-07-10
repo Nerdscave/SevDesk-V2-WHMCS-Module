@@ -5,6 +5,7 @@ declare(strict_types=1);
 use WHMCS\Database\Capsule;
 use WHMCS\Module\Addon\SevDesk\Application;
 use WHMCS\Module\Addon\SevDesk\Database\Migrator;
+use WHMCS\Module\Addon\SevDesk\Support\AdminAssets;
 
 if (!defined('WHMCS')) {
     http_response_code(403);
@@ -112,6 +113,22 @@ function sevdesk_enqueue_transaction_review(array $vars): void
         }
     }
 }
+
+add_hook('AdminAreaHeadOutput', 1, static function (): string {
+    if (($_GET['module'] ?? null) !== 'sevdesk') {
+        return '';
+    }
+
+    return AdminAssets::stylesheetMarkup();
+});
+
+add_hook('AdminAreaFooterOutput', 1, static function (): string {
+    if (($_GET['module'] ?? null) !== 'sevdesk') {
+        return '';
+    }
+
+    return AdminAssets::scriptMarkup();
+});
 
 add_hook('InvoiceCreated', 1, static fn (array $vars) => sevdesk_enqueue_invoice($vars, 'InvoiceCreated'));
 add_hook('InvoicePaid', 1, static fn (array $vars) => sevdesk_enqueue_invoice($vars, 'InvoicePaid'));

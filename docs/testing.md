@@ -8,7 +8,7 @@ Die Tests verwenden ausschließlich synthetische Kunden, Invoices und API-Fixtur
 
 ## Aktueller automatisierter Nachweis
 
-- 88 schnelle Unit-/Contract-/Kompositionstests mit 325 Assertions sind lokal grün;
+- 98 schnelle Unit-/Contract-/Kompositionstests mit 462 Assertions sind lokal grün;
 - PHP-Lint und PSR-12 laufen über den vollständigen Modul- und Testbaum;
 - PHPStan analysiert den vollständigen PHP-Modulcode auf Level 6;
 - 29 MariaDB-Integrationstests prüfen eine kleine synthetische Legacy-Struktur, echte Unique-Constraints, Deduplizierung, Candidate-/Remote-ID-Erhalt und parallele Claims;
@@ -183,6 +183,25 @@ Diese Punkte werden manuell oder mit passenden Browsertests geprüft:
 - keine unescaped API-Meldung im HTML;
 - keine PII in URL oder Querystring;
 - Rollen ohne Modulzugriff können weder Jobs lesen noch starten.
+- Modul-CSS und -JavaScript werden auch dann geladen, wenn der Webserver direkte
+  Requests auf `/modules/addons/sevdesk/assets` verweigert; auf anderen Adminseiten
+  werden die Assets nicht eingebunden.
+- Dashboard und Einrichtung bei breitem Desktop, schmalem WHMCS-Inhaltsbereich und
+  mobiler Breite prüfen; kein Steuerprofil darf horizontal aus dem Inhalt laufen.
+- Jede Info-Hilfe ausschließlich per Tastatur öffnen, schließen und fokussieren;
+  der wesentliche Hinweis muss unabhängig vom Popover als sichtbarer Hilfetext
+  lesbar bleiben.
+- Die sechs Steuerprofile zeigen sprechende Kontonamen und AccountDatev-ID. Eine
+  gespeicherte, aktuell nicht gelistete ID bleibt als Warnoption ausgewählt.
+- Receipt-Guidance-Ausfall simulieren: Der numerische Konto-Fallback bleibt nutzbar
+  und keine vorhandene Einstellung wird durch leere Auswahl überschrieben.
+- Status-Badges und Warnungen ohne Farbwahrnehmung prüfen; Text oder Symbol müssen
+  den Zustand eindeutig benennen.
+- Modulnavigation bei 1180, 768 und 375 Pixeln prüfen: Alle Tab-Beschriftungen
+  bleiben erhalten, die Leiste scrollt horizontal und der aktive Tab wird sichtbar
+  in den Ausschnitt gerückt.
+- Navigation nur per Tastatur durchlaufen. Die Seitenlinks verwenden
+  `aria-current="page"`; ARIA-Tabrollen bleiben echten In-Page-Tabpanels vorbehalten.
 
 ## Sicherheitsprüfungen
 

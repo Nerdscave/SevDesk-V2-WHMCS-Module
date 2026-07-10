@@ -78,7 +78,9 @@ final class AdminController
 
         $settings = $this->application->config->all();
         $storedToken = trim((string) ($settings['sevdesk_api_key'] ?? ''));
-        $settings['sevdesk_api_key_masked'] = $storedToken === '' ? 'Noch kein Token gespeichert' : '••••••••' . substr($storedToken, -4);
+        $settings['sevdesk_api_key_placeholder'] = $storedToken === ''
+            ? 'Noch kein Token gespeichert'
+            : 'Token gespeichert – leer lassen zum Beibehalten';
         unset($settings['sevdesk_api_key']);
         $start = DateTimeImmutable::createFromFormat('!d-m-Y', (string) ($settings['import_after'] ?? ''));
         $settings['import_after_iso'] = $start instanceof DateTimeImmutable ? $start->format('Y-m-d') : (string) ($settings['import_after'] ?? '');
