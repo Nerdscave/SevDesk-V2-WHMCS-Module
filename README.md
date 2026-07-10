@@ -60,7 +60,7 @@ Für den Rewrite waren vor allem diese Probleme ausschlaggebend:
 2. EU-B2C-Rechnungen konnten mit einer B2B-Steuerregel an sevDesk gesendet werden. sevDesk quittierte die unzulässige Kombination aus Steuerregel und Konto mit HTTP 422.
 3. Massenexporte liefen in einem einzigen Browser-Request. Proxy- oder PHP-Timeouts, nicht abgefangene Fehler und unklare Zwischenzustände machten große Nachläufe unsicher.
 
-Die bereinigte Bestandsaufnahme in [docs/legacy-analysis.md](docs/legacy-analysis.md) beschreibt das Fehlerbild und den bestehenden Datenvertrag.
+Der [Legacy-Datenvertrag](docs/legacy-analysis.md) beschreibt das Fehlerbild und die für Migration und Recovery relevanten Altzustände.
 
 ## Technischer Aufbau
 
@@ -73,7 +73,7 @@ Es gibt keinen separaten Queue-Server. Die Admin-Oberfläche startet und beobach
 | Dokument                                                   | Inhalt                                                   |
 | ------------------------------------------------------------| ----------------------------------------------------------|
 | [docs/architecture.md](docs/architecture.md)               | Zielarchitektur, Datenmodell, Zustände und Fehlergrenzen |
-| [docs/legacy-analysis.md](docs/legacy-analysis.md)         | Bereinigte Bestandsaufnahme und Legacy-Datenvertrag      |
+| [docs/legacy-analysis.md](docs/legacy-analysis.md)         | Legacy-Datenvertrag und relevante Altzustände            |
 | [docs/sevdesk-api-and-tax.md](docs/sevdesk-api-and-tax.md) | API-Vertrag, Steuerklassifikation und blockierte Fälle   |
 | [docs/implementation-plan.md](docs/implementation-plan.md) | Feste Umsetzungsschritte mit Abnahmekriterien            |
 | [docs/testing.md](docs/testing.md)                         | Teststrategie und Release-Gates                          |
@@ -92,7 +92,7 @@ Nicht ins Repository gehören:
 - Kundenadressen, Namen, E-Mail-Adressen oder Rechnungs-PDFs;
 - vollständige API-Requests oder -Responses mit personenbezogenen Daten.
 
-Abstrahierte Zahlen und Fehlerklassen dürfen dokumentiert werden, wenn sie keine Rückschlüsse auf Personen oder Zugangsdaten ermöglichen.
+Produktive Bestandszahlen, Zeiträume, Statusverteilungen und konkrete Einstellungswerte werden nicht im Repository dokumentiert.
 
 ## Anforderungen und Quickstart
 
