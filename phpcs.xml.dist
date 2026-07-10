@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<ruleset name="WHMCS sevdesk module">
+    <description>PSR-12 checks for the rewrite and its tests.</description>
+    <file>modules/addons/sevdesk</file>
+    <file>tests</file>
+    <exclude-pattern>*/vendor/*</exclude-pattern>
+    <arg name="colors"/>
+    <arg value="sp"/>
+    <arg name="extensions" value="php"/>
+    <arg name="warning-severity" value="0"/>
+    <rule ref="PSR12"/>
+    <rule ref="Generic.Files.LineLength">
+        <properties>
+            <property name="lineLimit" value="120"/>
+            <property name="absoluteLineLimit" value="180"/>
+        </properties>
+    </rule>
+</ruleset>

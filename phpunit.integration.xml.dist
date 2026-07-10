@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:noNamespaceSchemaLocation="https://schema.phpunit.de/11.5/phpunit.xsd"
+         bootstrap="tests/Integration/bootstrap.php"
+         colors="true"
+         cacheDirectory=".phpunit.integration.cache"
+         failOnWarning="true"
+         failOnRisky="true">
+    <testsuites>
+        <testsuite name="sevdesk MariaDB integration">
+            <directory>tests/Integration</directory>
+            <exclude>tests/Integration/Fixtures</exclude>
+            <exclude>tests/Integration/Support</exclude>
+        </testsuite>
+    </testsuites>
+    <source>
+        <include>
+            <directory suffix=".php">modules/addons/sevdesk/lib</directory>
+        </include>
+    </source>
+</phpunit>

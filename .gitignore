@@ -1,7 +1,4 @@
-# Private Analysequellen; niemals einchecken
-/Mail - #*.txt
-/whmcs-context-and-sevdesk-export-*/
-/old-module/
+# Private und lokale Arbeitsdaten
 /private/
 /secrets/
 /dumps/
@@ -21,6 +18,22 @@
 *.sql.gz
 *.dump
 *.tsv
+*.csv
+*.xls
+*.xlsx
+*.pdf
+*.eml
+*.mbox
+*.msg
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+*.bak
+*.sqlite
+*.sqlite3
+*.db
 
 # PHP/Composer
 /vendor/
