@@ -1,93 +1,140 @@
-# SevDesk V2 WHMCS Module
+# WHMCS-sevDesk-Modul für sevDesk-Update 2.0
 
+Dieses Repository ersetzt ein nicht mehr gepflegtes WHMCS-sevDesk-Modul. Das Addon ist für WHMCS 8.13.4 und PHP 8.3 gebaut. Es übernimmt vorhandene Zuordnungen und exportiert WHMCS-Rechnungen als Belege nach sevDesk.
 
+> Code und Release-Paket liegen vor, sind aber noch nicht für Produktivdaten freigegeben. Automatisierte Tests prüfen die Fachlogik sowie das HTTP- und Persistenzverhalten. Auch die statische Analyse des PHP-Codes läuft durch.
+>
+> Vor der Freigabe müssen in der Zielumgebung noch der echte MariaDB-Lauf, der WHMCS-8.13.4-Runtime-Test, die lesende API-Prüfung und der sevDesk-Canary aus [docs/operations.md](docs/operations.md) erfolgreich sein. Bis dahin bleibt `sync_enabled` ausgeschaltet.
 
-## Getting started
+## Wichtige Begriffe
 
-To make it easy for you to get started with GitLab, here's a list of recommended next steps.
+„sevDesk-Update 2.0“ bezeichnet die Buchhaltungslogik mit `taxRule`, `accountDatev` und strenger Kontenprüfung. Es ist **keine API unter `/api/v2`**. Die API-Basis bleibt:
 
-Already a pro? Just edit this README.md and make it your own. Want to make it easy? [Use the template at the bottom](#editing-this-readme)!
-
-## Add your files
-
-* [Create](https://docs.gitlab.com/user/project/repository/web_editor/#create-a-file) or [upload](https://docs.gitlab.com/user/project/repository/web_editor/#upload-a-file) files
-* [Add files using the command line](https://docs.gitlab.com/topics/git/add_files/#add-files-to-a-git-repository) or push an existing Git repository with the following command:
-
-```
-cd existing_repo
-git remote add origin https://git.minerswin.de/nerdscave-hosting/sevdesk-v2-whmcs-module.git
-git branch -M main
-git push -uf origin main
+```text
+https://my.sevdesk.de/api/v1
 ```
 
-## Integrate with your tools
+Die mitgelieferte [OpenAPI-Spezifikation](docs/sevdesk-openapi.yaml) ist die technische Referenz für Endpunkte und Payloads.
 
-* [Set up project integrations](https://git.minerswin.de/nerdscave-hosting/sevdesk-v2-whmcs-module/-/settings/integrations)
+## Festgelegter Umfang
 
-## Collaborate with your team
+Das Modul muss in Version 2.0.0:
 
-* [Invite team members and collaborators](https://docs.gitlab.com/user/project/members/)
-* [Create a new merge request](https://docs.gitlab.com/user/project/merge_requests/creating_merge_requests/)
-* [Automatically close issues from merge requests](https://docs.gitlab.com/user/project/issues/managing_issues/#closing-issues-automatically)
-* [Enable merge request approvals](https://docs.gitlab.com/user/project/merge_requests/approvals/)
-* [Set auto-merge](https://docs.gitlab.com/user/project/merge_requests/auto_merge/)
+- unter WHMCS 8.13.4 und PHP 8.3 ohne ionCube laufen;
+- den bestehenden Modulnamen `sevdesk`, die funktionalen Addon-Einstellungen und `mod_sevdesk` weiterverwenden;
+- WHMCS-Rechnungen zunächst als sevDesk-`Voucher` samt WHMCS-PDF anlegen;
+- Einzel- und Massenexporte als persistente, wiederaufnehmbare Jobs verarbeiten;
+- pro Rechnung ein nachvollziehbares Ergebnis speichern und nach Einzelfehlern weiterarbeiten;
+- doppelte Belege durch bestehende Zuordnungen, Reservierung und Abgleich verhindern;
+- `taxRule`, `accountDatev` und Steuersatz vor dem Schreiben über `ReceiptGuidance` prüfen;
+- Hooks kurz halten: Sie planen Arbeit ein, werfen aber keine API-Fehler in den WHMCS-Kern zurück;
+- vollständige Zahlungen und echte Teilzahlungen über einen serverseitig paginierten Buchungsassistenten in zwei Schritten buchen;
+- eine ausdrücklich bestätigte WHMCS-Rückzahlung als eigenen negativen Korrektur-Voucher mit geprüften Positionen und stabilen Reconciliation-Markern anlegen;
+- API-Token und personenbezogene Daten in Logs schützen.
 
-## Test and Deploy
+Nicht enthalten sind:
 
-Use the built-in continuous integration in GitLab.
+- eine `/api/v2`-Anbindung;
+- eine Rücksynchronisation von sevDesk nach WHMCS und sevDesk-Webhooks;
+- eine externe Queue, ein zusätzlicher Dienst oder ein eigenes Framework;
+- automatische OSS-Voucher, weil die sevDesk-Regeln 18 bis 20 für Voucher nicht unterstützt werden;
+- automatische Refund-, Chargeback-, Gutschrift- oder Storno-Verarbeitung ohne Einzelfallprüfung;
+- die Lizenzprüfung des Vorgängermoduls;
+- unscharfes Zahlungs-Matching nach Name oder ungefähr passendem Betrag.
 
-* [Get started with GitLab CI/CD](https://docs.gitlab.com/ci/quick_start/)
-* [Analyze your code for known vulnerabilities with Static Application Security Testing (SAST)](https://docs.gitlab.com/user/application_security/sast/)
-* [Deploy to Kubernetes, Amazon EC2, or Amazon ECS using Auto Deploy](https://docs.gitlab.com/topics/autodevops/requirements/)
-* [Use pull-based deployments for improved Kubernetes management](https://docs.gitlab.com/user/clusters/agent/)
-* [Set up protected environments](https://docs.gitlab.com/ci/environments/protected_environments/)
+`BookingService` mit der Jobaktion `book_payment` und `CorrectionService` mit `correction_voucher` gehören zu Release 2.0.0.
 
-***
+Bei Zahlungen erstellt das Modul zunächst eine rein lesende Vorschau. Eine Buchung ist nur zulässig, wenn WHMCS-Referenz, Betrag und Währung übereinstimmen, Mapping und Voucher-Saldo seit der Bestätigung unverändert sind und genau eine ungebuchte sevDesk-Banktransaktion zugeordnet werden kann.
 
-# Editing this README
+Bei Korrekturen prüft das Modul die Auswahl zunächst nur lokal. Ein Administrator bestätigt einzelne Fälle und reiht sie als Jobs ein. Vor dem Schreiben validiert der Worker jeden Kandidaten erneut.
 
-When you're ready to make this README your own, just edit this file and use the handy template below (or feel free to structure it however you want - this is just a starting point!). Thanks to [makeareadme.com](https://www.makeareadme.com/) for this template.
+Korrektur-Voucher entstehen nie automatisch. Ein Administrator muss eine einzelne WHMCS-Rückzahlung auswählen. Das Modul erzeugt daraus einen negativen Revenue-Voucher und schützt ihn mit einem gehashten Refund-Marker vor Duplikaten. Chargebacks bleiben blockiert.
 
-## Suggestions for a good README
+Nach einem Kontakt- oder Korrektur-POST mit unbekanntem Ergebnis darf die Recovery nur lesen. Eine leere Suche beweist nicht, dass der POST fehlgeschlagen ist. Deshalb darf das Modul den Kontakt oder Voucher nicht automatisch erneut anlegen.
 
-Every project is different, so consider which of these sections apply to yours. The sections used in the template are suggestions for most open source projects. Also keep in mind that while a README can be too long and detailed, too long is better than too short. If you think your README is too long, consider utilizing another form of documentation rather than cutting out information.
+## Warum der Rewrite nötig ist
 
-## Name
-Choose a self-explaining name for your project.
+Für den Rewrite waren vor allem diese Probleme ausschlaggebend:
 
-## Description
-Let people know what your project can do specifically. Provide context and add a link to any reference visitors might be unfamiliar with. A list of Features or a Background subsection can also be added here. If there are alternatives to your project, this is a good place to list differentiating factors.
+1. Das verschlüsselte Modul wurde für PHP 8.1 gebaut und blockiert unter PHP 8.3 bereits die Addon-Seiten.
+2. EU-B2C-Rechnungen konnten mit einer B2B-Steuerregel an sevDesk gesendet werden. sevDesk quittierte die unzulässige Kombination aus Steuerregel und Konto mit HTTP 422.
+3. Massenexporte liefen in einem einzigen Browser-Request. Proxy- oder PHP-Timeouts, nicht abgefangene Fehler und unklare Zwischenzustände machten große Nachläufe unsicher.
 
-## Badges
-On some READMEs, you may see small images that convey metadata, such as whether or not all the tests are passing for the project. You can use Shields to add some to your README. Many services also have instructions for adding a badge.
+Die bereinigte Bestandsaufnahme in [docs/legacy-analysis.md](docs/legacy-analysis.md) beschreibt das Fehlerbild und den bestehenden Datenvertrag.
 
-## Visuals
-Depending on what you are making, it can be a good idea to include screenshots or even a video (you'll frequently see GIFs rather than actual videos). Tools like ttygif can help, but check out Asciinema for a more sophisticated method.
+## Technischer Aufbau
 
-## Installation
-Within a particular ecosystem, there may be a common way of installing things, such as using Yarn, NuGet, or Homebrew. However, consider the possibility that whoever is reading your README is a novice and would like more guidance. Listing specific steps helps remove ambiguity and gets people to using your project as quickly as possible. If it only runs in a specific context like a particular programming language version or operating system or has dependencies that have to be installed manually, also add a Requirements subsection.
+Das WHMCS-Addon nutzt die vorhandene Zuordnungstabelle weiter. Bulk-Jobs liegen in der WHMCS-Datenbank und werden in kleinen Batches vom WHMCS-Cron verarbeitet.
 
-## Usage
-Use examples liberally, and show the expected output if you can. It's helpful to have inline the smallest example of usage that you can demonstrate, while providing links to more sophisticated examples if they are too long to reasonably include in the README.
+Es gibt keinen separaten Queue-Server. Die Admin-Oberfläche startet und beobachtet Jobs; sie hält nicht den langen Export-Request offen.
 
-## Support
-Tell people where they can go to for help. It can be any combination of an issue tracker, a chat room, an email address, etc.
+## Dokumentation
 
-## Roadmap
-If you have ideas for releases in the future, it is a good idea to list them in the README.
+| Dokument                                                   | Inhalt                                                   |
+| ------------------------------------------------------------| ----------------------------------------------------------|
+| [docs/architecture.md](docs/architecture.md)               | Zielarchitektur, Datenmodell, Zustände und Fehlergrenzen |
+| [docs/legacy-analysis.md](docs/legacy-analysis.md)         | Bereinigte Bestandsaufnahme und Legacy-Datenvertrag      |
+| [docs/sevdesk-api-and-tax.md](docs/sevdesk-api-and-tax.md) | API-Vertrag, Steuerklassifikation und blockierte Fälle   |
+| [docs/implementation-plan.md](docs/implementation-plan.md) | Feste Umsetzungsschritte mit Abnahmekriterien            |
+| [docs/testing.md](docs/testing.md)                         | Teststrategie und Release-Gates                          |
+| [docs/operations.md](docs/operations.md)                   | Installation, Nachlauf, Monitoring und Störungsbehebung  |
+| [docs/sevdesk-openapi.yaml](docs/sevdesk-openapi.yaml)     | Lokal abgelegte offizielle sevDesk-OpenAPI-Spezifikation |
 
-## Contributing
-State if you are open to contributions and what your requirements are for accepting them.
+## Daten- und Repository-Sicherheit
 
-For people who want to make changes to your project, it's helpful to have some documentation on how to get started. Perhaps there is a script that they should run or some environment variables that they need to set. Make these steps explicit. These instructions could also be useful to your future self.
+Lokale Arbeitsunterlagen, Datenbankexporte und Restore-SQL gehören nicht zum Repository. `.gitignore` schließt sie aus. Sie dürfen weder in Commits noch in Issues oder Logs landen.
 
-You can also document commands to lint the code or run tests. These steps help to ensure high code quality and reduce the likelihood that the changes inadvertently break something. Having instructions for running tests is especially helpful if it requires external setup, such as starting a Selenium server for testing in a browser.
+Nicht ins Repository gehören:
 
-## Authors and acknowledgment
-Show your appreciation to those who have contributed to the project.
+- sevDesk-API-Token oder Lizenzschlüssel;
+- WHMCS-Konfigurationsdateien;
+- unredigierte SQL-/TSV-Exporte;
+- Kundenadressen, Namen, E-Mail-Adressen oder Rechnungs-PDFs;
+- vollständige API-Requests oder -Responses mit personenbezogenen Daten.
 
-## License
-For open source projects, say how it is licensed.
+Abstrahierte Zahlen und Fehlerklassen dürfen dokumentiert werden, wenn sie keine Rückschlüsse auf Personen oder Zugangsdaten ermöglichen.
 
-## Project status
-If you have run out of energy or time for your project, put a note at the top of the README saying that development has slowed down or stopped completely. Someone may choose to fork your project or volunteer to step in as a maintainer or owner, allowing your project to keep going. You can also make an explicit request for maintainers.
+## Anforderungen und Quickstart
+
+Für den Betrieb sind WHMCS 8.13.4, PHP 8.3 für Web und Cron sowie eine von WHMCS unterstützte MariaDB- oder MySQL-Version nötig. Außerdem braucht es einen regelmäßig laufenden WHMCS-Cron und einen sevDesk-Mandanten mit Update 2.0.
+
+Vorgehen beim Drop-in-Wechsel:
+
+1. Datenbank, bisherigen Modulordner und Addon-Settings sichern.
+2. Das neue Verzeichnis `modules/addons/sevdesk` atomar einspielen und das Addon aktivieren oder upgraden.
+3. Bestehende Einstellungen auf der internen Addon-Seite **Einrichtung** prüfen. Das allgemeine WHMCS-Konfigurationsformular enthält keine operativen Felder; `sync_enabled` bleibt nach dem Upgrade ausgeschaltet.
+4. Health Check und vollständigen Dry-Run ausführen. `NULL`-Mappings, Orphans, EU-B2C, Guthaben und Refunds getrennt klären.
+5. Eine einfache deutsche Rechnung als bestätigten Canary exportieren und Beleg, PDF, Konto, `taxRule`, Betrag und Mapping in beiden Systemen prüfen.
+6. Erst danach kleine Zeiträume, anschließend quartalsweise Jobs und zuletzt die automatischen Hooks aktivieren.
+
+Der vollständige Ablauf für Installation, Recovery und Rollback steht in [docs/operations.md](docs/operations.md). Das Release-Archiv baut `tools/build-release.sh 2.0.0` aus einer Positivliste. Lokale Arbeitsdaten, Tests und `vendor/` landen dadurch nicht im Paket.
+
+## Bekannte Freigabegrenzen
+
+- Kein automatischer OSS-Voucher; EU-B2C ist standardmäßig blockiert.
+- EU-B2B Rule 3 ist standardmäßig blockiert und kann nur für bestätigte innergemeinschaftliche Warenlieferungen an Organisationen mit USt-ID und `taxexempt` freigegeben werden. Hosting und andere Dienstleistungen bleiben manuelle Prüffälle.
+- Bei Rechnungen mit Kundenguthaben muss der volle Rechnungsbrutto-Voucher einzeln bestätigt werden. Das Guthaben wird nicht anteilig vom Umsatz abgezogen. Chargebacks und negative Transaktionen ohne eindeutige Klassifikation bleiben blockiert.
+- Keine sevDesk→WHMCS-Synchronisation, Webhooks, Remote-Löschung oder automatische Festschreibung.
+- WHMCS 9 und ein späterer sevDesk-Invoice-/E-Rechnungsmodus sind noch nicht freigegeben.
+- Für die Freigabe mit Produktivdaten fehlen noch der echte MariaDB-Lauf, der WHMCS-8.13.4-Runtime-Test, die lesende API-Prüfung und der sevDesk-Canary.
+
+## Implementierungsstand
+
+Der aktuelle Stand umfasst:
+
+1. PHP-8.3-fähiges Addon-Grundgerüst und additive Datenbankmigration.
+2. Lesender API- und `ReceiptGuidance`-Check.
+3. Reine Steuer- und Payload-Logik mit Regressionstests.
+4. Sicherer Einzelexport in einen sevDesk-Testmandanten.
+5. Persistente Bulk-Jobs und WHMCS-Cron-Worker.
+6. Hooks und Admin-Oberfläche.
+7. Zweistufiger Buchungsassistent und manuelle negative Korrektur-Voucher auf derselben Job-Infrastruktur.
+8. Recovery-Werkzeuge und Buchhaltungsnachlauf in überschaubaren Abschnitten.
+
+Syntaxprüfung, PSR-12, PHPStan, PHPUnit und der Positivlisten-Build laufen lokal durch. Die offenen Freigabetests stehen unter „Bekannte Freigabegrenzen“ und sind in [docs/operations.md](docs/operations.md) beschrieben.
+
+## Steuerliche Freigabe
+
+Die sevDesk-Prüfung bestätigt nur die technische Gültigkeit, nicht die steuerliche Behandlung. Vor dem Produktivlauf muss ein Steuerberater die Matrix für EU-B2B, Drittland, Reverse Charge und EU-B2C außerhalb der freigegebenen Nicht-OSS-Regel bestätigen.
+
+Nach einem 401 oder 403 nimmt der Worker keine weiteren Items an, bis die Zugangsdaten unter **Einrichtung** erfolgreich geprüft wurden. Rechnungen ohne eindeutige Steuerklassifikation bleiben blockiert und müssen manuell geprüft werden.
