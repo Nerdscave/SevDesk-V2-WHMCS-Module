@@ -1,0 +1,48 @@
+# Private Analysequellen; niemals einchecken
+/Mail - #*.txt
+/whmcs-context-and-sevdesk-export-*/
+/old-module/
+/private/
+/secrets/
+/dumps/
+/backups/
+
+# Laufzeitkonfiguration und Zugangsdaten
+/.env
+/.env.*
+!/.env.example
+/configuration.php
+/auth.json
+*.pem
+*.key
+*.p12
+*.pfx
+*.sql
+*.sql.gz
+*.dump
+*.tsv
+
+# PHP/Composer
+/vendor/
+/composer.phar
+/.phpunit.cache/
+/.phpunit.integration.cache/
+/.phpunit.result.cache
+/.phpstan-cache/
+/coverage/
+/dist/
+
+# WHMCS-/Modul-Laufzeitdaten
+/modules/addons/sevdesk/templates_c/
+/storage/
+/cache/
+/logs/
+*.log
+
+# IDE und Betriebssystem
+/.idea/
+/.vscode/
+.DS_Store
+Thumbs.db
+*~
+*.swp
