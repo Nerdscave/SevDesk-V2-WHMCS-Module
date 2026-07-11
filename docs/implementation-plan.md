@@ -234,7 +234,12 @@ Offen sind noch die Prüfungen, die eine echte Zielumgebung brauchen: der verpfl
   Checkboxen und werden nicht durch die Kontoauswahl impliziert.
 - Die Modulrouten erscheinen als klassische Registerkarten mit sichtbarer aktiver
   Kante. Sie bleiben semantisch normale Seitenlinks mit `aria-current`; bei wenig
-  Platz scrollt die Leiste horizontal und blendet keine Beschriftungen aus.
+  Platz bricht die Leiste um und blendet keine Beschriftungen aus.
+- Die Admin-UI verwendet die Bootstrap-3-Markupkonventionen des WHMCS-Admin-Themes
+  (nav-tabs, Panels, Tabellen, Labels, Alerts) statt eines eigenen Designsystems.
+  Ein kleines, unter `.sd-admin` gescoptes Rest-Stylesheet ergänzt nur, was das
+  Theme nicht mitbringt; die `data-*`-Attribute bleiben der stabile Vertrag
+  zwischen Templates und JavaScript.
 
 ### UX-Abnahme
 

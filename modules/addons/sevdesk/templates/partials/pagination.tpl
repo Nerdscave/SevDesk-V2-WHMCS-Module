@@ -1,6 +1,6 @@
 {if $pagination && $pagination.total_pages > 1}
-    <nav class="sd-pagination-wrap" aria-label="Seitennavigation">
-        <p>Seite {$pagination.page|default:1|escape:'html':'UTF-8'} von {$pagination.total_pages|escape:'html':'UTF-8'}</p>
+    <nav class="text-right" aria-label="Seitennavigation">
+        <p class="text-muted small">Seite {$pagination.page|default:1|escape:'html':'UTF-8'} von {$pagination.total_pages|escape:'html':'UTF-8'}</p>
         <ul class="pagination pagination-sm">
             <li{if !$pagination.previous_url} class="disabled"{/if}>
                 {if $pagination.previous_url}

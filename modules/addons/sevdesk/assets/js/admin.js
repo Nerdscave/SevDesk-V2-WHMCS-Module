@@ -33,31 +33,9 @@
         return Math.min(Math.max(value, minimum), maximum);
     }
 
-    function revealActiveNavigationTab() {
-        var navigation = root.querySelector('.sd-nav');
-        var activeTab = navigation ? navigation.querySelector('.sd-nav-link[aria-current="page"]') : null;
-
-        if (!navigation || !activeTab) {
-            return;
-        }
-
-        window.requestAnimationFrame(function () {
-            var navigationRect = navigation.getBoundingClientRect();
-            var activeRect = activeTab.getBoundingClientRect();
-
-            if (activeRect.left >= navigationRect.left && activeRect.right <= navigationRect.right) {
-                return;
-            }
-
-            navigation.scrollLeft += activeRect.left
-                - navigationRect.left
-                - ((navigationRect.width - activeRect.width) / 2);
-        });
-    }
-
     each('[data-dismiss-alert]', function (button) {
         button.addEventListener('click', function () {
-            var alert = button.closest('.sd-alert');
+            var alert = button.closest('.alert');
             if (alert) {
                 alert.remove();
                 announce('Hinweis geschlossen.');
@@ -271,6 +249,29 @@
         paused: 'Pausiert'
     };
 
+    // Mirrors the status-to-Bootstrap-label mapping in partials/status_badge.tpl.
+    var statusLabelClasses = {
+        completed: 'success',
+        succeeded: 'success',
+        success: 'success',
+        healthy: 'success',
+        ok: 'success',
+        mapped: 'success',
+        ready: 'success',
+        running: 'info',
+        processing: 'info',
+        retrying: 'info',
+        retryable_failed: 'info',
+        retry_wait: 'info',
+        failed: 'danger',
+        permanent_failed: 'danger',
+        error: 'danger',
+        ambiguous: 'warning',
+        warning: 'warning',
+        completed_with_errors: 'warning',
+        blocked: 'warning'
+    };
+
     function renderStatus(container, status) {
         if (!container) {
             return;
@@ -278,12 +279,8 @@
 
         var safeStatus = String(status || 'unknown').toLowerCase().replace(/[^a-z0-9_-]/g, '');
         var badge = document.createElement('span');
-        var dot = document.createElement('span');
 
-        badge.className = 'sd-status sd-status--' + safeStatus;
-        dot.className = 'sd-status-dot';
-        dot.setAttribute('aria-hidden', 'true');
-        badge.appendChild(dot);
+        badge.className = 'label label-' + (statusLabelClasses[safeStatus] || 'default') + ' sd-status';
         badge.appendChild(document.createTextNode(statusLabels[safeStatus] || safeStatus));
         container.replaceChildren(badge);
     }
@@ -334,7 +331,6 @@
             var total = toNumber(data.total_items !== undefined ? data.total_items : data.total, 0);
             var progress = data.progress_percent !== undefined ? toNumber(data.progress_percent, 0) : (total > 0 ? Math.round((processed / total) * 100) : 0);
             var progressBar = monitor.querySelector('[data-job-progress]');
-            var progressFill = progressBar ? progressBar.querySelector('span') : null;
             var status = String(data.status || '').toLowerCase();
 
             progress = clamp(progress, 0, 100);
@@ -347,11 +343,10 @@
             setText(monitor, '[data-count-failed]', data.failed_items !== undefined ? data.failed_items : data.failed);
             setText(monitor, '[data-count-ambiguous]', data.ambiguous_items !== undefined ? data.ambiguous_items : data.ambiguous);
 
+            // data-job-progress sits on the Bootstrap .progress-bar itself.
             if (progressBar) {
                 progressBar.setAttribute('aria-valuenow', String(progress));
-            }
-            if (progressFill) {
-                progressFill.style.width = progress + '%';
+                progressBar.style.width = progress + '%';
             }
             if (status) {
                 renderStatus(monitor.querySelector('[data-job-status]'), status);
@@ -424,7 +419,6 @@
         schedule(interval);
     }
 
-    revealActiveNavigationTab();
     initConditionalFields();
     initSelections();
     initCorrectionForm();

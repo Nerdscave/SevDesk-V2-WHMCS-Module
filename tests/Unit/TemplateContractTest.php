@@ -103,14 +103,10 @@ final class TemplateContractTest extends TestCase
         $stylesheet = file_get_contents(
             dirname(__DIR__, 2) . '/modules/addons/sevdesk/assets/css/admin.css'
         );
-        $script = file_get_contents(
-            dirname(__DIR__, 2) . '/modules/addons/sevdesk/assets/js/admin.js'
-        );
 
         self::assertIsString($stylesheet);
-        self::assertIsString($script);
-        self::assertStringContainsString('<ul class="sd-nav-tabs" role="list">', $navigation);
-        self::assertSame(9, substr_count($navigation, '<li class="sd-nav-item">'));
+        self::assertStringContainsString('<ul class="nav nav-tabs sd-nav-tabs" role="list">', $navigation);
+        self::assertSame(9, substr_count($navigation, '<li class="sd-nav-item'));
         self::assertSame(9, substr_count($navigation, '<a class="sd-nav-link'));
         self::assertSame(9, substr_count($navigation, 'aria-current="page"'));
         self::assertStringNotContainsString('role="tablist"', $navigation);
@@ -119,8 +115,11 @@ final class TemplateContractTest extends TestCase
             '/\.sd-nav-link\s+span\s*\{[^}]*display:\s*none/s',
             $stylesheet
         );
-        self::assertStringContainsString('revealActiveNavigationTab', $script);
-        self::assertStringContainsString('navigation.scrollLeft += activeRect.left', $script);
+        // Tabs must wrap on narrow admin frames instead of being clipped or scrolled.
+        self::assertDoesNotMatchRegularExpression(
+            '/\.sd-nav-tabs[^{]*\{[^}]*(white-space:\s*nowrap|flex-wrap:\s*nowrap|overflow-x)/s',
+            $stylesheet
+        );
     }
 
     public function testSetupRetainsItsSaveFieldsAndSafetyConfirmations(): void

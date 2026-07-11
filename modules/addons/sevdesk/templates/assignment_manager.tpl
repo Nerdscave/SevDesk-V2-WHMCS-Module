@@ -1,33 +1,34 @@
-{include file="partials/layout_top.tpl" pageTitle="Zuordnungen" pageDescription="Bestehende Verknüpfungen zwischen WHMCS-Rechnungen und sevdesk-Belegen prüfen."}
+{include file="partials/layout_top.tpl" pageTitle="Zuordnungen"}
 
-<div class="sd-inline-note sd-inline-note--warning">
-    <i class="fas fa-exclamation-triangle" aria-hidden="true"></i>
-    <span><strong>Eine Zuordnung aufheben löscht keinen Beleg in sevdesk.</strong> Ein späterer Export kann einen zweiten Beleg erzeugen. Nutzen Sie diese Aktion nur nach einer Prüfung im Zielsystem.</span>
+<div class="alert alert-warning" role="status">
+    Das Aufheben einer Zuordnung löscht keinen sevdesk-Beleg; ein erneuter Export kann ein Duplikat erzeugen.
 </div>
 
-<form method="get" action="addonmodules.php" class="sd-toolbar" aria-label="Zuordnungen filtern">
-    <input type="hidden" name="module" value="sevdesk">
-    <input type="hidden" name="a" value="assignmentManager">
-    <div class="sd-field sd-field--inline sd-field--grow">
-        <label for="mapping-query">Suche</label>
-        <input type="search" id="mapping-query" name="q" class="form-control input-sm" value="{$filters.q|escape:'html':'UTF-8'}" placeholder="Rechnungsnummer, WHMCS-ID oder sevdesk-ID">
-    </div>
-    <div class="sd-field sd-field--inline">
-        <label for="mapping-status">Zustand</label>
-        <select id="mapping-status" name="status" class="form-control input-sm">
-            <option value="">Alle</option>
-            <option value="mapped"{if $filters.status === 'mapped'} selected{/if}>Vollständig</option>
-            <option value="incomplete"{if $filters.status === 'incomplete'} selected{/if}>Ohne sevdesk-ID</option>
-            <option value="orphan"{if $filters.status === 'orphan'} selected{/if}>Ohne WHMCS-Rechnung</option>
-        </select>
-    </div>
-    <button type="submit" class="btn btn-default btn-sm">Filtern</button>
-    {if $filters.q || $filters.status}<a class="btn btn-link btn-sm" href="{$moduleLink|escape:'html':'UTF-8'}&amp;a=assignmentManager">Filter zurücksetzen</a>{/if}
-</form>
+<div class="well well-sm">
+    <form method="get" action="addonmodules.php" class="form-inline sd-toolbar" aria-label="Zuordnungen filtern">
+        <input type="hidden" name="module" value="sevdesk">
+        <input type="hidden" name="a" value="assignmentManager">
+        <div class="form-group">
+            <label for="mapping-query">Suche</label>
+            <input type="search" id="mapping-query" name="q" class="form-control input-sm" value="{$filters.q|escape:'html':'UTF-8'}" placeholder="Rechnungsnummer, WHMCS-ID oder sevdesk-ID">
+        </div>
+        <div class="form-group">
+            <label for="mapping-status">Zustand</label>
+            <select id="mapping-status" name="status" class="form-control input-sm">
+                <option value="">Alle</option>
+                <option value="mapped"{if $filters.status === 'mapped'} selected{/if}>Vollständig</option>
+                <option value="incomplete"{if $filters.status === 'incomplete'} selected{/if}>Ohne sevdesk-ID</option>
+                <option value="orphan"{if $filters.status === 'orphan'} selected{/if}>Ohne WHMCS-Rechnung</option>
+            </select>
+        </div>
+        <button type="submit" class="btn btn-default btn-sm">Filtern</button>
+        {if $filters.q || $filters.status}<a class="btn btn-link btn-sm" href="{$moduleLink|escape:'html':'UTF-8'}&amp;a=assignmentManager">Filter zurücksetzen</a>{/if}
+    </form>
+</div>
 
 {if $mappings|@count}
-    <div class="sd-table-wrap">
-        <table class="table sd-table">
+    <div class="table-responsive">
+        <table class="table table-striped">
             <thead>
             <tr>
                 <th scope="col">WHMCS-Rechnung</th>
@@ -46,7 +47,7 @@
                             <a href="invoices.php?action=edit&amp;id={$mapping.invoice_id|escape:'url'}" target="_blank" rel="noopener">{$mapping.invoicenum|default:'Rechnung'|escape:'html':'UTF-8'}</a>
                             <small class="sd-mono">ID {$mapping.invoice_id|escape:'html':'UTF-8'}</small>
                         {else}
-                            <span class="sd-muted">Rechnung nicht vorhanden</span>
+                            <span class="text-muted">Rechnung nicht vorhanden</span>
                             {if $mapping.invoice_id}<small class="sd-mono">ehemalige ID {$mapping.invoice_id|escape:'html':'UTF-8'}</small>{/if}
                         {/if}
                     </td>
@@ -55,7 +56,7 @@
                         {if $mapping.sevdesk_id}
                             <a class="sd-mono" href="https://my.sevdesk.de/#/ex/detail/id/{$mapping.sevdesk_id|escape:'url'}" target="_blank" rel="noopener">{$mapping.sevdesk_id|escape:'html':'UTF-8'} <span class="sr-only">in sevdesk öffnen</span><i class="fas fa-external-link-alt" aria-hidden="true"></i></a>
                         {else}
-                            <span class="sd-muted">Keine ID gespeichert</span>
+                            <span class="text-muted">Keine ID gespeichert</span>
                         {/if}
                     </td>
                     <td>

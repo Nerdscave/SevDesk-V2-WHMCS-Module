@@ -347,6 +347,15 @@ lesen die versionierten Dateien aus dem Modulverzeichnis und geben sie innerhalb
 der bereits authentifizierten Adminantwort aus. Damit benötigt die Installation
 keine öffentliche Webserver-Ausnahme für `/modules/addons/sevdesk/assets`.
 
+Die Templates nutzen die Bootstrap-3-Markupkonventionen des WHMCS-Admin-Themes
+(nav-tabs, Panels, Tabellen, Labels, Alerts, Formulare), damit die Modulseiten
+wie native WHMCS-Adminseiten aussehen. Das eigene Stylesheet ist bewusst klein,
+vollständig unter `.sd-admin` gescopet und ergänzt nur Helfer, die das Theme
+nicht mitbringt (Skip-Link, Kennzahlenzeile, Tabellen-Feinheiten, Info-Popover,
+Ladeoverlay). Buttons, Farben und Typografie kommen unverändert aus dem Theme.
+Das JavaScript hängt ausschließlich an `data-*`-Attributen; diese Attribute sind
+der stabile Vertrag zwischen Templates und Verhalten.
+
 ## Wann mehr Architektur gerechtfertigt wäre
 
 Ein externer Worker oder Broker ist erst gerechtfertigt, wenn mindestens einer der folgenden Fälle nachweislich eintritt:

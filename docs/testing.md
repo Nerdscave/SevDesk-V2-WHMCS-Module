@@ -198,8 +198,8 @@ Diese Punkte werden manuell oder mit passenden Browsertests geprüft:
 - Status-Badges und Warnungen ohne Farbwahrnehmung prüfen; Text oder Symbol müssen
   den Zustand eindeutig benennen.
 - Modulnavigation bei 1180, 768 und 375 Pixeln prüfen: Alle Tab-Beschriftungen
-  bleiben erhalten, die Leiste scrollt horizontal und der aktive Tab wird sichtbar
-  in den Ausschnitt gerückt.
+  bleiben erhalten; bei wenig Platz bricht die Bootstrap-Tab-Leiste in weitere
+  Zeilen um, ohne Beschriftungen auszublenden oder zu beschneiden.
 - Navigation nur per Tastatur durchlaufen. Die Seitenlinks verwenden
   `aria-current="page"`; ARIA-Tabrollen bleiben echten In-Page-Tabpanels vorbehalten.
 

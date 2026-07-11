@@ -2,9 +2,7 @@
 
     <div class="sd-loading-overlay" data-loading-overlay hidden aria-hidden="true">
         <div class="sd-loading-card" role="status" aria-live="polite">
-            <span class="sd-loading-bar" aria-hidden="true"></span>
-            <strong>Anfrage wird verarbeitet</strong>
-            <span>Diese Seite kann gleich weiterarbeiten.</span>
+            <i class="fas fa-spinner fa-spin" aria-hidden="true"></i>Anfrage wird verarbeitet …
         </div>
     </div>
 
