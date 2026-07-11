@@ -128,6 +128,42 @@ final class JobRepositoryTest extends MariaDbTestCase
         self::assertSame(500, $candidate['httpStatus']);
     }
 
+    public function testFinishMergesAgainstCheckpointContextInsteadOfStaleClaim(): void
+    {
+        $jobId = $this->jobs->create('single_export', [[
+            'invoice_id' => 434,
+            'action' => 'export_voucher',
+            'candidate' => ['credit_treatment' => 'full_gross_voucher'],
+        ]]);
+        $claimed = $this->jobs->claimNext();
+        self::assertNotNull($claimed);
+        self::assertTrue($this->jobs->checkpoint(
+            (int) $claimed->id,
+            (string) $claimed->lease_token,
+            'contact_write_requested',
+            ['whmcsClientId' => 20],
+        ));
+
+        // Deliberately finish with the stale object returned before checkpoint().
+        $this->jobs->finish(
+            $claimed,
+            JobOutcome::ambiguous(
+                'Synthetic unknown contact outcome.',
+                'contact_write_requested',
+                errorCode: 'contact_search_failed',
+                candidate: ['httpStatus' => 500],
+            ),
+        );
+
+        $stored = Capsule::table(Migrator::ITEMS_TABLE)->where('job_id', $jobId)->first();
+        $candidate = json_decode((string) $stored->candidate_json, true, 32, JSON_THROW_ON_ERROR);
+        self::assertSame('ambiguous', $stored->status);
+        self::assertSame('export_voucher:434', $stored->dedupe_key);
+        self::assertSame('full_gross_voucher', $candidate['credit_treatment']);
+        self::assertSame(20, $candidate['whmcsClientId']);
+        self::assertSame(500, $candidate['httpStatus']);
+    }
+
     public function testReconciliationKeepsOriginalAccountingDedupeKey(): void
     {
         $jobId = $this->jobs->create('single', [[

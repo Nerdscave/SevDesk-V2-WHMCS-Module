@@ -8,12 +8,12 @@ Die Tests verwenden ausschließlich synthetische Kunden, Invoices und API-Fixtur
 
 ## Aktueller automatisierter Nachweis
 
-- 98 schnelle Unit-/Contract-/Kompositionstests mit 462 Assertions sind lokal grün;
+- Die schnelle Unit-/Contract-/Kompositionstestsuite ist lokal grün;
 - PHP-Lint und PSR-12 laufen über den vollständigen Modul- und Testbaum;
 - PHPStan analysiert den vollständigen PHP-Modulcode auf Level 6;
-- 29 MariaDB-Integrationstests prüfen eine kleine synthetische Legacy-Struktur, echte Unique-Constraints, Deduplizierung, Candidate-/Remote-ID-Erhalt und parallele Claims;
-- dieselbe Suite deckt sichere und riskante Lease-/Throwable-Recovery, den globalen Auth-Stopp, WHMCS-Kundenwährungen, Teilzahlungs-Pagination, Mapping-Revalidation und einen 1.000-Item-Lauf mit Fehler in der Mitte ab;
-- ohne konfigurierten Server meldet die lokale MariaDB-Suite ihre Tests als `skipped`. In CI und bei einem Lauf über `tools/test-mariadb.sh` sind sie verpflichtend.
+- Die MariaDB-Integrationstests prüfen eine kleine synthetische Legacy-Struktur, echte Unique-Constraints, Deduplizierung, Candidate-/Remote-ID-Erhalt und parallele Claims;
+- Dieselbe Suite deckt sichere und riskante Lease-/Throwable-Recovery, den globalen Auth-Stopp, WHMCS-Kundenwährungen, Teilzahlungs-Pagination, Mapping-Revalidation und einen 1.000-Item-Lauf mit Fehler in der Mitte ab;
+- Ohne konfigurierten Server meldet die lokale MariaDB-Suite ihre Tests als `skipped`. In CI und bei einem Lauf über `tools/test-mariadb.sh` sind sie verpflichtend.
 
 MariaDB und PHP 8.3 bleiben eigene Release-Gates. Ein übersprungener Datenbanktest oder ein Lauf unter einer anderen PHP-Version ersetzt diese Nachweise nicht.
 
@@ -30,6 +30,8 @@ Schnelle Tests ohne WHMCS-Datenbank oder Netzwerk für:
 - Voucher-/Position-Payload;
 - Fehlerklassifikation und Retry-Entscheidung;
 - Statusübergänge von Job und Item;
+- lazy Kontakt-Referenzdaten: bestehende/verknüpfte Kontakte dürfen weder
+  Address-Kategorie noch CommunicationWay-Key vorab laden;
 - Bereinigung sensibler Daten aus Fehlermeldungen.
 
 Diese Logik darf nicht von globalem WHMCS-Zustand abhängen. Tabellengetriebene Tests bilden die fachliche Matrix lesbar ab.
@@ -48,6 +50,9 @@ Mit einer isolierten MySQL-/MariaDB-Datenbank:
 - MySQL Advisory Lock und atomarer Claim bei zwei Workern;
 - Lease-Ablauf und Übernahme;
 - Checkpoint-gesteuerte Entscheidung zwischen `retry_wait` und `ambiguous`;
+- Merge eines Outcomes gegen die aktuelle Checkpoint-Zeile, damit ein veralteter
+  Claim-Snapshot weder `whmcsClientId` noch Remote-ID oder Bestätigungskontext
+  überschreibt;
 - parallele Jobs für dieselbe Invoice;
 - Erhalt aller Legacy-Zuordnungen bei Fehlern während der Migration.
 
@@ -79,9 +84,12 @@ In einer Testinstallation mit WHMCS 8.13.4 und PHP 8.3:
 - Settings-Seite mit sevDesk online und offline öffnen;
 - prüfen, dass `sevdesk_config()` keine operativen Standardfelder veröffentlicht und Änderungen nur über die geschützte Setupseite möglich sind;
 - Invoice und Client über die vorgesehenen WHMCS-Schnittstellen laden;
-- PDF mit der produktionsnahen WHMCS-Vorlage erzeugen;
+- WHMCS-PDF mit synthetischen Rechnungsdaten erzeugen;
 - Adminrollen und CSRF prüfen;
 - Single- und Bulk-Job starten;
+- Admin-Rechnungsbutton öffnet den vorausgefüllten Einzelimport; der kompakte
+  Kurzexport akzeptiert ausschließlich CSRF-geschützte POSTs und erzeugt nur ein
+  dedupliziertes Jobitem;
 - Cron/Worker ausführen;
 - relevante Invoice-, Paid- und Checkout-Hooks auslösen;
 - sicherstellen, dass Hook-Fehler niemals den WHMCS-Ablauf abbrechen.
@@ -183,6 +191,31 @@ Diese Punkte werden manuell oder mit passenden Browsertests geprüft:
 - keine unescaped API-Meldung im HTML;
 - keine PII in URL oder Querystring;
 - Rollen ohne Modulzugriff können weder Jobs lesen noch starten.
+- Invoice-Control-Markup enthält kein verschachteltes Formular. Das externe
+  Footer-Form enthält nur CSRF-Token und Invoice-ID; der Quick-Button verweist
+  explizit darauf.
+- Kurzexport bei vollständigem Mapping, Legacy-NULL, Guthaben, Fremdwährung,
+  Null-/Negativbetrag, negativer oder fehlender Position, ungeeignetem Status und
+  Rechnung vor `import_after` prüfen. Nur der normale Einzelimport bleibt als
+  erklärender Preflight verfügbar.
+- Mehrfachklick beziehungsweise zwei Adminsessions erzeugen dank aktivem
+  `export_voucher:<invoiceId>`-Dedupe-Key keinen zweiten aktiven Export.
+- Im Browserrequest des Kurzexports werden weder sevdesk-Client, Receipt Guidance,
+  Kontaktauflösung, PDF noch Worker aufgerufen. Nach dem Queueing läuft die
+  Verarbeitung auch bei geschlossenem Browser weiter.
+- Eine im Worker lokal blockierte Rechnung darf vor ihrem Fehler weder PDF noch
+  Receipt Guidance laden, PDF erzeugen noch einen neuen sevdesk-Kontakt anlegen.
+- Ein vorhandener Checkpoint `contact_write_requested` muss seine ausschließlich
+  lesende Recovery vor Mapping-, Status-, Stichtags-, Währungs- und Tax-Terminals
+  ausführen. Ohne eindeutigen Kontakt bleibt das Item `ambiguous` und behält seine
+  Dedupe-Reservierung.
+- Ein vorübergehender Fehler derselben Recovery darf `retry_wait` verwenden, muss
+  aber `contact_write_requested` beziehungsweise `contact_linked` als Checkpoint
+  behalten; der nächste Versuch bleibt GET-only.
+- In einer Testinstallation unter WHMCS 8.13.4 prüfen, ob
+  `AdminInvoicesControlsOutput` auch im Admin-Nur-Ansehen-Modus ausgeführt wird.
+  Falls nicht, bleibt dieser Modus ohne Button; eine undokumentierte globale
+  DOM-Injektion ist kein bestandenes Release-Gate.
 - Modul-CSS und -JavaScript werden auch dann geladen, wenn der Webserver direkte
   Requests auf `/modules/addons/sevdesk/assets` verweigert; auf anderen Adminseiten
   werden die Assets nicht eingebunden.

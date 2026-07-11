@@ -28,6 +28,8 @@ final class ContactServiceTest extends TestCase
         ], $history);
         $stored = [];
         $checkpoints = [];
+        $addressCategoryCalls = 0;
+        $emailKeyCalls = 0;
         $service = new ContactService(
             $client,
             static function (int $clientId, string $contactId) use (&$stored): void {
@@ -35,8 +37,16 @@ final class ContactServiceTest extends TestCase
             },
             static fn (string $countryCode): int => $countryCode === 'DE' ? 1 : 2,
             '3',
-            '47',
-            '2',
+            static function () use (&$addressCategoryCalls): string {
+                ++$addressCategoryCalls;
+
+                return '47';
+            },
+            static function () use (&$emailKeyCalls): string {
+                ++$emailKeyCalls;
+
+                return '2';
+            },
         );
 
         $result = $service->resolve(
@@ -52,8 +62,43 @@ final class ContactServiceTest extends TestCase
         self::assertSame('created', $result->value()->source);
         self::assertSame([7 => '42'], $stored);
         self::assertSame(['contact_write_requested', 'contact_linked'], $checkpoints);
+        self::assertSame(1, $addressCategoryCalls);
+        self::assertSame(1, $emailKeyCalls);
         self::assertSame('/api/v1/ContactAddress', $history[2]['request']->getUri()->getPath());
         self::assertSame('/api/v1/CommunicationWay', $history[3]['request']->getUri()->getPath());
+    }
+
+    public function testSupplementaryReferenceResolversStayLazyForExistingContact(): void
+    {
+        $history = [];
+        $client = $this->client([
+            new Response(200, [], '{"objects":[{"id":55}]}'),
+        ], $history);
+        $addressCategoryCalls = 0;
+        $emailKeyCalls = 0;
+        $service = new ContactService(
+            $client,
+            static fn (): bool => true,
+            static fn (): int => 1,
+            '3',
+            static function () use (&$addressCategoryCalls): string {
+                ++$addressCategoryCalls;
+
+                return '47';
+            },
+            static function () use (&$emailKeyCalls): string {
+                ++$emailKeyCalls;
+
+                return '2';
+            },
+        );
+
+        $result = $service->resolve($this->contact('55'));
+
+        self::assertTrue($result->isSuccess());
+        self::assertSame(0, $addressCategoryCalls);
+        self::assertSame(0, $emailKeyCalls);
+        self::assertCount(1, $history);
     }
 
     public function testItUsesVerifiedConfiguredContactWithoutUpdatingIt(): void

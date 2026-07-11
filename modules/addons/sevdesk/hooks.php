@@ -6,6 +6,8 @@ use WHMCS\Database\Capsule;
 use WHMCS\Module\Addon\SevDesk\Application;
 use WHMCS\Module\Addon\SevDesk\Database\Migrator;
 use WHMCS\Module\Addon\SevDesk\Support\AdminAssets;
+use WHMCS\Module\Addon\SevDesk\Support\AdminInvoiceControls;
+use WHMCS\Module\Addon\SevDesk\Support\QuickExportGuard;
 
 if (!defined('WHMCS')) {
     http_response_code(403);
@@ -123,11 +125,12 @@ add_hook('AdminAreaHeadOutput', 1, static function (): string {
 });
 
 add_hook('AdminAreaFooterOutput', 1, static function (): string {
-    if (($_GET['module'] ?? null) !== 'sevdesk') {
-        return '';
+    $output = AdminInvoiceControls::footerForms();
+    if (($_GET['module'] ?? null) === 'sevdesk') {
+        $output = AdminAssets::scriptMarkup() . $output;
     }
 
-    return AdminAssets::scriptMarkup();
+    return $output;
 });
 
 add_hook('InvoiceCreated', 1, static fn (array $vars) => sevdesk_enqueue_invoice($vars, 'InvoiceCreated'));
@@ -164,25 +167,37 @@ add_hook('AdminInvoicesControlsOutput', 1, static function (array $vars): string
         if (!$application->config->bool('module_active')) {
             return '';
         }
-        $mapping = $application->mappings->findCompleteByInvoice($invoiceId);
-        if ($mapping !== null) {
-            $remoteId = rawurlencode((string) $mapping->sevdesk_id);
-
-            return '<a target="_blank" rel="noopener" href="https://my.sevdesk.de/#/ex/detail/id/' . $remoteId
-                . '" class="btn btn-default"><i class="fas fa-up-right-from-square"></i> sevdesk-Beleg</a>';
+        $mapping = $application->mappings->findByInvoice($invoiceId);
+        $remoteId = trim((string) ($mapping->sevdesk_id ?? ''));
+        $hasLegacyMapping = $mapping !== null && $remoteId === '';
+        $quickEligible = false;
+        $invoice = $application->whmcs->invoiceForDryRun($invoiceId);
+        if (
+            $invoice !== null
+            && Capsule::schema()->hasTable(Migrator::JOBS_TABLE)
+            && Capsule::schema()->hasTable(Migrator::ITEMS_TABLE)
+        ) {
+            $invoiceItems = Capsule::table('tblinvoiceitems')->where('invoiceid', $invoiceId);
+            $quickEligible = QuickExportGuard::blockReason(
+                $invoice,
+                $mapping,
+                $application->config->bool('import_only_paid', true),
+                (string) $application->config->get('import_after', '01-01-1999'),
+                (clone $invoiceItems)->exists(),
+                (clone $invoiceItems)->where('amount', '<', 0)->exists(),
+            ) === null;
         }
+        $token = $quickEligible && function_exists('generate_token')
+            ? (string) generate_token('plain')
+            : '';
 
-        $status = (string) Capsule::table('tblinvoices')->where('id', $invoiceId)->value('status');
-        if ($status === 'Draft') {
-            return '';
-        }
-        $token = function_exists('generate_token') ? (string) generate_token('plain') : '';
-
-        return '<form method="post" action="addonmodules.php?module=sevdesk&amp;a=singleImport" style="display:inline-block">'
-            . '<input type="hidden" name="token" value="' . htmlspecialchars($token, ENT_QUOTES, 'UTF-8') . '">'
-            . '<input type="hidden" name="invoiceid" value="' . $invoiceId . '">'
-            . '<button type="submit" name="import" value="1" class="btn btn-default">'
-            . '<i class="fas fa-arrow-right-arrow-left"></i> Zu sevdesk einreihen</button></form>';
+        return AdminInvoiceControls::render(
+            $invoiceId,
+            $remoteId !== '' ? $remoteId : null,
+            $hasLegacyMapping,
+            $quickEligible,
+            $token,
+        );
     } catch (Throwable) {
         return '';
     }

@@ -331,56 +331,16 @@ final class VoucherExporter
         return '[WHMCS-INVOICE:' . $invoiceId . ']';
     }
 
-    private function preflight(
+    /** Validate invoice-only facts before Receipt Guidance or other remote reads. */
+    public function validateInvoiceDocument(
         InvoiceSnapshot $invoice,
-        string $sevdeskContactId,
-        TaxDecision $taxDecision,
-        #[\SensitiveParameter]
-        string $pdfContents,
-        bool $creditTreatmentConfirmed,
+        bool $creditTreatmentConfirmed = false,
     ): ?ExportResult {
         if ($invoice->currency !== 'EUR') {
             return ExportResult::failed(
                 $invoice->invoiceId,
                 'foreign_currency_requires_review',
                 'Foreign-currency invoices require separate accounting approval before export.',
-            );
-        }
-
-        if (!$taxDecision->allowed) {
-            return ExportResult::failed(
-                $invoice->invoiceId,
-                $taxDecision->code,
-                $taxDecision->message,
-            );
-        }
-
-        if ($this->requireReceiptGuidance && !$taxDecision->guidanceValidated) {
-            return ExportResult::failed(
-                $invoice->invoiceId,
-                'receipt_guidance_not_validated',
-                'The tax profile must be validated with sevdesk Receipt Guidance before export.',
-            );
-        }
-
-        if (
-            $taxDecision->accountDatevId === null
-            || preg_match('/^\d+$/', $taxDecision->accountDatevId) !== 1
-            || $taxDecision->taxRuleId === null
-            || preg_match('/^\d+$/', $taxDecision->taxRuleId) !== 1
-        ) {
-            return ExportResult::failed(
-                $invoice->invoiceId,
-                'invalid_tax_profile',
-                'The validated tax decision contains invalid sevdesk IDs.',
-            );
-        }
-
-        if (preg_match('/^\d+$/', $sevdeskContactId) !== 1) {
-            return ExportResult::failed(
-                $invoice->invoiceId,
-                'invalid_contact_id',
-                'The sevdesk contact ID is missing or invalid.',
             );
         }
 
@@ -421,7 +381,58 @@ final class VoucherExporter
                     'Invoices with negative positions require individual review.',
                 );
             }
+        }
 
+        if (abs($invoice->lineGrossMinorUnits() - $invoice->totalMinorUnits()) > 1) {
+            return ExportResult::failed(
+                $invoice->invoiceId,
+                'invoice_total_mismatch',
+                'The calculated line total differs from the WHMCS invoice total.',
+                [
+                    'invoiceMinorUnits' => $invoice->totalMinorUnits(),
+                    'lineMinorUnits' => $invoice->lineGrossMinorUnits(),
+                ],
+            );
+        }
+
+        return null;
+    }
+
+    /** Validate the tax profile after Receipt Guidance has been resolved. */
+    public function validateTaxDecision(
+        InvoiceSnapshot $invoice,
+        TaxDecision $taxDecision,
+    ): ?ExportResult {
+        if (!$taxDecision->allowed) {
+            return ExportResult::failed(
+                $invoice->invoiceId,
+                $taxDecision->code,
+                $taxDecision->message,
+            );
+        }
+
+        if ($this->requireReceiptGuidance && !$taxDecision->guidanceValidated) {
+            return ExportResult::failed(
+                $invoice->invoiceId,
+                'receipt_guidance_not_validated',
+                'The tax profile must be validated with sevdesk Receipt Guidance before export.',
+            );
+        }
+
+        if (
+            $taxDecision->accountDatevId === null
+            || preg_match('/^\d+$/', $taxDecision->accountDatevId) !== 1
+            || $taxDecision->taxRuleId === null
+            || preg_match('/^\d+$/', $taxDecision->taxRuleId) !== 1
+        ) {
+            return ExportResult::failed(
+                $invoice->invoiceId,
+                'invalid_tax_profile',
+                'The validated tax decision contains invalid sevdesk IDs.',
+            );
+        }
+
+        foreach ($invoice->lineItems as $lineItem) {
             if (
                 $taxDecision->guidanceValidated
                 && !$this->taxRateIsAllowed($lineItem->taxRate, $taxDecision->allowedTaxRates)
@@ -434,15 +445,45 @@ final class VoucherExporter
             }
         }
 
-        if (abs($invoice->lineGrossMinorUnits() - $invoice->totalMinorUnits()) > 1) {
+        return null;
+    }
+
+    /** Defense-in-depth validation used immediately before the voucher write. */
+    public function validateLocalDocument(
+        InvoiceSnapshot $invoice,
+        TaxDecision $taxDecision,
+        bool $creditTreatmentConfirmed = false,
+    ): ?ExportResult {
+        $invoiceValidation = $this->validateInvoiceDocument($invoice, $creditTreatmentConfirmed);
+        if ($invoiceValidation !== null) {
+            return $invoiceValidation;
+        }
+
+        return $this->validateTaxDecision($invoice, $taxDecision);
+    }
+
+    private function preflight(
+        InvoiceSnapshot $invoice,
+        string $sevdeskContactId,
+        TaxDecision $taxDecision,
+        #[\SensitiveParameter]
+        string $pdfContents,
+        bool $creditTreatmentConfirmed,
+    ): ?ExportResult {
+        $localValidation = $this->validateLocalDocument(
+            $invoice,
+            $taxDecision,
+            $creditTreatmentConfirmed,
+        );
+        if ($localValidation !== null) {
+            return $localValidation;
+        }
+
+        if (preg_match('/^\d+$/', $sevdeskContactId) !== 1) {
             return ExportResult::failed(
                 $invoice->invoiceId,
-                'invoice_total_mismatch',
-                'The calculated line total differs from the WHMCS invoice total.',
-                [
-                    'invoiceMinorUnits' => $invoice->totalMinorUnits(),
-                    'lineMinorUnits' => $invoice->lineGrossMinorUnits(),
-                ],
+                'invalid_contact_id',
+                'The sevdesk contact ID is missing or invalid.',
             );
         }
 

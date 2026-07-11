@@ -16,6 +16,7 @@ final class Controller
             'index' => 'index',
             'setup' => 'setup',
             'singleImport' => 'singleImport',
+            'quickExport' => 'quickExport',
             'massImport' => 'massImport',
             'jobs' => 'jobs',
             'jobDetail' => 'jobDetail',

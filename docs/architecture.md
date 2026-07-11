@@ -31,7 +31,7 @@ Das System besteht aus einem WHMCS-Addon, der vorhandenen WHMCS-Datenbank und de
 - Zahlungsbuchung ohne eindeutige read-only Vorschau und explizite Auswahl
 - Fuzzy Matching nach Kundenname, ungefähr passendem Betrag oder ähnlichen Merkmalen
 - generische Synchronisationsplattform für weitere Buchhaltungssysteme
-- externe Lizenzprüfung des Vorgängermoduls und ionCube
+- externe Lizenzprüfung und Remote-Abhängigkeiten, die nicht zum Export gehören
 
 ## Komponenten
 
@@ -260,6 +260,11 @@ Die sevDesk-API dokumentiert keinen universellen Idempotency-Key, der die hier b
 6. Bei einem sicheren terminalen Ausgang darf der Dedupe-Key freigegeben werden.
 7. Bei unbekanntem Ausgang nach dem Write wechselt das Item auf `ambiguous`. Der `dedupe_key` bleibt bestehen, bis ein Remote-Abgleich den Fall klärt.
 
+`finish()` sperrt und liest vor dem Abschluss erneut die aktuelle Itemzeile. Dadurch
+bleiben Kontextwerte aus unmittelbar vorherigen Checkpoints wie
+`whmcsClientId`, Remote-ID und Bestätigungsdaten erhalten, auch wenn der Worker
+noch mit dem älteren Claim-Snapshot arbeitet.
+
 Bei einem sicheren terminalen Ausgang wird der `dedupe_key` freigegeben. Danach verhindert ein vollständiges `mod_sevdesk`-Mapping einen erneuten Voucher. Einen neuen Dedupe-Key erhält ein Admin-Retry erst nach einer ausdrücklichen Adminaktion.
 
 Bestehende `NULL`-Mappings werden beim Upgrade nicht automatisch gelöscht. Sie erscheinen im Recovery-Bericht.
@@ -274,7 +279,13 @@ Marker sind Teil der Idempotenz, kein Ersatz für die fachliche Prüfung:
 
 Vor einem normalen Retry nach unbekanntem Voucher-Write sucht `ReconciliationService` nach dem Invoice-Marker und vergleicht Remote-ID, Kontakt, Währung und Betrag. Vor einem Korrektur-Retry sucht `CorrectionService` rein lesend nach dem Refund-Marker und vergleicht zusätzlich Original-Voucher, Tax Rule und den exakt negativen Rückzahlungsbetrag.
 
-Die Kontakt-Recovery nach `contact_write_requested` sucht ausschließlich über die WHMCS-Kundennummer. Bleibt die Suche ohne Treffer, darf das Modul keinen neuen Kontakt anlegen.
+Die Kontakt-Recovery nach `contact_write_requested` sucht ausschließlich über die
+WHMCS-Kundennummer und läuft vor normalen Mapping-, Status-, Stichtags-, Währungs-
+oder Steuer-Terminals. Bleibt die Suche ohne Treffer oder scheitert sie auch nach
+den begrenzten sicheren Read-Retries, darf das Modul keinen neuen Kontakt anlegen.
+Das Item bleibt `ambiguous`; sein Dedupe-Key wird nicht freigegeben.
+Während eines `retry_wait` bleibt der Recovery-Checkpoint unverändert erhalten,
+damit auch der nächste Versuch ausschließlich liest.
 
 Nur genau ein vollständig passender Treffer darf das lokale Ergebnis ergänzen. Bleibt die Suche nach einem unbekannten Write-Ausgang ohne Treffer oder liefert sie mehrere oder widersprüchliche Treffer, bleibt das Item `ambiguous`, bis ein Administrator den Fall geprüft hat. Der aktive `dedupe_key` bleibt währenddessen erhalten.
 
@@ -284,16 +295,23 @@ Nur genau ein vollständig passender Treffer darf das lokale Ergebnis ergänzen.
 
 Ein Item wird in dieser Reihenfolge verarbeitet:
 
-1. WHMCS-Invoice und Client über dokumentierte WHMCS-Schnittstellen laden.
-2. Existenz, Datumsschwelle, Paid-Regel, Währung und Sonderfall prüfen.
-3. Negative Positionen, Credits, OSS-Fälle und fachlich unklare Fälle im normalen Invoice-Export blockieren. Eine bestätigte Rückzahlung nutzt ausschließlich den separaten `correction_voucher`-Flow.
-4. Steuerfall bestimmen und Konto/Regel/Steuersatz gegen `ReceiptGuidance` validieren.
-5. Vorhandenes Mapping sowie Dedupe-Besitz prüfen.
-6. Bestehenden sevDesk-Kontakt über das konfigurierte WHMCS-Custom-Field wiederverwenden oder nach dem festgelegten Ablauf anlegen.
-7. WHMCS-PDF erzeugen und über `/Voucher/Factory/uploadTempFile` hochladen.
-8. Voucher mit Status 100 über `/Voucher/Factory/saveVoucher` anlegen.
-9. Remote-ID in `mod_sevdesk` speichern.
-10. Item-Ergebnis speichern.
+1. Falls ein möglicher früherer Kontakt-Write vorliegt, dessen read-only Recovery
+   abschließen oder `ambiguous` bleiben.
+2. Vorhandenes Mapping und Dedupe-Besitz prüfen.
+3. WHMCS-Invoice und Client über die vorgesehenen WHMCS-Schnittstellen laden sowie
+   Datumsschwelle und Paid-Regel prüfen.
+4. Reine Invoice-Fakten wie Währung, Guthaben, Null-/Negativbetrag, negative
+   Positionen und Summenkonsistenz ohne sevdesk-Read prüfen.
+5. Steuerfall bestimmen und Konto/Regel/Steuersatz gegen `ReceiptGuidance` validieren.
+6. WHMCS-PDF erzeugen und lokal validieren.
+7. Bestehenden sevDesk-Kontakt über das konfigurierte WHMCS-Custom-Field
+   wiederverwenden, nach WHMCS-Kundennummer verknüpfen oder kontrolliert anlegen.
+   Address-/E-Mail-Referenzdaten werden erst nach einer tatsächlich erfolgreichen
+   neuen Kontaktanlage lazy geladen.
+8. PDF über `/Voucher/Factory/uploadTempFile` hochladen.
+9. Mapping erneut prüfen und Voucher mit Status 100 über
+   `/Voucher/Factory/saveVoucher` anlegen.
+10. Remote-ID in `mod_sevdesk` und anschließend das Item-Ergebnis speichern.
 
 Eine Datenbanktransaktion kann nicht über den HTTP-Call hinweg reichen. Deshalb sichert die Recovery diesen Übergang ab.
 
@@ -355,6 +373,48 @@ nicht mitbringt (Skip-Link, Kennzahlenzeile, Tabellen-Feinheiten, Info-Popover,
 Ladeoverlay). Buttons, Farben und Typografie kommen unverändert aus dem Theme.
 Das JavaScript hängt ausschließlich an `data-*`-Attributen; diese Attribute sind
 der stabile Vertrag zwischen Templates und Verhalten.
+
+## Aktionen auf der WHMCS-Adminrechnung
+
+Der dokumentierte Hook `AdminInvoicesControlsOutput` ergänzt die
+Rechnungsbearbeitung um zwei getrennte Wege:
+
+- „Zu sevdesk exportieren“ ist ein normaler GET-Link zur vorausgefüllten
+  Einzelimportseite. Dort bleiben Dry-Run, Steuerprüfung und nötige Bestätigungen
+  sichtbar.
+- Der kompakte sevdesk-Logo-Kurzexport ist eine CSRF-geschützte POST-Aktion. Er prüft nur
+  den gespeicherten WHMCS-Stand auf bereits lokal erkennbare Blocker und legt
+  anschließend ein dedupliziertes `export_voucher`-Jobitem an. Der Browserrequest
+  ruft weder sevdesk noch Receipt Guidance auf.
+
+Der Invoice-Control-Hook liegt innerhalb des großen WHMCS-Rechnungsformulars.
+Deshalb enthält sein Markup kein weiteres Formular. Der Quick-Button verweist per
+`form`-Attribut auf ein verstecktes POST-Formular, das erst über
+`AdminAreaFooterOutput` außerhalb des Rechnungsformulars ausgegeben wird.
+Ungespeicherte Rechnungsänderungen gehören ausdrücklich nicht zum Kurzexport.
+Die kompakte sevdesk-Marke ist als statisches, dekoratives Inline-SVG enthalten;
+dadurch entstehen weder ein externer Request noch eine Abhängigkeit von öffentlich
+erreichbaren Modul-Asset-URLs. Markenänderungen werden nur gegen eine offizielle
+sevdesk-Quelle übernommen.
+
+Ein vollständiges Mapping ersetzt beide Exportaktionen durch den Remote-Link. Eine
+Legacy-NULL-Zuordnung sperrt den Kurzexport und verweist auf den Zuordnungsmanager.
+Guthaben, Fremdwährung, Null-/Negativbetrag, negative Position, fehlende Position,
+Status- oder Stichtagskonflikt bleiben beim normalen Einzelimport. Steuer- und
+Guidance-Entscheidungen werden im Kurzexport-Request nicht vorweggenommen. Die
+endgültige Prüfung übernimmt weiterhin der Worker; seine lokale Dokumentvalidierung
+trennt reine Invoice-Fakten von steuerabhängigen Regeln. Guthaben, Fremdwährung,
+Null-/Negativbetrag, negative Positionen und Summenabweichungen werden vor dem
+Receipt-Guidance-Read sowie vor PDF- und jeder neuen Kontaktanlage beendet. Liegt bereits
+`contact_write_requested` vor, hat die ausschließlich lesende Kontakt-Recovery
+Vorrang, damit ein früherer unbekannter POST-Ausgang nicht als normaler Fachfehler
+verloren geht.
+
+WHMCS dokumentiert keinen eigenen Output-Hook für den getrennten Nur-Ansehen-Modus
+der Adminrechnung. Release 2.0.0 injiziert dort deshalb kein fragiles DOM-Skript.
+Ein Kompatibilitätstest unter WHMCS 8.13.4 prüft, ob der vorhandene
+Invoice-Control-Hook auch in diesem Modus ausgelöst wird. Andernfalls ist eine
+separate, eng begrenzte Kompatibilitätsentscheidung nötig.
 
 ## Wann mehr Architektur gerechtfertigt wäre
 

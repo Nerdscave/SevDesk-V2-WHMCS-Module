@@ -20,7 +20,7 @@ Die mitgelieferte [OpenAPI-Spezifikation](docs/sevdesk-openapi.yaml) ist die tec
 
 Das Modul muss in Version 2.0.0:
 
-- unter WHMCS 8.13.4 und PHP 8.3 ohne ionCube laufen;
+- unter WHMCS 8.13.4 und PHP 8.3 laufen;
 - den bestehenden Modulnamen `sevdesk`, die funktionalen Addon-Einstellungen und `mod_sevdesk` weiterverwenden;
 - WHMCS-Rechnungen zunächst als sevDesk-`Voucher` samt WHMCS-PDF anlegen;
 - Einzel- und Massenexporte als persistente, wiederaufnehmbare Jobs verarbeiten;
@@ -39,7 +39,7 @@ Nicht enthalten sind:
 - eine externe Queue, ein zusätzlicher Dienst oder ein eigenes Framework;
 - automatische OSS-Voucher, weil die sevDesk-Regeln 18 bis 20 für Voucher nicht unterstützt werden;
 - automatische Refund-, Chargeback-, Gutschrift- oder Storno-Verarbeitung ohne Einzelfallprüfung;
-- die Lizenzprüfung des Vorgängermoduls;
+- eine externe Lizenzprüfung oder Remote-Abhängigkeiten, die für den Export nicht nötig sind;
 - unscharfes Zahlungs-Matching nach Name oder ungefähr passendem Betrag.
 
 `BookingService` mit der Jobaktion `book_payment` und `CorrectionService` mit `correction_voucher` gehören zu Release 2.0.0.
@@ -56,7 +56,7 @@ Nach einem Kontakt- oder Korrektur-POST mit unbekanntem Ergebnis darf die Recove
 
 Für den Rewrite waren vor allem diese Probleme ausschlaggebend:
 
-1. Das verschlüsselte Modul wurde für PHP 8.1 gebaut und blockiert unter PHP 8.3 bereits die Addon-Seiten.
+1. Das bisherige, nicht mehr gepflegte Modul ist mit PHP 8.3 nicht kompatibel und kann bereits die Addon-Seiten blockieren.
 2. EU-B2C-Rechnungen konnten mit einer B2B-Steuerregel an sevDesk gesendet werden. sevDesk quittierte die unzulässige Kombination aus Steuerregel und Konto mit HTTP 422.
 3. Massenexporte liefen in einem einzigen Browser-Request. Proxy- oder PHP-Timeouts, nicht abgefangene Fehler und unklare Zwischenzustände machten große Nachläufe unsicher.
 

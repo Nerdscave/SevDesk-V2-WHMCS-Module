@@ -4,13 +4,19 @@ declare(strict_types=1);
 
 namespace WHMCS\Module\Addon\SevDesk\Tests\Unit;
 
+use GuzzleHttp\Client;
+use GuzzleHttp\Handler\MockHandler;
+use GuzzleHttp\HandlerStack;
+use GuzzleHttp\Middleware;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use ReflectionClass;
+use WHMCS\Module\Addon\SevDesk\Api\SevdeskClient;
 use WHMCS\Module\Addon\SevDesk\Application;
 use WHMCS\Module\Addon\SevDesk\Config;
 use WHMCS\Module\Addon\SevDesk\Jobs\JobRunner;
 use WHMCS\Module\Addon\SevDesk\Repository\JobRepository;
+use WHMCS\Module\Addon\SevDesk\Service\ContactService;
 
 final class ApplicationTest extends TestCase
 {
@@ -40,6 +46,21 @@ final class ApplicationTest extends TestCase
         ) {
             self::assertNull($reflection->getProperty($property)->getValue($application), $property);
         }
+    }
+
+    public function testContactCompositionDoesNotFetchOptionalReferenceData(): void
+    {
+        $history = [];
+        $stack = HandlerStack::create(new MockHandler([]));
+        $stack->push(Middleware::history($history));
+        $client = new SevdeskClient(new Client(['handler' => $stack]), 'synthetic-token');
+        $reflection = new ReflectionClass(Application::class);
+        /** @var Application $application */
+        $application = $reflection->newInstanceWithoutConstructor();
+        $reflection->getProperty('client')->setValue($application, $client);
+
+        self::assertInstanceOf(ContactService::class, $application->contacts());
+        self::assertCount(0, $history, 'Optional contact reference IDs must stay lazy until a new contact exists.');
     }
 
     #[DataProvider('checkpointProvider')]

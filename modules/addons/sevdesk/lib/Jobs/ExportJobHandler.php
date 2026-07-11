@@ -63,24 +63,58 @@ final class ExportJobHandler
             );
         }
 
-        $mapping = $this->mappings->findByInvoice($invoiceId);
-        if ($mapping !== null && $mapping->sevdesk_id !== null && trim((string) $mapping->sevdesk_id) !== '') {
-            return JobOutcome::skipped(
-                'Die Rechnung ist bereits mit einem sevdesk-Beleg verknüpft.',
-                (string) $mapping->sevdesk_id,
-            );
-        }
-        if ($mapping !== null && (string) ($item->action ?? '') !== 'reconcile_voucher') {
-            return JobOutcome::ambiguous(
-                'Für diese Rechnung existiert eine alte NULL-Zuordnung. Vor einem Export ist eine Reconciliation erforderlich.',
-                'ambiguous_legacy',
-                errorCode: 'ambiguous_legacy',
-            );
-        }
-
         try {
+            $rawInvoice = null;
+            $contact = null;
+            $resolution = null;
+
+            // A previous Contact POST with an unknown outcome outranks every
+            // ordinary invoice or tax terminal. Until this read-only recovery
+            // is conclusive, releasing the export dedupe key could permit a
+            // second contact create on a later export attempt.
+            if ($contactRecoveryOnly) {
+                $clientId = self::contactRecoveryClientId($item);
+                if ($clientId < 1) {
+                    $rawInvoice = $this->whmcs->invoice($invoiceId);
+                    $clientId = (int) ($rawInvoice['userid'] ?? 0);
+                }
+                $contact = $this->whmcs->contactData($clientId);
+                $contactResult = $this->contacts->resolve($contact, $persistCheckpoint, true);
+                if ($contactResult->isFailure()) {
+                    return $this->contactRecoveryFailureToOutcome(
+                        $contactResult->errorCode() ?? 'contact_failed',
+                        $contactResult->errorMessage() ?? 'Der sevdesk-Kontakt konnte nicht aufgelöst werden.',
+                        $contactResult->context(),
+                        $item,
+                    );
+                }
+                $resolution = $contactResult->value();
+                if (!$resolution instanceof ContactResolution) {
+                    return JobOutcome::ambiguous(
+                        'Die lesende Kontakt-Recovery lieferte kein eindeutiges Ergebnis.',
+                        (string) ($item->checkpoint ?? 'contact_write_requested'),
+                        errorCode: 'invalid_contact_recovery_result',
+                    );
+                }
+            }
+
+            $mapping = $this->mappings->findByInvoice($invoiceId);
+            if ($mapping !== null && $mapping->sevdesk_id !== null && trim((string) $mapping->sevdesk_id) !== '') {
+                return JobOutcome::skipped(
+                    'Die Rechnung ist bereits mit einem sevdesk-Beleg verknüpft.',
+                    (string) $mapping->sevdesk_id,
+                );
+            }
+            if ($mapping !== null && (string) ($item->action ?? '') !== 'reconcile_voucher') {
+                return JobOutcome::ambiguous(
+                    'Für diese Rechnung existiert eine alte NULL-Zuordnung. Vor einem Export ist eine Reconciliation erforderlich.',
+                    'ambiguous_legacy',
+                    errorCode: 'ambiguous_legacy',
+                );
+            }
+
             $reconciliationRequired = $this->requiresReconciliation($item);
-            $rawInvoice = $this->whmcs->invoice($invoiceId);
+            $rawInvoice ??= $this->whmcs->invoice($invoiceId);
             $status = (string) ($rawInvoice['status'] ?? '');
             $onlyPaid = $this->config->bool('import_only_paid', true);
             if (!$reconciliationRequired && !self::statusIsExportable($status, $onlyPaid)) {
@@ -95,13 +129,25 @@ final class ExportJobHandler
             }
 
             $invoice = $this->whmcs->invoiceSnapshot($invoiceId);
-            if (!$reconciliationRequired && $invoice->currency !== 'EUR') {
-                return JobOutcome::permanentFailure(
-                    'Fremdwährungsrechnungen benötigen bis zur separaten Freigabe eine manuelle Prüfung.',
-                    errorCode: 'foreign_currency_requires_review',
+            $creditTreatmentConfirmed = $this->creditTreatmentConfirmed($item);
+            if (!$reconciliationRequired) {
+                $invoiceValidation = $this->exporter->validateInvoiceDocument(
+                    $invoice,
+                    $creditTreatmentConfirmed,
+                );
+                if ($invoiceValidation !== null) {
+                    return $this->toOutcome($invoiceValidation, $item, 'exported');
+                }
+            }
+
+            if ($contact !== null && $contact->whmcsClientId !== $invoice->clientId) {
+                return JobOutcome::ambiguous(
+                    'Die Rechnung wurde nach einem möglichen Kontakt-Write einem anderen Kunden zugeordnet.',
+                    (string) ($item->checkpoint ?? 'contact_linked'),
+                    errorCode: 'invoice_client_changed_after_contact_write',
                 );
             }
-            $contact = $this->whmcs->contactData($invoice->clientId);
+            $contact ??= $this->whmcs->contactData($invoice->clientId);
 
             if ($reconciliationRequired) {
                 $result = $this->reconciliation->reconcile(
@@ -113,9 +159,6 @@ final class ExportJobHandler
                 return $this->toOutcome($result, $item, 'reconciled');
             }
 
-            if (!$contactRecoveryOnly) {
-                $persistCheckpoint('preflight_complete', ['invoiceId' => $invoiceId]);
-            }
             $policy = ($this->taxPolicy)();
             $tax = $policy->decide(
                 $contact->countryCode,
@@ -126,35 +169,40 @@ final class ExportJobHandler
                 $invoice->lineItems,
                 $contact->isOrganisation(),
             );
-            if (!$tax->allowed) {
-                return JobOutcome::permanentFailure(
-                    self::messageFor($tax->code, $tax->message),
-                    errorCode: $tax->code,
-                );
+            $taxValidation = $this->exporter->validateTaxDecision($invoice, $tax);
+            if ($taxValidation !== null) {
+                return $this->toOutcome($taxValidation, $item, 'exported');
             }
 
-            // Validate the local document before a contact can be created.
+            if (!$contactRecoveryOnly) {
+                $persistCheckpoint('preflight_complete', ['invoiceId' => $invoiceId]);
+            }
+
+            // PDF generation can be relatively expensive and therefore happens
+            // only after the complete local voucher document has been accepted.
             $pdfContents = $this->pdf->render($invoiceId);
             if (!$contactRecoveryOnly) {
                 $persistCheckpoint('pdf_validated', ['invoiceId' => $invoiceId]);
             }
 
-            $contactResult = $this->contacts->resolve($contact, $persistCheckpoint, $contactRecoveryOnly);
-            if ($contactResult->isFailure()) {
-                return $this->failureResultToOutcome(
-                    $contactResult->errorCode() ?? 'contact_failed',
-                    $contactResult->errorMessage() ?? 'Der sevdesk-Kontakt konnte nicht aufgelöst werden.',
-                    $contactResult->context(),
-                    $item,
-                );
-            }
+            if ($resolution === null) {
+                $contactResult = $this->contacts->resolve($contact, $persistCheckpoint, false);
+                if ($contactResult->isFailure()) {
+                    return $this->failureResultToOutcome(
+                        $contactResult->errorCode() ?? 'contact_failed',
+                        $contactResult->errorMessage() ?? 'Der sevdesk-Kontakt konnte nicht aufgelöst werden.',
+                        $contactResult->context(),
+                        $item,
+                    );
+                }
 
-            $resolution = $contactResult->value();
-            if (!$resolution instanceof ContactResolution) {
-                return JobOutcome::permanentFailure(
-                    'Die Kontaktauflösung lieferte ein ungültiges Ergebnis.',
-                    errorCode: 'invalid_contact_resolution',
-                );
+                $resolution = $contactResult->value();
+                if (!$resolution instanceof ContactResolution) {
+                    return JobOutcome::permanentFailure(
+                        'Die Kontaktauflösung lieferte ein ungültiges Ergebnis.',
+                        errorCode: 'invalid_contact_resolution',
+                    );
+                }
             }
 
             $result = $this->exporter->export(
@@ -163,7 +211,7 @@ final class ExportJobHandler
                 $tax,
                 $pdfContents,
                 $persistCheckpoint,
-                $this->creditTreatmentConfirmed($item),
+                $creditTreatmentConfirmed,
             );
 
             return $this->toOutcome($result, $item, 'exported', [
@@ -311,6 +359,42 @@ final class ExportJobHandler
         );
     }
 
+    /** @param array<string, scalar|null> $context */
+    private function contactRecoveryFailureToOutcome(
+        string $code,
+        string $message,
+        array $context,
+        object $item,
+    ): JobOutcome {
+        $outcome = $this->failureResultToOutcome($code, $message, $context, $item);
+        if ($outcome->status === 'retry_wait') {
+            return JobOutcome::retry(
+                $outcome->message,
+                max(60, $outcome->retryAfterSeconds ?? 300),
+                $outcome->httpStatus,
+                $outcome->exceptionUuid,
+                $outcome->errorCode,
+                (string) ($item->checkpoint ?? 'contact_write_requested'),
+            );
+        }
+        if ($outcome->status !== 'permanent_failed') {
+            return $outcome;
+        }
+
+        // A failed or empty GET cannot disprove the earlier Contact POST. Once
+        // safe read retries are exhausted, keep the accounting identity locked
+        // for manual reconciliation instead of allowing another create.
+        return JobOutcome::ambiguous(
+            'Die lesende Kontakt-Recovery blieb ohne beweiskräftiges Ergebnis. Bitte manuell abgleichen.',
+            (string) ($item->checkpoint ?? 'contact_write_requested'),
+            null,
+            $outcome->httpStatus,
+            $outcome->exceptionUuid,
+            $code,
+            $context,
+        );
+    }
+
     private function requiresReconciliation(object $item): bool
     {
         return (isset($item->sevdesk_id) && trim((string) $item->sevdesk_id) !== '')
@@ -332,6 +416,17 @@ final class ExportJobHandler
 
         return is_array($candidate)
             && ($candidate['credit_treatment'] ?? null) === 'full_gross_voucher';
+    }
+
+    private static function contactRecoveryClientId(object $item): int
+    {
+        try {
+            $candidate = json_decode((string) ($item->candidate_json ?? ''), true, 32, JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            return 0;
+        }
+
+        return is_array($candidate) ? max(0, (int) ($candidate['whmcsClientId'] ?? 0)) : 0;
     }
 
     private function isAfterConfiguredStart(string $invoiceDate): bool

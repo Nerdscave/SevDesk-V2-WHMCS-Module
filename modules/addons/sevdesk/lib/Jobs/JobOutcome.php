@@ -68,6 +68,7 @@ final readonly class JobOutcome
         ?int $httpStatus = null,
         ?string $exceptionUuid = null,
         ?string $errorCode = null,
+        string $checkpoint = 'finished',
     ): self {
         return new self(
             'retry_wait',
@@ -76,6 +77,7 @@ final readonly class JobOutcome
             exceptionUuid: $exceptionUuid,
             errorCode: $errorCode,
             retryAfterSeconds: $retryAfterSeconds,
+            checkpoint: $checkpoint,
         );
     }
 }

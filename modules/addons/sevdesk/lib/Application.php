@@ -114,8 +114,8 @@ final class Application
             fn (int $clientId, string $contactId): bool => $this->storeContactId($clientId, $contactId),
             fn (string $countryCode): ?string => $referenceData->countryId($countryCode),
             '3',
-            $referenceData->contactAddressCategoryId(),
-            $referenceData->emailKeyId(),
+            fn (): ?string => $referenceData->contactAddressCategoryId(),
+            fn (): ?string => $referenceData->emailKeyId(),
         );
     }
 

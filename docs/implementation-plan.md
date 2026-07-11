@@ -62,7 +62,7 @@ Offen sind noch die Prüfungen, die eine echte Zielumgebung brauchen: der verpfl
 
 ### Exit-Kriterium
 
-- Keine ionCube-Abhängigkeit.
+- Keine Abhängigkeit vom bisherigen Modul oder von externen Lizenzdiensten.
 - Addon- und Settings-Seiten laden auch bei sevDesk-Ausfall ohne WHMCS-500.
 - Noch kein Codepfad kann einen Voucher schreiben.
 
@@ -217,11 +217,22 @@ Offen sind noch die Prüfungen, die eine echte Zielumgebung brauchen: der verpfl
 - Die Bulk-Vorschau trennt eligible, skipped, fachlich blockiert und bereits gemappt. „Blockiert“ bleibt eine Vorschaukategorie oder ein Fehlercode und ist kein Itemstatus.
 - CSRF- und Adminrollenprüfung für alle Mutationen.
 - relevante WHMCS-Hooks registrieren; Hooks deduplizieren und ausschließlich Jobs einplanen.
+- In der Admin-Rechnungsbearbeitung einen normalen Link zur vorausgefüllten
+  Einzelimport-Vorprüfung und einen kompakten Kurzexport anbieten. Der Kurzexport
+  ist POST-/CSRF-geschützt, arbeitet nur mit dem bereits gespeicherten
+  Rechnungsstand, legt ausschließlich ein dedupliziertes Jobitem an und führt im
+  Browserrequest keinen sevdesk-Aufruf aus.
+- Das Quick-POST-Formular außerhalb des WHMCS-Rechnungsformulars über den
+  Admin-Footer ausgeben; der Invoice-Control-Hook darf kein verschachteltes
+  `<form>` erzeugen. Bekannte Reviewfälle, vollständige Mappings und Legacy-NULL
+  werden fail-closed behandelt.
+- Den separaten Admin-Nur-Ansehen-Modus in einem Kompatibilitätstest unter
+  WHMCS 8.13.4 prüfen. Ohne dokumentierten Output-Hook wird keine allgemeine
+  DOM-Injektion eingebaut.
 - Mapping-Manager mit bestätigtem lokalen Unlink und ohne implizites Remote-Löschen bereitstellen.
 - Modul-CSS und Vanilla-JavaScript über `AdminAreaHeadOutput` beziehungsweise
   `AdminAreaFooterOutput` in die authentifizierte WHMCS-Antwort einbetten. Direkte
-  öffentliche Asset-URLs sind keine Voraussetzung, weil produktive Webserver den
-  Zugriff auf `/modules` häufig sperren.
+  öffentliche Asset-URLs sind dafür keine Voraussetzung.
 - Die Einrichtung zeigt sechs benannte Steuerprofile als getrennte Karten. Das
   Erlöskonto wird aus der Receipt-Guidance-Auswahl gewählt; TaxRule, Freigabestatus,
   Anwendungsgrenze und Blockierungsgrund bleiben dabei sichtbar.
@@ -246,6 +257,10 @@ Offen sind noch die Prüfungen, die eine echte Zielumgebung brauchen: der verpfl
 - Nutzer sieht während eines Laufs Gesamt, offen, laufend, erfolgreich, übersprungen, fehlgeschlagen und manuell zu prüfen.
 - Fehlertext nennt konkrete Rechnung und Ursache, aber keine Token/PII.
 - Seite kann neu geladen werden, ohne Job oder Auswahl zu verlieren.
+- Ein mehrfach ausgelöster Kurzexport besitzt höchstens ein aktives Jobitem; die
+  Rechnungsseite meldet Queueing, vorhandenen Job, Mapping oder Blockierung klar.
+- Der normale Rechnungsbutton öffnet die Einzelimportseite mit vorausgefüllter
+  Invoice-ID. Der Kurzexport übernimmt keine noch ungespeicherten Änderungen.
 - Ein abgelaufener Proxyrequest erzeugt keinen unbekannten Exportzustand.
 - Dashboard und Einrichtung bleiben bei schmalen Adminfenstern lesbar; Status wird
   nicht ausschließlich durch Farbe vermittelt.
@@ -386,7 +401,7 @@ Für jede Erweiterung braucht es einen konkreten Geschäftsfall, einen API-Nachw
 
 | Bereich | Muss-Kriterium |
 | --- | --- |
-| Kompatibilität | Addon, Settings, Cron und Invoice-Seiten laufen unter WHMCS 8.13.4/PHP 8.3 ohne ionCube |
+| Kompatibilität | Addon, Settings, Cron und Invoice-Seiten laufen unter WHMCS 8.13.4/PHP 8.3 ohne Abhängigkeit vom bisherigen Modul |
 | Legacy | Eine synthetische Struktur aus vollständigen, leeren und verwaisten Mappings übersteht die Migration unverändert |
 | Steuer | Ein EU-B2C-Fall erhält nie `INNERGEM_LIEF`; ungültige Konto-/Rule-Kombination wird vor Write blockiert |
 | Bulk | Job übersteht Browserende, Proxy-Timeout und Worker-Neustart |
@@ -402,4 +417,4 @@ Für jede Erweiterung braucht es einen konkreten Geschäftsfall, einen API-Nachw
 
 ## Rollback-Prinzip
 
-Ein Rollback deaktiviert Hooks und Worker und stellt die vorherigen Moduldateien wieder her. `mod_sevdesk` und die additiven Jobtabellen bleiben bestehen, damit der bisherige Fortschritt erhalten bleibt. `sevdesk_module_restore.sql` darf dafür nicht verwendet werden.
+Ein Rollback deaktiviert Hooks und Worker und stellt die vorherigen Moduldateien wieder her. `mod_sevdesk` und die additiven Jobtabellen bleiben bestehen, damit der bisherige Fortschritt erhalten bleibt. Ignorierte Restore- oder Dump-Dateien dürfen dafür nicht verwendet werden.

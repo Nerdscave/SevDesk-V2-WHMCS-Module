@@ -2,7 +2,7 @@
 
 ## Terminologie
 
-Dieses Projekt integriert das **sevDesk-Update 2.0**. Gemeint ist die seit 2024 eingeführte Buchhaltungslogik mit `taxRule`, `accountDatev`, `ReceiptGuidance` und strengerer Validierung.
+**sevDesk-Update 2.0** meint in diesem Projekt die Buchhaltungslogik mit `taxRule`, `accountDatev`, `ReceiptGuidance` und strengerer Validierung.
 
 Die HTTP-API heißt weiterhin:
 
@@ -46,7 +46,7 @@ Das Modul verwendet nur diese Aufrufe. Weitere Endpunkte kommen hinzu, sobald ei
 
 ## Voucher-first
 
-Die erste Version übernimmt die bereits in WHMCS erzeugte Rechnung als sevDesk-Voucher und hängt das WHMCS-PDF an. Die vorhandenen Zuordnungen verweisen auf solche Belege. Der Buchhaltungsnachlauf verwendet deshalb das bestehende WHMCS-Dokument und legt keine zusätzliche sevDesk-Ausgangsrechnung an.
+Die erste Version übernimmt die bereits in WHMCS erzeugte Rechnung als sevDesk-Voucher und hängt das WHMCS-PDF an. Der Buchhaltungsnachlauf verwendet damit das bestehende WHMCS-Dokument und legt keine zusätzliche sevDesk-Ausgangsrechnung an.
 
 Vor dem ersten Produktivlauf muss die Steuerberatung dieses Vorgehen bestätigen, und es muss in einem sevDesk-Testmandanten geprüft werden. Lässt sich ein Steuerfall technisch nicht als Voucher abbilden, blockiert das Modul ihn. Ein automatischer Wechsel auf ein anderes Objektmodell findet nicht statt.
 
@@ -59,7 +59,7 @@ Die Struktur folgt der lokalen OpenAPI-Spezifikation. Ein vereinfachtes Beispiel
   "voucher": {
     "objectName": "Voucher",
     "mapAll": true,
-    "voucherDate": "01.07.2026",
+    "voucherDate": "01.01.2030",
     "supplier": {
       "id": "CONTACT_ID",
       "objectName": "Contact"
@@ -79,7 +79,7 @@ Die Struktur folgt der lokalen OpenAPI-Spezifikation. Ein vereinfachtes Beispiel
     {
       "objectName": "VoucherPos",
       "mapAll": true,
-      "sumGross": 11.90,
+      "sumGross": 12.34,
       "net": false,
       "taxRate": 19.0,
       "accountDatev": {
@@ -93,7 +93,7 @@ Die Struktur folgt der lokalen OpenAPI-Spezifikation. Ein vereinfachtes Beispiel
 }
 ```
 
-Wichtige Invarianten:
+Für jeden Payload gilt:
 
 - `mapAll` ist ein Boolean, nicht der String `"true"`.
 - Nicht gesetzte Werte sind echtes JSON-`null`, nicht der String `"null"`.
@@ -124,7 +124,7 @@ Die Tabelle ist kein Steuerberatungsergebnis. Sie beschreibt API-Fähigkeiten un
 
 ## Fachliche Klassifikation
 
-Der Tax-Resolver folgt einer festen Reihenfolge. Das Ergebnis ist ein vollständiger, nachvollziehbarer Steuerfall oder ein blockierter Prüffall.
+Der Tax-Resolver prüft die Fälle in fester Reihenfolge. Er liefert entweder eine eindeutige Klassifikation oder einen Prüffall.
 
 ### Eingaben
 

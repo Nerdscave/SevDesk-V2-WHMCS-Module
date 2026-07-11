@@ -14,7 +14,7 @@ Dieses Runbook beschreibt den Betrieb des implementierten Moduls. Modul-UI, Work
 - API-Basis `https://my.sevdesk.de/api/v1`
 - ausreichend berechtigter sevDesk-API-Benutzer
 
-PHP-CLI und PHP-FPM müssen dieselbe relevante Konfiguration und dieselben Erweiterungen verwenden. Das Modul benötigt kein ionCube.
+PHP-CLI und PHP-FPM müssen dieselbe relevante Konfiguration und dieselben Erweiterungen verwenden.
 
 ## Vor jeder Installation oder jedem Upgrade
 
@@ -27,13 +27,13 @@ PHP-CLI und PHP-FPM müssen dieselbe relevante Konfiguration und dieselben Erwei
 7. Rollback-Dateien griffbereit halten.
 8. Prüfen, dass private Exporte und API-Token nicht im Deployment-Paket liegen.
 
-`sevdesk_module_restore.sql` ist weder ein Upgrade- noch ein Rollback-Werkzeug. Die Datei leert Tabellen, spielt einen veralteten Datenstand ein und enthält Geheimnisse.
+Ignorierte Restore- und Dump-Dateien sind weder Upgrade- noch Rollback-Werkzeuge. Sie können veraltete Daten, Zugangswerte oder destruktive Anweisungen enthalten.
 
 ## Erstinstallation oder Drop-in-Wechsel
 
 Der Dateideploy unterscheidet sich je nach Hosting. Die Reihenfolge ist immer:
 
-1. Altes verschlüsseltes Modul außerhalb des WHMCS-Addon-Scanpfads sichern.
+1. Bisherige Modulversion außerhalb des WHMCS-Addon-Scanpfads sichern.
 2. Neues Modul atomar unter `modules/addons/sevdesk` bereitstellen.
 3. Im WHMCS-Adminbereich das Addon aktivieren oder das Upgrade auslösen.
 4. Migrationsreport prüfen. Bei Mappingkonflikten abbrechen, nicht automatisch bereinigen.
@@ -45,6 +45,25 @@ Der Dateideploy unterscheidet sich je nach Hosting. Die Reihenfolge ist immer:
 10. Erst danach Hooks und Bulk-Nachlauf freigeben.
 
 Das Öffnen der Settings darf keinen Voucher schreiben und muss auch bei falschem Token möglich bleiben.
+
+### Rechnungsaktionen nach einem Upgrade prüfen
+
+1. Eine bereits gespeicherte, einfache EUR-Rechnung ohne Mapping, Guthaben oder
+   negative Position öffnen. Ungespeicherte Änderungen vorher sichern.
+2. „Zu sevdesk exportieren“ anklicken und prüfen, dass die Einzelimportseite mit
+   derselben Invoice-ID vorausgefüllt ist. Noch keinen Export bestätigen.
+3. Zur Rechnung zurückkehren und den kompakten sevdesk-Logo-Button einmal anklicken. Die
+   Rechnungsseite muss per HTTP-Redirect zurückkehren und den angelegten Job nennen.
+4. Vor dem Cronlauf prüfen, dass noch kein Remote-Beleg geschrieben wurde. Danach
+   genau einen Worker-/Cronlauf ausführen und Job, Mapping, PDF und Voucher prüfen.
+5. Den Kurzexport derselben noch ungemappten Rechnung vor beziehungsweise während
+   eines aktiven Jobs erneut auslösen. Die UI muss den bestehenden Export melden;
+   ein zweites aktives Item darf nicht entstehen.
+6. Nach erfolgreichem Mapping die Rechnungsseite neu laden. Statt Exportaktionen
+   muss der Link zum zugeordneten sevdesk-Beleg erscheinen.
+7. Separat den Admin-Nur-Ansehen-Modus prüfen. WHMCS dokumentiert dafür keinen
+   eigenen Invoice-Output-Hook; fehlt der Button dort, ist das kein Grund für eine
+   globale DOM-Injektion.
 
 Operative Einstellungen dürfen nur über `addonmodules.php?module=sevdesk&a=setup` geändert werden. Dieser Pfad nimmt den Advisory Lock, prüft aktive Jobs, deaktiviert während der Änderung die Hooks und validiert Systemversion sowie `ReceiptGuidance`.
 
@@ -195,6 +214,9 @@ Eine leere Remote-ID bedeutet „Ausgang unbekannt“, nicht „nicht importiert
 Direkte SQL-Änderungen sind nur im Notfall zulässig. Vor und nach der Änderung muss jeweils ein Backup erstellt werden. Vier-Augen-Prüfung und dokumentierte IDs sind ebenfalls Pflicht.
 
 Für unbekannte Kontakt- oder Korrektur-POSTs gilt außerdem: Die UI-Aktion **Abgleichen** liest nur Daten. Bleibt die Suche ohne Treffer, ist damit nicht bewiesen, dass sevDesk nichts angelegt hat. Das Item bleibt `ambiguous`. Ein neuer Create darf nur in einem separat geprüften, neuen Vorgang erfolgen.
+Dasselbe gilt, wenn die lesende Kontaktsuche nach ihren begrenzten sicheren
+Retries weiterhin mit 4xx/5xx oder einem Transportfehler endet: Der frühere
+Kontakt-POST bleibt ungeklärt, das Item `ambiguous` und der Dedupe-Key reserviert.
 
 ## Störungsmatrix
 
@@ -331,7 +353,7 @@ Ein Tokenwechsel verändert keine Mappings und löst keinen automatischen Nachla
 6. Health der verbleibenden WHMCS-Installation prüfen.
 7. Remote-Writes seit Deployment anhand der Jobs erfassen und mit sevDesk abstimmen.
 
-Das bisherige ionCube-Modul läuft nicht unter PHP 8.3 und eignet sich auf derselben Runtime nicht als dauerhafte Rückfalllösung. Im Zweifel bleibt das Addon deaktiviert, bis der Fehler behoben ist.
+Ist die bisherige Version nicht mit der Ziel-Runtime kompatibel, bleibt das Addon bis zur Behebung deaktiviert.
 
 ## Deaktivierung und Deinstallation
 

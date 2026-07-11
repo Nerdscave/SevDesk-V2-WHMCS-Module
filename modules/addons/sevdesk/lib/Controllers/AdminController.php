@@ -14,7 +14,9 @@ use WHMCS\Module\Addon\SevDesk\Domain\InvoiceSnapshot;
 use WHMCS\Module\Addon\SevDesk\Domain\LineItem;
 use WHMCS\Module\Addon\SevDesk\Health\HealthService;
 use WHMCS\Module\Addon\SevDesk\Service\CorrectionService;
+use WHMCS\Module\Addon\SevDesk\Support\AdminInvoiceControls;
 use WHMCS\Module\Addon\SevDesk\Support\Csrf;
+use WHMCS\Module\Addon\SevDesk\Support\QuickExportGuard;
 use WHMCS\Module\Addon\SevDesk\View;
 
 final class AdminController
@@ -163,6 +165,96 @@ final class AdminController
             'preflight' => $preflight,
             'job' => $job,
         ]);
+    }
+
+    /**
+     * Queue one saved invoice without running sevdesk work in the browser request.
+     *
+     * The compact invoice-page action is deliberately narrower than the normal
+     * single-export flow. Anything already known to require judgement is sent
+     * back to that preflight instead of being silently accepted here.
+     */
+    public function quickExport(): void
+    {
+        $this->csrf->assertPost();
+        $invoiceId = (int) ($_POST['invoiceid'] ?? 0);
+        if ($invoiceId < 1) {
+            throw new RuntimeException('Die Schnellaktion enthält keine gültige Rechnungs-ID.');
+        }
+
+        $notice = 'failed';
+        $jobId = null;
+        try {
+            $invoiceExists = Capsule::table('tblinvoices')->where('id', $invoiceId)->exists();
+            if (!$invoiceExists) {
+                $notice = 'not_found';
+            } else {
+                $invoice = $this->application->whmcs->invoiceForDryRun($invoiceId);
+                $mapping = $this->application->mappings->findByInvoice($invoiceId);
+                if ($invoice === null) {
+                    $notice = 'blocked';
+                } else {
+                    $invoiceItems = Capsule::table('tblinvoiceitems')->where('invoiceid', $invoiceId);
+                    $reason = QuickExportGuard::blockReason(
+                        $invoice,
+                        $mapping,
+                        $this->application->config->bool('import_only_paid', true),
+                        (string) $this->application->config->get('import_after', '01-01-1999'),
+                        (clone $invoiceItems)->exists(),
+                        (clone $invoiceItems)->where('amount', '<', 0)->exists(),
+                    );
+                    if ($reason === QuickExportGuard::ALREADY_MAPPED) {
+                        $notice = 'already_mapped';
+                    } elseif ($reason === QuickExportGuard::AMBIGUOUS_LEGACY) {
+                        $notice = 'legacy_mapping';
+                    } elseif ($reason !== null) {
+                        $notice = 'blocked';
+                    } else {
+                        $jobId = $this->application->jobs->create('single_export', [[
+                            'invoice_id' => $invoiceId,
+                            'action' => 'export_voucher',
+                            'dedupe_key' => 'export_voucher:' . $invoiceId,
+                        ]], [
+                            'invoice_id' => $invoiceId,
+                            'source' => 'admin_invoice_quick_export',
+                        ], $this->adminId());
+                        // Once create() returns, the transaction is committed.
+                        // A diagnostic read failure must not turn that durable
+                        // result into a false "nothing was queued" notice.
+                        $notice = 'queued';
+                        try {
+                            $item = $this->application->jobs->items($jobId)[0] ?? null;
+                            if ($item !== null && (string) $item->status === 'skipped') {
+                                $notice = 'already_active';
+                            }
+                        } catch (Throwable $readError) {
+                            if (function_exists('logActivity')) {
+                                logActivity(
+                                    'sevdesk quick export job ' . $jobId
+                                    . ' was committed, but its status read failed: ' . get_class($readError),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Throwable $error) {
+            if (function_exists('logActivity')) {
+                logActivity(
+                    'sevdesk quick export failed safely for invoice '
+                    . $invoiceId . ': ' . get_class($error),
+                );
+            }
+            $notice = 'failed';
+            $jobId = null;
+        }
+
+        AdminInvoiceControls::storeNotice(
+            $invoiceId,
+            $notice,
+            $notice === 'queued' ? $jobId : null,
+        );
+        $this->redirectToInvoice($invoiceId);
     }
 
     public function massImport(): void
@@ -1291,6 +1383,26 @@ final class AdminController
         if (!headers_sent()) {
             header('Content-Type: ' . $contentType);
         }
+    }
+
+    private function redirectToInvoice(int $invoiceId): never
+    {
+        $location = 'invoices.php?action=edit&id=' . $invoiceId;
+        if (ob_get_level() > 0) {
+            ob_clean();
+        }
+        if (!headers_sent()) {
+            header('Cache-Control: no-store, private');
+            header('Location: ' . $location, true, 303);
+            exit;
+        }
+
+        // WHMCS normally buffers addon output, but keep a fixed-destination
+        // fallback for installations whose admin template already sent headers.
+        $escapedLocation = htmlspecialchars($location, ENT_QUOTES, 'UTF-8');
+        echo '<meta http-equiv="refresh" content="0;url=' . $escapedLocation . '">'
+            . '<p><a href="' . $escapedLocation . '">Zur Rechnung zurückkehren</a></p>';
+        exit;
     }
 
     /** @return array{page:int,total_pages:int,previous_url:?string,next_url:?string} */

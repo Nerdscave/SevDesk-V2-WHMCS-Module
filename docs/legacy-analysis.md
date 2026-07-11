@@ -10,7 +10,7 @@ Für den aktuellen API-Vertrag gilt die versionierte OpenAPI-Datei.
 
 ### Laufzeitkompatibilität
 
-Die bisherige, nicht mehr gepflegte Erweiterung ist nicht mit der Zielplattform WHMCS 8.13.4 und PHP 8.3 kompatibel. Der Rewrite kommt ohne verschleierte Laufzeitdateien und ohne externe Lizenzprüfung aus.
+Die bisherige, nicht mehr gepflegte Erweiterung ist nicht mit der Zielplattform WHMCS 8.13.4 und PHP 8.3 kompatibel. Der Rewrite benötigt keine zusätzlichen Lizenz- oder Laufzeitdienste.
 
 ### EU B2C mit falscher Steuerregel
 
@@ -47,28 +47,19 @@ Eine Invoice ohne Mapping ist nicht automatisch ein fehlender Export. Status, Im
 
 ### Einstellungen
 
-Die funktionalen Einstellungen liegen in `tbladdonmodules` unter `module = 'sevdesk'`. Der Rewrite übernimmt unterstützte Werte additiv und lässt nicht mehr benötigte Lizenzfelder unangetastet.
+Die funktionalen Einstellungen liegen in `tbladdonmodules` unter `module = 'sevdesk'`. Der Rewrite übernimmt unterstützte Werte additiv. Unbekannte oder nicht mehr verwendete Werte bleiben bei einem normalen Upgrade unangetastet.
 
 Konkrete API-Token, Custom-Field-IDs, Konto-IDs, Importgrenzen und Schalter stehen bewusst nicht hier. Sie gehören zur jeweiligen Umgebung. Account-Datev-IDs aus einer bestehenden Installation dürfen auch nicht in Code oder Tests landen.
 
-## Bisheriger Importablauf
+## Recovery-Grenze
 
-Der bisherige Import lief vereinfacht so:
+Kontaktanlage, PDF-Upload, Voucher-Erstellung und lokales Mapping liegen nicht in einer gemeinsamen Transaktion. Bricht ein Prozess nach einem Remote-Write ab, kann dessen Ausgang unbekannt bleiben. Die Recovery liest deshalb zuerst den Remote-Bestand und legt weder Kontakt noch Voucher blind ein zweites Mal an. Eine neue Mappingzeile entsteht erst, wenn die Remote-ID bestätigt ist.
 
-1. Invoice über die WHMCS Local API laden.
-2. Client laden und die sevDesk-Kontakt-ID aus einem WHMCS-Custom-Field lesen.
-3. Fehlenden Kontakt anlegen und seine Remote-ID in WHMCS speichern.
-4. Steuerfall aus Rechnungs- und Kundendaten bestimmen.
-5. Eine Mappingzeile mit leerer `sevdesk_id` als Reservierung anlegen.
-6. Das WHMCS-Rechnungs-PDF erzeugen und hochladen.
-7. Den Voucher anlegen.
-8. Die Remote-ID im Mapping ergänzen.
-
-Der Rewrite bleibt deshalb zunächst bei Voucher-first. Nicht jeder fachliche Sonderfall lässt sich dabei automatisch abbilden.
+Der Rewrite arbeitet zunächst Voucher-first. Nicht jeder fachliche Sonderfall lässt sich dabei automatisch abbilden.
 
 ## Implizite Zustände
 
-Die Tabelle wurde gleichzeitig als Historie und als temporäre Sperre verwendet:
+Die Tabelle kann neben vollständigen Zuordnungen auch unterbrochene oder verwaiste Zustände enthalten:
 
 | Zustand | Bedeutung |
 | --- | --- |
@@ -79,23 +70,15 @@ Die Tabelle wurde gleichzeitig als Historie und als temporäre Sperre verwendet:
 
 Leere Reservierungen können nach einem Prozessabbruch, Timeout oder Laufzeitfehler stehen bleiben. Jede solche Zeile muss einzeln mit dem aktuellen Remote-Bestand abgeglichen werden. Das Modul darf weder Erfolg annehmen noch automatisch einen zweiten Beleg anlegen.
 
-## Bulk- und UI-Verhalten
+## Jobs und Hooks
 
-Der bisherige Massenimport lief vollständig im abschließenden Browser-Request. Er speicherte weder einen Job noch einen serverseitigen Fortschritt. Nach einem Abbruch fehlten deshalb ein verlässlicher Fortsetzungspunkt und eine sichere Wiederaufnahme.
+Massenexporte werden als persistente Jobs verarbeitet. Der Fortschritt bleibt nach Browserende oder Prozessabbruch erhalten, und ein Fehler beendet nur das betroffene Item. Ausgelassene Rechnungen erhalten einen eindeutigen Grund.
 
-Ein Fehler war außerdem nicht immer auf die betroffene Rechnung begrenzt. Netzwerk-, Laufzeit-, Typ- oder Datenbankfehler konnten den gesamten Request abbrechen. Ausgelassene Exporte konnten zugleich wie ein Erfolg erscheinen, etwa bei einer unbezahlten Rechnung oder einem Rechnungsdatum vor der Importgrenze.
-
-Der Rewrite speichert jeden Lauf als Job, grenzt Fehler pro Item ab und meldet ausgelassene Rechnungen mit einem eindeutigen Grund.
-
-## Hook-Verhalten
-
-Automatische Exporte liefen teilweise direkt in WHMCS-Benutzerrequests rund um Rechnungserstellung, Zahlung und Checkout. Integrationsfehler konnten dadurch den eigentlichen WHMCS-Ablauf stören.
-
-Hooks dürfen im Rewrite nur idempotent einen Job einplanen. Remote-I/O findet ausschließlich im Worker statt.
+Hooks planen Arbeit lediglich idempotent ein. Remote-I/O findet ausschließlich im Worker statt und darf den WHMCS-Benutzerrequest nicht stören.
 
 ## API-Basis
 
-Ältere Unterlagen verwendeten „V2“ nicht einheitlich. Die API bleibt unter `/api/v1`. „sevDesk-Update 2.0“ bezeichnet hier die Buchhaltungslogik mit `taxRule` und `accountDatev`, nicht eine neue API-Version.
+Die HTTP-API bleibt unter `/api/v1`. „sevDesk-Update 2.0“ bezeichnet hier die Buchhaltungslogik mit `taxRule` und `accountDatev`, nicht eine neue API-Version.
 
 ## Lokale Restore- und Dump-Dateien
 
@@ -111,13 +94,7 @@ Lokale Restore- oder Dump-Dateien sind keine Migration. Sie können veraltete Da
 - Der Worker fängt Fehler pro Item ab und speichert nur bereinigte Diagnosedaten.
 - Hook-Fehler bleiben vollständig vom WHMCS-Kern getrennt.
 - Ein unbekannter Remote-Ausgang wird lesend abgeglichen, bevor ein Mensch über das weitere Vorgehen entscheidet.
-- Nicht benötigte Anbieter- und Lizenzabhängigkeiten werden nicht übernommen.
 
-## Offene fachliche Punkte
+## Freigabe
 
-Vor der Produktivfreigabe sind weiterhin zu klären:
-
-- die steuerlich freigegebene Matrix für Hosting-Leistungen, EU B2B, EU B2C und Drittland;
-- welche aktuell ungemappten Invoices tatsächlich exportpflichtig sind;
-- ob historische Mappings auf Voucher oder auf verschiedene Objektarten zeigen;
-- ob verwaiste Zuordnungen dauerhaft aufbewahrt werden sollen.
+Vor der Produktivfreigabe müssen Steuerfälle, Migration und Aufbewahrung für die jeweilige Zielumgebung geprüft werden. Bestandsdetails und Prüfergebnisse gehören nicht ins Repository.

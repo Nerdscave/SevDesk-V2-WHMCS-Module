@@ -21,11 +21,18 @@ final class ContactService
     /** @var Closure(string): (int|string|null) */
     private readonly Closure $resolveCountryId;
 
+    /** @var Closure(): (string|null) */
+    private readonly Closure $resolveAddressCategoryId;
+
+    /** @var Closure(): (string|null) */
+    private readonly Closure $resolveEmailKeyId;
+
     /**
      * Collaborator signatures:
      *
      * - $persistContactId(int $whmcsClientId, string $sevdeskContactId): bool|null
      * - $resolveCountryId(string $isoCountryCode): int|string|null
+     * - optional category/key callables(): int|string|null
      *
      * Address and email category/key IDs must come from the target sevdesk account;
      * this service deliberately does not guess locale/account-specific identifiers.
@@ -35,14 +42,14 @@ final class ContactService
         callable $persistContactId,
         callable $resolveCountryId,
         private readonly string $contactCategoryId = '3',
-        private readonly ?string $addressCategoryId = null,
-        private readonly ?string $emailKeyId = null,
+        string|callable|null $addressCategoryId = null,
+        string|callable|null $emailKeyId = null,
     ) {
         $this->persistContactId = Closure::fromCallable($persistContactId);
         $this->resolveCountryId = Closure::fromCallable($resolveCountryId);
         self::assertOptionalNumericId($contactCategoryId, 'Contact category');
-        self::assertOptionalNumericId($addressCategoryId, 'Address category');
-        self::assertOptionalNumericId($emailKeyId, 'Email key');
+        $this->resolveAddressCategoryId = self::optionalIdResolver($addressCategoryId, 'Address category');
+        $this->resolveEmailKeyId = self::optionalIdResolver($emailKeyId, 'Email key');
     }
 
     /**
@@ -274,7 +281,13 @@ final class ContactService
             return;
         }
 
-        if ($this->addressCategoryId === null) {
+        try {
+            $addressCategoryId = ($this->resolveAddressCategoryId)();
+        } catch (Throwable) {
+            $warnings[] = 'address_not_added:category_resolution_failed';
+            return;
+        }
+        if ($addressCategoryId === null) {
             $warnings[] = 'address_not_added:category_not_configured';
             return;
         }
@@ -305,7 +318,7 @@ final class ContactService
                 'city' => trim($contact->city),
                 'country' => ['id' => self::payloadId($countryId), 'objectName' => 'StaticCountry'],
                 'category' => [
-                    'id' => self::payloadId($this->addressCategoryId),
+                    'id' => self::payloadId($addressCategoryId),
                     'objectName' => 'Category',
                 ],
                 'name' => $contact->displayName(),
@@ -326,7 +339,13 @@ final class ContactService
             $warnings[] = 'email_not_added:invalid_address';
             return;
         }
-        if ($this->emailKeyId === null) {
+        try {
+            $emailKeyId = ($this->resolveEmailKeyId)();
+        } catch (Throwable) {
+            $warnings[] = 'email_not_added:key_resolution_failed';
+            return;
+        }
+        if ($emailKeyId === null) {
             $warnings[] = 'email_not_added:key_not_configured';
             return;
         }
@@ -337,7 +356,7 @@ final class ContactService
                 'type' => 'EMAIL',
                 'value' => $email,
                 'key' => [
-                    'id' => self::payloadId($this->emailKeyId),
+                    'id' => self::payloadId($emailKeyId),
                     'objectName' => 'CommunicationWayKey',
                 ],
                 'main' => true,
@@ -458,6 +477,32 @@ final class ContactService
     private static function payloadId(string $id): int|string
     {
         return ctype_digit($id) && strlen($id) < 19 ? (int) $id : $id;
+    }
+
+    /** @return Closure(): (string|null) */
+    private static function optionalIdResolver(string|callable|null $value, string $field): Closure
+    {
+        if (!is_callable($value)) {
+            self::assertOptionalNumericId($value, $field);
+
+            return static fn (): ?string => $value;
+        }
+
+        $resolver = Closure::fromCallable($value);
+
+        return static function () use ($resolver, $field): ?string {
+            $resolved = $resolver();
+            if ($resolved === null) {
+                return null;
+            }
+            if (!is_int($resolved) && !is_string($resolved)) {
+                throw new \InvalidArgumentException($field . ' resolver must return a numeric ID or null.');
+            }
+            $id = (string) $resolved;
+            self::assertOptionalNumericId($id, $field);
+
+            return $id;
+        };
     }
 
     private static function assertOptionalNumericId(?string $id, string $field): void

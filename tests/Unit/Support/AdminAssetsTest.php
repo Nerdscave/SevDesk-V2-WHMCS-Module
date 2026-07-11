@@ -49,8 +49,10 @@ final class AdminAssetsTest extends TestCase
         self::assertIsString($hooks);
         self::assertStringContainsString("add_hook('AdminAreaHeadOutput'", $hooks);
         self::assertStringContainsString("add_hook('AdminAreaFooterOutput'", $hooks);
-        self::assertSame(2, substr_count($hooks, "(\$_GET['module'] ?? null) !== 'sevdesk'"));
+        self::assertSame(1, substr_count($hooks, "(\$_GET['module'] ?? null) !== 'sevdesk'"));
+        self::assertSame(1, substr_count($hooks, "(\$_GET['module'] ?? null) === 'sevdesk'"));
         self::assertStringContainsString('AdminAssets::stylesheetMarkup()', $hooks);
         self::assertStringContainsString('AdminAssets::scriptMarkup()', $hooks);
+        self::assertStringContainsString('AdminInvoiceControls::footerForms()', $hooks);
     }
 }

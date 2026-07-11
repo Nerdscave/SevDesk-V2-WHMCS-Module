@@ -178,6 +178,7 @@ final class JobRepository
     public function finish(object $item, JobOutcome $outcome): void
     {
         $now = $this->now();
+        $jobId = (int) $item->job_id;
         $terminal = in_array($outcome->status, ['succeeded', 'skipped', 'permanent_failed', 'ambiguous'], true);
         $availableAt = $now;
         if ($outcome->status === 'retry_wait') {
@@ -186,29 +187,52 @@ final class JobRepository
                 ->format('Y-m-d H:i:s');
         }
 
-        Capsule::table(Migrator::ITEMS_TABLE)
-            ->where('id', $item->id)
-            ->where('lease_token', $item->lease_token)
-            ->update([
-                'status' => $outcome->status,
-                'checkpoint' => $outcome->checkpoint,
-                'available_at' => $availableAt,
-                'lease_token' => null,
-                'leased_until' => null,
-                'dedupe_key' => in_array($outcome->status, ['retry_wait', 'ambiguous'], true)
-                    ? $item->dedupe_key
-                    : null,
-                'sevdesk_id' => $outcome->sevdeskId ?? $item->sevdesk_id,
-                'candidate_json' => $this->mergeCandidateJson($item->candidate_json ?? null, $outcome->candidate),
-                'http_status' => $outcome->httpStatus,
-                'exception_uuid' => $outcome->exceptionUuid,
-                'error_code' => $outcome->errorCode,
-                'message' => mb_substr($outcome->message, 0, 4000),
-                'finished_at' => $terminal ? $now : null,
-                'updated_at' => $now,
-            ]);
+        Capsule::connection()->transaction(function () use (
+            $item,
+            $outcome,
+            $availableAt,
+            $terminal,
+            $now,
+        ): void {
+            // Checkpoints update candidate_json and remote IDs while the handler
+            // still holds its original claim snapshot. Lock and merge against the
+            // authoritative row so finish() cannot erase newer recovery context.
+            $current = Capsule::table(Migrator::ITEMS_TABLE)
+                ->where('id', $item->id)
+                ->where('lease_token', $item->lease_token)
+                ->lockForUpdate()
+                ->first();
+            if ($current === null) {
+                return;
+            }
 
-        $this->refreshJob((int) $item->job_id);
+            Capsule::table(Migrator::ITEMS_TABLE)
+                ->where('id', $current->id)
+                ->where('lease_token', $item->lease_token)
+                ->update([
+                    'status' => $outcome->status,
+                    'checkpoint' => $outcome->checkpoint,
+                    'available_at' => $availableAt,
+                    'lease_token' => null,
+                    'leased_until' => null,
+                    'dedupe_key' => in_array($outcome->status, ['retry_wait', 'ambiguous'], true)
+                        ? $current->dedupe_key
+                        : null,
+                    'sevdesk_id' => $outcome->sevdeskId ?? $current->sevdesk_id,
+                    'candidate_json' => $this->mergeCandidateJson(
+                        $current->candidate_json ?? null,
+                        $outcome->candidate,
+                    ),
+                    'http_status' => $outcome->httpStatus,
+                    'exception_uuid' => $outcome->exceptionUuid,
+                    'error_code' => $outcome->errorCode,
+                    'message' => mb_substr($outcome->message, 0, 4000),
+                    'finished_at' => $terminal ? $now : null,
+                    'updated_at' => $now,
+                ]);
+        });
+
+        $this->refreshJob($jobId);
     }
 
     public function cancel(int $jobId): void
