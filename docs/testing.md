@@ -202,6 +202,9 @@ Diese Punkte werden manuell oder mit passenden Browsertests geprüft:
 - keine unescaped API-Meldung im HTML;
 - keine PII in URL oder Querystring;
 - Rollen ohne Modulzugriff können weder Jobs lesen noch starten.
+- Zuordnungs-, Job- und Detailtemplates mit synthetischen Capsule-`stdClass`-Zeilen
+  rendern beziehungsweise ihren View-Vertrag prüfen; `View` muss sie vor der
+  Smarty-Punktnotation rekursiv zu Arrays normalisieren.
 - Invoice-Control-Markup enthält kein verschachteltes Formular. Das externe
   Footer-Form enthält nur CSRF-Token und Invoice-ID; der Quick-Button verweist
   explizit darauf.

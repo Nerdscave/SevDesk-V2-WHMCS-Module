@@ -244,6 +244,15 @@ final class TemplateContractTest extends TestCase
         }
     }
 
+    public function testAssignmentManagerUsesThePersistedMappingIdentifier(): void
+    {
+        $template = $this->template('assignment_manager.tpl');
+
+        self::assertStringContainsString('<th scope="col">Mapping-ID</th>', $template);
+        self::assertStringContainsString('$mapping.mapping_id|escape:', $template);
+        self::assertStringNotContainsString('$mapping.created_at', $template);
+    }
+
     private function template(string $relativePath): string
     {
         $path = dirname(__DIR__, 2) . '/modules/addons/sevdesk/templates/' . $relativePath;

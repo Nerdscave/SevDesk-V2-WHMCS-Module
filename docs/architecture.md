@@ -382,6 +382,12 @@ Ladeoverlay). Buttons, Farben und Typografie kommen unverändert aus dem Theme.
 Das JavaScript hängt ausschließlich an `data-*`-Attributen; diese Attribute sind
 der stabile Vertrag zwischen Templates und Verhalten.
 
+Capsule liefert Abfragezeilen als `stdClass`, während die in WHMCS verwendete
+Smarty-Version Punktnotation als Arrayzugriff kompiliert. `View` normalisiert
+diese Persistenzobjekte deshalb rekursiv zu Arrays, bevor Variablen an Smarty
+übergeben werden. Fachliche Objekte werden nicht pauschal umgewandelt. Dadurch
+verwenden Listen- und Detailtemplates einen einheitlichen Datenvertrag.
+
 ## Aktionen auf der WHMCS-Adminrechnung
 
 Der dokumentierte Hook `AdminInvoicesControlsOutput` ergänzt die

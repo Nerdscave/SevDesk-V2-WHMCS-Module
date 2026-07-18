@@ -29,10 +29,27 @@ final class View
             'flash' => $this->consumeFlash(),
         ], $variables);
 
-        foreach ($variables as $key => $value) {
+        foreach (self::normaliseVariables($variables) as $key => $value) {
             $smarty->assign($key, $value);
         }
         $smarty->display($template);
+    }
+
+    /**
+     * WHMCS Smarty compiles dot notation as array access, while Capsule query
+     * rows are stdClass objects. Normalise that persistence shape once at the
+     * view boundary so every list and detail template receives one contract.
+     *
+     * @param array<string, mixed> $variables
+     * @return array<string, mixed>
+     */
+    public static function normaliseVariables(array $variables): array
+    {
+        foreach ($variables as $key => $value) {
+            $variables[$key] = self::normaliseValue($value);
+        }
+
+        return $variables;
     }
 
     public function flash(string $type, string $message, string $title = ''): void
@@ -78,5 +95,20 @@ final class View
             'title' => $flash['title'],
             'message' => $flash['message'],
         ];
+    }
+
+    private static function normaliseValue(mixed $value): mixed
+    {
+        if ($value instanceof \stdClass) {
+            $value = get_object_vars($value);
+        }
+        if (!is_array($value)) {
+            return $value;
+        }
+        foreach ($value as $key => $nested) {
+            $value[$key] = self::normaliseValue($nested);
+        }
+
+        return $value;
     }
 }

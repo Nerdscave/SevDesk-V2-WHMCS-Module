@@ -35,7 +35,7 @@
                 <th scope="col">Rechnungsdatum</th>
                 <th scope="col">sevdesk-Beleg</th>
                 <th scope="col">Zustand</th>
-                <th scope="col">Zuordnung</th>
+                <th scope="col">Mapping-ID</th>
                 <th scope="col" class="sd-table-action"><span class="sr-only">Aktion</span></th>
             </tr>
             </thead>
@@ -70,7 +70,7 @@
                             {include file="partials/status_badge.tpl" status="mapped"}
                         {/if}
                     </td>
-                    <td>{$mapping.created_at|default:$mapping.id|default:'Legacy-Datensatz'|escape:'html':'UTF-8'}</td>
+                    <td><span class="sd-mono">{$mapping.mapping_id|escape:'html':'UTF-8'}</span></td>
                     <td class="sd-table-action">
                         <form method="post" action="{$moduleLink|escape:'html':'UTF-8'}&amp;a=assignmentManager" data-confirm="Zuordnung wirklich aufheben? Der Beleg in sevdesk bleibt bestehen und ein späterer Export kann ein Duplikat anlegen.">
                             <input type="hidden" name="token" value="{$csrfToken|escape:'html':'UTF-8'}">
