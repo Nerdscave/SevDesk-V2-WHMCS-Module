@@ -216,7 +216,7 @@ Offen sind noch die Prüfungen, die eine echte Zielumgebung brauchen: der verpfl
 - gezielten Retry nur für `permanent_failed` und nach Abgleich für `ambiguous` erlauben.
 - Die Bulk-Vorschau trennt eligible, skipped, fachlich blockiert und bereits gemappt. „Blockiert“ bleibt eine Vorschaukategorie oder ein Fehlercode und ist kein Itemstatus.
 - CSRF- und Adminrollenprüfung für alle Mutationen.
-- relevante WHMCS-Hooks registrieren; Hooks deduplizieren und ausschließlich Jobs einplanen.
+- relevante WHMCS-Hooks registrieren; Hooks deduplizieren und ausschließlich Jobs einplanen. Alle ereignisgetriebenen Enqueue-Hooks respektieren zusätzlich `sync_enabled`; der Runner bleibt bei aktiver Modullaufzeit für manuell angelegte Jobs verfügbar.
 - In der Admin-Rechnungsbearbeitung einen normalen Link zur vorausgefüllten
   Einzelimport-Vorprüfung und einen kompakten Kurzexport anbieten. Der Kurzexport
   ist POST-/CSRF-geschützt, arbeitet nur mit dem bereits gespeicherten

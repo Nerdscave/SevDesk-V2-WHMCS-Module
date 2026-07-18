@@ -46,6 +46,26 @@ Der Dateideploy unterscheidet sich je nach Hosting. Die Reihenfolge ist immer:
 
 Das Öffnen der Settings darf keinen Voucher schreiben und muss auch bei falschem Token möglich bleiben.
 
+### Bereits aktives Alt-Addon ohne internes Aktivierungsflag
+
+Wurde der Rewrite über ein in WHMCS bereits aktives Alt-Addon gelegt, kann der
+neue Aktivierungs-Callback ausgeblieben sein. Der CLI-Worker beendet sich dann
+absichtlich, weil `module_active` fehlt. Das Flag darf nicht isoliert per SQL
+gesetzt werden.
+
+In einem Wartungsfenster wird einmal der vorhandene, WHMCS-gebootstrappte
+`sevdesk_activate()`-Callback ausgeführt. Er führt die additive Migration aus,
+setzt zuerst `sync_enabled=off` und aktiviert erst danach die Modullaufzeit. Vor
+und nach dem Aufruf sind Settings, Mapping-Fingerprint sowie Job-/Itemzahlen zu
+vergleichen. Die Aktivierung selbst legt keinen Exportjob an und sendet keinen
+sevdesk-Request. Erst nach erfolgreichem Ergebnis und weiterhin deaktivierter
+Synchronisation folgt der leere Runner-Smoke.
+
+`module_active=on` allein aktiviert keine automatischen Exporte. Sämtliche
+ereignisgetriebenen Invoice-, Refund-, Cancel- und Transaktions-Hooks benötigen
+zusätzlich `sync_enabled=on`. Manuell bestätigte Adminjobs und der Runner bleiben
+bewusst verfügbar.
+
 ### Rechnungsaktionen nach einem Upgrade prüfen
 
 1. Eine bereits gespeicherte, einfache EUR-Rechnung ohne Mapping, Guthaben oder
@@ -102,6 +122,8 @@ Numerische Account-Datev-IDs müssen aus dem aktuellen Mandanten stammen und wer
 Alle Punkte müssen grün sein:
 
 - PHP 8.3 und WHMCS 8.13.4 erkannt;
+- interne Modullaufzeit ist aktiviert, automatische Synchronisation bleibt bis
+  zur ausdrücklichen Canary-Freigabe deaktiviert;
 - Datenbankschema vorhanden und Migration vollständig;
 - `mod_sevdesk` lesbar, Unique-Constraints intakt;
 - keine ungeklärten Schema- oder Mappingkonflikte;

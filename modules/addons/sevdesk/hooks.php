@@ -16,6 +16,16 @@ if (!defined('WHMCS')) {
 
 require_once __DIR__ . '/lib/Autoloader.php';
 
+/**
+ * Event-driven enqueueing stays disabled during setup and canary runs, while
+ * the runner remains available for explicitly created admin jobs.
+ */
+function sevdesk_automatic_enqueue_enabled(Application $application): bool
+{
+    return $application->config->bool('module_active')
+        && $application->config->bool('sync_enabled');
+}
+
 /** @param array<string, mixed> $vars */
 function sevdesk_enqueue_invoice(array $vars, string $event): void
 {
@@ -24,7 +34,7 @@ function sevdesk_enqueue_invoice(array $vars, string $event): void
             return;
         }
         $application = Application::instance();
-        if (!$application->config->bool('module_active') || !$application->config->bool('sync_enabled')) {
+        if (!sevdesk_automatic_enqueue_enabled($application)) {
             return;
         }
         if ($event === 'InvoicePaid' && !$application->config->bool('import_only_paid', true)) {
@@ -59,7 +69,7 @@ function sevdesk_enqueue_review(array $vars, string $reason): void
             return;
         }
         $application = Application::instance();
-        if (!$application->config->bool('module_active')) {
+        if (!sevdesk_automatic_enqueue_enabled($application)) {
             return;
         }
         $invoiceId = (int) ($vars['invoiceid'] ?? 0);
@@ -86,7 +96,7 @@ function sevdesk_enqueue_transaction_review(array $vars): void
             return;
         }
         $application = Application::instance();
-        if (!$application->config->bool('module_active')) {
+        if (!sevdesk_automatic_enqueue_enabled($application)) {
             return;
         }
         $transactionId = (int) ($vars['id'] ?? 0);

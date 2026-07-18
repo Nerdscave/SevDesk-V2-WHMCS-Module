@@ -100,6 +100,9 @@ In einer Testinstallation mit WHMCS 8.13.4 und PHP 8.3:
 - einen leeren CLI-Runner ausführen und bestätigen, dass er nur den Heartbeat
   aktualisiert, kein Item claimt und keinen sevdesk-Service konstruiert;
 - relevante Invoice-, Paid- und Checkout-Hooks auslösen;
+- mit `module_active=on` und `sync_enabled=off` bestätigen, dass InvoiceCreated,
+  InvoicePaid, InvoiceRefunded, InvoiceCancelled und AddTransaction keine Jobs
+  anlegen, während ein leerer oder manuell befüllter Runner weiterhin läuft;
 - sicherstellen, dass Hook-Fehler niemals den WHMCS-Ablauf abbrechen.
 
 ### 5. End-to-End im sevDesk-Testmandanten

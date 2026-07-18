@@ -36,8 +36,8 @@ function sevdesk_activate(): array
     try {
         Migrator::up();
         $config = new Config();
-        $config->set('module_active', 'on');
         $config->set('sync_enabled', '');
+        $config->set('module_active', 'on');
 
         return [
             'status' => 'success',
@@ -58,8 +58,8 @@ function sevdesk_upgrade(array $vars): void
     $previousVersion = (string) ($vars['version'] ?? '0.0.0');
     if (version_compare($previousVersion, '2.0.0', '<')) {
         $config = new Config();
-        $config->set('module_active', 'on');
         $config->set('sync_enabled', '');
+        $config->set('module_active', 'on');
         $config->set('upgraded_from_version', $previousVersion);
     }
 }

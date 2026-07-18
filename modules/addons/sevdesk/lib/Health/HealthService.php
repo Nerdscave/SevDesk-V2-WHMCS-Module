@@ -102,6 +102,17 @@ final class HealthService
             'Einrichtung öffnen'
         );
 
+        $moduleActive = $this->application->config->bool('module_active');
+        $this->add(
+            $checks,
+            'Modul-Laufzeit',
+            $moduleActive,
+            $moduleActive
+                ? 'Runner und Aktionen in der WHMCS-Rechnungsansicht sind betriebsbereit; automatische Hooks folgen dem separaten Synchronisationsschalter.'
+                : 'Die interne Modulaktivierung fehlt; Runner und Aktionen in der WHMCS-Rechnungsansicht bleiben deaktiviert.',
+            'error'
+        );
+
         $runnerSeen = (string) $this->application->config->get('runner_last_seen', '');
         $runnerFresh = false;
         if ($runnerSeen !== '') {

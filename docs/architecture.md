@@ -68,6 +68,14 @@ flowchart LR
 
 Der Browser startet nur den Job und liest später dessen Status. API-Writes laufen ausschließlich in kurzen Worker-Batches. Ein CLI- oder Cronlauf endet, sobald entweder die konfigurierte Batchgröße oder das interne Zeitbudget erreicht ist. Der nächste Cronlauf setzt die Arbeit fort.
 
+`module_active` und `sync_enabled` haben getrennte Aufgaben. Die interne
+Modulaktivierung schaltet Runner und die in der WHMCS-Rechnungsansicht
+eingeblendeten Modulaktionen frei. `sync_enabled` ist das zusätzliche Gate für
+sämtliche ereignisgetriebenen Enqueue-Hooks, einschließlich Refund-, Cancel- und
+negativer Transaktionshinweise. Bei deaktivierter Synchronisation können
+ausdrücklich angelegte Adminjobs deshalb weiter über den Runner verarbeitet
+werden, während WHMCS-Ereignisse keine neue Arbeit erzeugen.
+
 ### Zweistufiger Buchungsassistent
 
 Stufe 1 liest nur Daten. Die Adminseite lädt positive `tblaccounts`-Transaktionen anhand des Transaktionsdatums und mit serverseitiger Paginierung. So erfasst sie vollständig bezahlte und offene, teilbezahlte Rechnungen über den gesamten Zeitraum, einschließlich der Einträge nach den ersten zehn Rechnungen.
@@ -142,7 +150,7 @@ Funktionale Einstellungen unter `module = 'sevdesk'` werden weitergelesen:
 - die vorhandenen Konto-Zuordnungen für Inland, EU B2B, EU B2C, Drittland, Kleinunternehmer und Guthaben
 - `smallBusinessOwner`
 
-Der Rewrite ergänzt unter anderem `sync_enabled`, `eu_b2b_goods_confirmed`, `eu_b2c_mode`, die zugehörigen `taxRule*`-Werte sowie die ausdrücklichen Bestätigungen für Drittland, AddFunds und Kleinunternehmer. Neue Bestätigungen sind nach Upgrade standardmäßig aus.
+Der Rewrite ergänzt unter anderem `module_active`, `sync_enabled`, `eu_b2b_goods_confirmed`, `eu_b2c_mode`, die zugehörigen `taxRule*`-Werte sowie die ausdrücklichen Bestätigungen für Drittland, AddFunds und Kleinunternehmer. `module_active` wird ausschließlich über Aktivierung, Upgrade oder Deaktivierung verwaltet. Neue Bestätigungen und `sync_enabled` sind nach Upgrade standardmäßig aus.
 
 Der Rewrite wertet Lizenzfelder nicht aus, lässt sie beim Upgrade aber unangetastet. Operative Werte sind keine normalen Felder in `sevdesk_config()`. Das WHMCS-Standardformular würde den Advisory Lock, die Jobprüfung, das vorübergehende Abschalten der Hooks und die Prüfung über `ReceiptGuidance` umgehen.
 
