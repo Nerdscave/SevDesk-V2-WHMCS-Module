@@ -15,6 +15,24 @@ use WHMCS\Module\Addon\SevDesk\Tests\Integration\Support\MariaDbTestCase;
 
 final class JobRunnerTest extends MariaDbTestCase
 {
+    public function testEmptyRunnerUpdatesHeartbeatWithoutClaimingWork(): void
+    {
+        Migrator::up();
+        $config = new Config();
+        $started = new \DateTimeImmutable('-5 seconds');
+        $runner = new JobRunner(new JobRepository(), $config, []);
+
+        $result = $runner->run(1, 5);
+
+        self::assertSame(0, $result['processed']);
+        self::assertFalse($result['locked']);
+        self::assertSame(0, Capsule::table(Migrator::JOBS_TABLE)->count());
+        self::assertSame(0, Capsule::table(Migrator::ITEMS_TABLE)->count());
+
+        $heartbeat = new \DateTimeImmutable((string) $config->get('runner_last_seen'));
+        self::assertGreaterThanOrEqual($started->getTimestamp(), $heartbeat->getTimestamp());
+    }
+
     public function testRunnerContinuesAfterFailuresAndKeepsRiskyThrowableAmbiguous(): void
     {
         Migrator::up();

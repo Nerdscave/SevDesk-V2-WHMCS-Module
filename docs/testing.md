@@ -33,6 +33,12 @@ Schnelle Tests ohne WHMCS-Datenbank oder Netzwerk für:
 - lazy Kontakt-Referenzdaten: bestehende/verknüpfte Kontakte dürfen weder
   Address-Kategorie noch CommunicationWay-Key vorab laden;
 - Bereinigung sensibler Daten aus Fehlermeldungen.
+- Health-Kompatibilität für die von WHMCS verwendete stabile Versionsform
+  `8.13.4-release.N`, ohne Beta-/RC- oder WHMCS-9-Versionen freizugeben;
+- bewusst unbestätigte optionale Steuerprofile erscheinen als Warnung und
+  bleiben fachlich blockiert, während fehlerhafte bestätigte Profile den Health
+  Check weiterhin als Fehler blockieren; ein global aktivierter
+  Kleinunternehmermodus macht das zugehörige Profil verpflichtend.
 
 Diese Logik darf nicht von globalem WHMCS-Zustand abhängen. Tabellengetriebene Tests bilden die fachliche Matrix lesbar ab.
 
@@ -91,6 +97,8 @@ In einer Testinstallation mit WHMCS 8.13.4 und PHP 8.3:
   Kurzexport akzeptiert ausschließlich CSRF-geschützte POSTs und erzeugt nur ein
   dedupliziertes Jobitem;
 - Cron/Worker ausführen;
+- einen leeren CLI-Runner ausführen und bestätigen, dass er nur den Heartbeat
+  aktualisiert, kein Item claimt und keinen sevdesk-Service konstruiert;
 - relevante Invoice-, Paid- und Checkout-Hooks auslösen;
 - sicherstellen, dass Hook-Fehler niemals den WHMCS-Ablauf abbrechen.
 

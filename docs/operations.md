@@ -114,7 +114,30 @@ Alle Punkte müssen grün sein:
 - Cron läuft regelmäßig und verarbeitet einen Diagnosejob;
 - keine globale Sperre durch 401/403 oder Migration aktiv.
 
+Bewusst nicht bestätigte optionale Profile für Drittland, AddFunds oder einen
+nicht als Kleinunternehmer geführten Mandanten werden als Warnung angezeigt und
+bleiben fail-closed. Ist die Kleinunternehmerregel global aktiv, gilt ihr Profil
+als erforderlich. Ein Fehler in einem bestätigten oder für den geplanten Export
+benötigten Profil blockiert Remote-Writes weiterhin.
+
 Ein fehlerhafter Health Check blockiert Remote-Writes, wenn der Fehler die Datenkonsistenz, Authentifizierung oder Steuerlogik betrifft.
+
+### Runner-Smoke-Test bei leerer Queue
+
+Fehlt der Runner-Heartbeat, obwohl das Modul aktiv ist, kann der reale CLI-Pfad
+kontrolliert mit leerer Queue geprüft werden. Vorher müssen Job- und Itemanzahl
+sowie insbesondere `pending`, `running` und `retry_wait` null sein. Andernfalls
+würde der Aufruf echte Arbeit verarbeiten und braucht eine eigene Freigabe.
+
+```bash
+/opt/plesk/php/8.3/bin/php -q <WHMCS_ROOT>/modules/addons/sevdesk/cli/worker.php 1 5
+```
+
+Bei leerer Queue enthält das bereinigte Ergebnis `processed: 0` sowie `locked: false`.
+Der Aufruf führt die additive, idempotente Schemaprüfung aus und schreibt
+`runner_last_seen`; er ist deshalb kein strikt read-only Test. Ohne claimbares
+Item konstruiert der Runner keine sevdesk-Remote-Services und sendet keinen
+API-Request. Mapping-, Job- und Itemzahlen müssen danach unverändert sein.
 
 ## Normaler Bulk-Ablauf
 

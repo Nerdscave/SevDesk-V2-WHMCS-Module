@@ -30,7 +30,7 @@ final class HealthService
         );
 
         $whmcsVersion = $this->detectWhmcsVersion();
-        $whmcsCompatible = version_compare($whmcsVersion, '8.13.4', '>=') && version_compare($whmcsVersion, '9.0.0', '<');
+        $whmcsCompatible = self::supportsWhmcsVersion($whmcsVersion);
         $this->add(
             $checks,
             'WHMCS 8.13.4',
@@ -255,19 +255,28 @@ final class HealthService
     /** @param list<array<string,mixed>> $checks */
     private function addTaxChecks(array &$checks): void
     {
-        /** @var array<string, array{string,bool,?string,bool,bool,string,bool}> $profiles */
+        /** @var array<string, array{string,bool,?string,bool,bool,string,bool,bool}> $profiles */
         $profiles = [
-            'Deutschland / Rule 1' => ['DE', false, null, false, false, '19', false],
-            'Drittland' => ['US', false, null, false, false, '0', false],
-            'Kleinunternehmer' => ['DE', false, null, true, false, '0', false],
-            'AddFunds' => ['DE', false, null, false, true, '0', false],
+            'Deutschland / Rule 1' => ['DE', false, null, false, false, '19', false, false],
+            'Drittland' => ['US', false, null, false, false, '0', false, true],
+            'Kleinunternehmer' => [
+                'DE',
+                false,
+                null,
+                true,
+                false,
+                '0',
+                false,
+                !$this->application->config->bool('smallBusinessOwner'),
+            ],
+            'AddFunds' => ['DE', false, null, false, true, '0', false, true],
         ];
         if ($this->application->config->bool('eu_b2b_goods_confirmed')) {
             $profiles['EU B2B / Rule 3 (bestätigte Warenlieferung)'] = [
-                'BE', true, 'BE0123456789', false, false, '0', true,
+                'BE', true, 'BE0123456789', false, false, '0', true, false,
             ];
         }
-        foreach ($profiles as $name => [$country, $exempt, $vat, $smallBusiness, $addFunds, $rate, $organisation]) {
+        foreach ($profiles as $name => [$country, $exempt, $vat, $smallBusiness, $addFunds, $rate, $organisation, $optional]) {
             $line = new \WHMCS\Module\Addon\SevDesk\Domain\LineItem('Health check', '1.00', $rate, true);
             $decision = $this->application->taxPolicy()->decide(
                 $country,
@@ -283,7 +292,7 @@ final class HealthService
                 'Steuerprofil: ' . $name,
                 $decision->allowed && $decision->guidanceValidated,
                 $decision->message,
-                $decision->allowed ? 'warning' : 'error',
+                self::taxProfileFailureStatus($decision->code, $optional),
                 'addonmodules.php?module=sevdesk&a=setup',
                 'Steuerprofil prüfen',
                 $decision->code
@@ -311,6 +320,41 @@ final class HealthService
                 : 'Deutsche USt wurde für EU-B2C ausdrücklich bestätigt; steuerliche Grundlage je Zeitraum prüfen.',
             $euB2cBlocked ? 'healthy' : 'warning'
         );
+    }
+
+    /**
+     * WHMCS appends a release marker to stable builds. PHP's generic version
+     * comparison treats that marker as a prerelease, so compare the numeric
+     * core for official "-release.N" versions only.
+     */
+    public static function supportsWhmcsVersion(string $version): bool
+    {
+        if (
+            preg_match(
+                '/^(\d+\.\d+\.\d+)(?:-release(?:\.\d+)?)?$/i',
+                trim($version),
+                $matches,
+            ) !== 1
+        ) {
+            return false;
+        }
+        $normalised = $matches[1];
+
+        return version_compare($normalised, '8.13.4', '>=')
+            && version_compare($normalised, '9.0.0', '<');
+    }
+
+    /**
+     * Optional profiles are intentionally fail-closed until confirmed. That
+     * safe state is actionable information, not a broken installation.
+     */
+    public static function taxProfileFailureStatus(string $decisionCode, bool $optional): string
+    {
+        if ($optional && $decisionCode === 'unconfirmed_tax_profile') {
+            return 'warning';
+        }
+
+        return 'error';
     }
 
     private function detectWhmcsVersion(): string
