@@ -164,7 +164,8 @@ final class JobRepository
             foreach ($items as $item) {
                 $invoiceId = isset($item['invoice_id']) ? (int) $item['invoice_id'] : null;
                 $action = $item['action'] ?? $type;
-                $dedupeKey = $item['dedupe_key'] ?? ($invoiceId === null ? null : $action . ':' . $invoiceId);
+                $dedupeAction = $action === 'export_document' ? 'export_voucher' : $action;
+                $dedupeKey = $item['dedupe_key'] ?? ($invoiceId === null ? null : $dedupeAction . ':' . $invoiceId);
                 $row = [
                     'job_id' => $jobId,
                     'invoice_id' => $invoiceId,
