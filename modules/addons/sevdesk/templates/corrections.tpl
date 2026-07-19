@@ -144,10 +144,18 @@
                     </form>
                 {/if}
                 {if $item.status === 'ambiguous' || $item.can_reconcile}
+                    {if $item.can_confirm_email_retry}
+                        <form method="post" action="{$moduleLink|escape:'html':'UTF-8'}&amp;a=corrections" data-confirm="Der frühere Versand kann bereits erfolgt sein. Wirklich eine mögliche Doppelmail riskieren?">
+                            <input type="hidden" name="token" value="{$csrfToken|escape:'html':'UTF-8'}"><input type="hidden" name="item_id" value="{$item.id|escape:'html':'UTF-8'}">
+                            <div class="checkbox"><label><input type="checkbox" name="confirm_duplicate_delivery_risk" value="yes" required> Ich bestätige ausdrücklich das Risiko eines Doppelversands.</label></div>
+                            <button type="submit" name="confirm_email_retry" value="1" class="btn btn-danger btn-sm"><i class="fas fa-envelope" aria-hidden="true"></i> Mail erneut übergeben</button>
+                        </form>
+                    {else}
                     <form method="post" action="{$moduleLink|escape:'html':'UTF-8'}&amp;a=corrections" data-loading-form>
                         <input type="hidden" name="token" value="{$csrfToken|escape:'html':'UTF-8'}"><input type="hidden" name="item_id" value="{$item.id|escape:'html':'UTF-8'}">
                         <button type="submit" name="reconcile" value="1" class="btn btn-default btn-sm"><i class="fas fa-search" aria-hidden="true"></i> In sevdesk abgleichen</button>
                     </form>
+                    {/if}
                 {/if}
                 {if $item.sevdesk_id}<a class="btn btn-default btn-sm" href="https://my.sevdesk.de/#/ex/detail/id/{$item.sevdesk_id|escape:'url'}" target="_blank" rel="noopener">Beleg öffnen</a>{/if}
                 <a class="btn btn-link btn-sm" href="{$moduleLink|escape:'html':'UTF-8'}&amp;a=jobDetail&amp;id={$item.job_id|escape:'url'}">Jobdetails</a>

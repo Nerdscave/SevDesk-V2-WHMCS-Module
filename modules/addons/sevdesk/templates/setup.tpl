@@ -3,6 +3,20 @@
 <form method="post" action="{$moduleLink|escape:'html':'UTF-8'}&amp;a=setup" data-loading-form>
     <input type="hidden" name="token" value="{$csrfToken|escape:'html':'UTF-8'}">
     <input type="hidden" name="save" value="1">
+    <input type="hidden" name="runtime_quarantine_token" value="{$settings.runtime_quarantine_token|default:''|escape:'html':'UTF-8'}">
+
+    {if $settings.runtime_review_required === 'on' || $settings.runtime_review_required === true || $settings.runtime_review_required == 1}
+        <div class="alert alert-danger" role="alert">
+            <h4>Übernommener Modulbestand ist gesperrt</h4>
+            <p>Automatische Hooks, Runner, neue Jobs sowie Fortsetzen und Wiederholen bestehender Jobs bleiben gesperrt. Prüfen Sie vor der Freigabe insbesondere Mandant/API-Token, Kontaktfeld und vorhandene Kontakt-IDs, Konten, Steuerprofile, Dokumentmodus sowie alle offenen und unklaren Jobs. Pausieren oder Abbrechen bleibt möglich.</p>
+            <div class="checkbox">
+                <label for="runtime-review-confirmed">
+                    <input type="checkbox" id="runtime-review-confirmed" name="runtime_review_confirmed" value="1" required>
+                    Ich habe den übernommenen Bestand und den verbundenen sevdesk-Mandanten geprüft und gebe die konfigurierte Laufzeit ausdrücklich frei.
+                </label>
+            </div>
+        </div>
+    {/if}
 
     <div class="panel panel-default">
         <div class="panel-heading"><h3 class="panel-title">sevdesk-Verbindung</h3></div>
@@ -33,6 +47,153 @@
                 {/if}
                 <small id="custom-field-id-help" class="help-block">Ein späterer Wechsel kann zu doppelten Kontakten führen. Vor dem Speichern werden bestehende Werte nicht verschoben.</small>
             </div>
+
+            <div class="checkbox">
+                <label for="customer-number-contact-creation-confirmed">
+                    <input type="checkbox" id="customer-number-contact-creation-confirmed" name="customer_number_contact_creation_confirmed" value="on"{if $settings.customer_number_contact_creation_confirmed === 'on' || $settings.customer_number_contact_creation_confirmed === true || $settings.customer_number_contact_creation_confirmed == 1} checked{/if}>
+                    Ich bestätige, dass neue sevdesk-Kontakte mit <code>customerNumber=&lt;interne WHMCS-Client-ID&gt;</code> angelegt werden dürfen.
+                </label>
+                <small class="help-block">Ohne Bestätigung bleiben vorhandene Kontakt-IDs und exakt passende Kundennummerntreffer nutzbar; bei keinem Treffer wird kein neuer Kontakt angelegt.</small>
+            </div>
+        </div>
+    </div>
+
+    <div class="panel panel-default">
+        <div class="panel-heading"><h3 class="panel-title">Dokumentziel und Dokumenthoheit</h3></div>
+        <div class="panel-body">
+            <div class="alert alert-info" role="note">
+                Bestehende Installationen bleiben bei <strong>WHMCS + Voucher only</strong>. Ein Moduswechsel exportiert vorhandene Zuordnungen nicht erneut. Invoice-Ziele werden ausschließlich nach vollständiger Zahlung und mit finaler WHMCS-Rechnungsnummer geschrieben.
+            </div>
+
+            <div class="row">
+                <div class="col-md-6">
+                    <div class="form-group">
+                        <label class="control-label" for="export-mode">Exportmodus</label>
+                        <select id="export-mode" name="export_mode" class="form-control" required>
+                            <option value="voucher_only"{if $settings.export_mode === 'voucher_only'} selected{/if}>Voucher only</option>
+                            <option value="invoice_for_oss"{if $settings.export_mode === 'invoice_for_oss'} selected{/if}>Invoice nur für bestätigtes OSS / Rule 19</option>
+                            <option value="invoice_only"{if $settings.export_mode === 'invoice_only'} selected{/if}>Invoice only</option>
+                        </select>
+                        <small class="help-block"><strong>Invoice only:</strong> sevdesk-Invoice-Positionen übernehmen kein benutzerdefiniertes <code>accountDatev</code>.</small>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="form-group">
+                        <label class="control-label" for="document-authority">Kundenseitig maßgebliche Endrechnung</label>
+                        <select id="document-authority" name="document_authority" class="form-control" required>
+                            <option value="whmcs"{if $settings.document_authority === 'whmcs'} selected{/if}>WHMCS</option>
+                            <option value="sevdesk"{if $settings.document_authority === 'sevdesk'} selected{/if}>sevdesk (nur Invoice only)</option>
+                        </select>
+                        <small class="help-block">WHMCS bleibt in beiden Fällen Billing-, Proforma- und Zahlungsplattform. sevdesk-Dokumenthoheit benötigt die automatische Einreihung neuer Rechnungen.</small>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel panel-warning">
+                <div class="panel-heading"><h4 class="panel-title">Invoice-API-Canary</h4></div>
+                <div class="panel-body">
+                    <p>Invoice-Modi bleiben fail-closed, bis der dokumentierte Testmandanten-Canary vollständig durchgeführt wurde. Dazu gehören Rule 19, finale Rechnungsnummer, Marker, Pflichtreferenzen, Open/PDF/Versand/Booking und die Prüfung möglicher ID-Kollisionen.</p>
+                    <div class="checkbox">
+                        <label for="invoice-canary-confirmed">
+                            <input type="checkbox" id="invoice-canary-confirmed" name="invoice_canary_confirmed" value="on"{if $settings.invoice_canary_confirmed === 'on' || $settings.invoice_canary_confirmed === true || $settings.invoice_canary_confirmed == 1} checked{/if}>
+                            Ich bestätige, dass der Canary im aktuell konfigurierten sevdesk-Testmandanten vollständig bestanden wurde.
+                        </label>
+                    </div>
+                </div>
+            </div>
+
+            <div class="row">
+                <div class="col-md-6">
+                    <div class="form-group">
+                        <label class="control-label" for="invoice-sev-user">SevUser für Invoices</label>
+                        {if $sevUsers|@count}
+                            <select id="invoice-sev-user" name="invoice_sev_user_id" class="form-control">
+                                <option value="">Bitte wählen</option>
+                                {foreach from=$sevUsers item=reference}
+                                    <option value="{$reference.id|escape:'html':'UTF-8'}"{if $settings.invoice_sev_user_id == $reference.id} selected{/if}>{$reference.name|escape:'html':'UTF-8'} (ID {$reference.id|escape:'html':'UTF-8'})</option>
+                                {/foreach}
+                            </select>
+                        {else}
+                            <input type="number" id="invoice-sev-user" name="invoice_sev_user_id" class="form-control" min="1" step="1" value="{$settings.invoice_sev_user_id|escape:'html':'UTF-8'}">
+                        {/if}
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="form-group">
+                        <label class="control-label" for="invoice-unity">Standard-Unity</label>
+                        {if $unities|@count}
+                            <select id="invoice-unity" name="invoice_unity_id" class="form-control">
+                                <option value="">Bitte wählen</option>
+                                {foreach from=$unities item=reference}
+                                    <option value="{$reference.id|escape:'html':'UTF-8'}"{if $settings.invoice_unity_id == $reference.id} selected{/if}>{$reference.name|escape:'html':'UTF-8'} (ID {$reference.id|escape:'html':'UTF-8'})</option>
+                                {/foreach}
+                            </select>
+                        {else}
+                            <input type="number" id="invoice-unity" name="invoice_unity_id" class="form-control" min="1" step="1" value="{$settings.invoice_unity_id|escape:'html':'UTF-8'}">
+                        {/if}
+                        <small class="help-block">Invoice-v1 verwendet je WHMCS-Position zunächst Menge 1.</small>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel panel-default">
+                <div class="panel-heading"><h4 class="panel-title">OSS-v1: elektronische Leistungen / Rule 19</h4></div>
+                <div class="panel-body">
+                    <div class="form-group">
+                        <label class="control-label" for="oss-profile">OSS-Profil</label>
+                        <select id="oss-profile" name="oss_profile" class="form-control">
+                            <option value="blocked"{if $settings.oss_profile === 'blocked'} selected{/if}>Blockiert</option>
+                            <option value="rule19_digital_services_confirmed"{if $settings.oss_profile === 'rule19_digital_services_confirmed'} selected{/if}>Rule 19 für ausschließlich elektronische/digitale Leistungen bestätigt</option>
+                        </select>
+                        <small class="help-block">Positionsbeschreibungen werden nicht heuristisch ausgewertet. Rules 18 und 20 sowie gemischte oder unklare Leistungsarten bleiben blockiert. Das Rule-19-Profil ist nur zulässig, wenn „EU-Privatkunden“ unten auf „Blockieren“ steht; die bisherige deutsche Besteuerung und OSS dürfen nicht gleichzeitig aktiv sein.</small>
+                    </div>
+                    <div class="checkbox">
+                        <label for="oss-profile-acknowledged">
+                            <input type="checkbox" id="oss-profile-acknowledged" name="oss_profile_acknowledged" value="1">
+                            <strong>Bei Freigabe oder erneutem Speichern bestätigen:</strong> Alle betroffenen EU-B2C-Rechnungspositionen sind elektronische/digitale Leistungen und dürfen nach Rule 19 behandelt werden.
+                        </label>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel panel-default">
+                <div class="panel-heading"><h4 class="panel-title">sevdesk-Dokumenthoheit und Versand</h4></div>
+                <div class="panel-body">
+                    <p>{if $proformaEnabled}<span class="label label-success">WHMCS-Proforma aktiv</span>{else}<span class="label label-danger">WHMCS-Proforma nicht aktiv</span>{/if} {if $themeAdapterInstalled}<span class="label label-success">Adapter-Manifest im aktiven Theme erkannt</span>{else}<span class="label label-danger">Adapter-Manifest im aktiven Theme fehlt</span>{/if} Der Modus lässt sich nur mit aktivem Proforma-Modus und installiertem Theme-Adapter einschalten.</p>
+                    <div class="checkbox">
+                        <label for="theme-adapter-confirmed">
+                            <input type="checkbox" id="theme-adapter-confirmed" name="theme_adapter_confirmed" value="on"{if $settings.theme_adapter_confirmed === 'on' || $settings.theme_adapter_confirmed === true || $settings.theme_adapter_confirmed == 1} checked{/if}>
+                            Der gebündelte Twenty-One-Adapter beziehungsweise ein kompatibler Custom-Theme-Adapter ist installiert und geprüft.
+                        </label>
+                    </div>
+                    <div class="form-group">
+                        <label class="control-label" for="invoice-delivery-channel">Versandkanal</label>
+                        <select id="invoice-delivery-channel" name="invoice_delivery_channel" class="form-control">
+                            <option value="sevdesk"{if $settings.invoice_delivery_channel === 'sevdesk'} selected{/if}>sevdesk sendViaEmail</option>
+                            <option value="whmcs_template"{if $settings.invoice_delivery_channel === 'whmcs_template'} selected{/if}>WHMCS-Mailvorlage mit sevdesk-PDF</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label class="control-label" for="whmcs-invoice-email-template">Aktive benutzerdefinierte Invoice-Mailvorlage</label>
+                        <select id="whmcs-invoice-email-template" name="whmcs_invoice_email_template" class="form-control">
+                            <option value="">Bitte wählen</option>
+                            {foreach from=$emailTemplates item=templateName}
+                                <option value="{$templateName|escape:'html':'UTF-8'}"{if $settings.whmcs_invoice_email_template === $templateName} selected{/if}>{$templateName|escape:'html':'UTF-8'}</option>
+                            {/foreach}
+                        </select>
+                        <small class="help-block">Das Modul legt keine Vorlagen an und verändert keine vorhandene Vorlage.</small>
+                    </div>
+                    <div class="form-group">
+                        <label class="control-label" for="sevdesk-email-subject">sevdesk-Betreff</label>
+                        <input type="text" id="sevdesk-email-subject" name="sevdesk_email_subject" class="form-control" maxlength="200" value="{$settings.sevdesk_email_subject|escape:'html':'UTF-8'}">
+                    </div>
+                    <div class="form-group">
+                        <label class="control-label" for="sevdesk-email-body">sevdesk-Nachricht</label>
+                        <textarea id="sevdesk-email-body" name="sevdesk_email_body" class="form-control" rows="5" maxlength="5000">{$settings.sevdesk_email_body|escape:'html':'UTF-8'}</textarea>
+                        <small class="help-block">Erlaubte Platzhalter: <code>{literal}{invoice_number}{/literal}</code> und <code>{literal}{company_name}{/literal}</code>.</small>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -62,7 +223,7 @@
                     <input type="checkbox" id="sync-enabled" name="sync_enabled" value="on"{if $settings.sync_enabled === 'on' || $settings.sync_enabled === true || $settings.sync_enabled == 1} checked{/if}>
                     Neue Rechnungen automatisch als Exportjob einreihen
                 </label>
-                <small class="help-block"><strong>Standardmäßig ausgeschaltet.</strong> Erst aktivieren, wenn API, Konten und Steuerprofile im Systemcheck bestätigt sind.</small>
+                <small class="help-block"><strong>Standardmäßig ausgeschaltet.</strong> Erst aktivieren, wenn API, Konten und Steuerprofile im Systemcheck bestätigt sind. Für sevdesk-Dokumenthoheit ist dieser Schalter verpflichtend.</small>
             </div>
 
             <div class="checkbox">

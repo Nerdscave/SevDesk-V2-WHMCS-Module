@@ -45,6 +45,53 @@ final class AdminInvoiceQuickExportContractTest extends TestCase
         }
     }
 
+    public function testEveryAdminExportFreezesTheFullRequestedDocumentContext(): void
+    {
+        $controller = file_get_contents(
+            dirname(__DIR__, 2) . '/modules/addons/sevdesk/lib/Controllers/AdminController.php',
+        );
+        self::assertIsString($controller);
+
+        $single = $this->methodSource(
+            $controller,
+            'public function singleImport(): void',
+            'public function quickExport(): void',
+        );
+        $quick = $this->methodSource(
+            $controller,
+            'public function quickExport(): void',
+            'public function massImport(): void',
+        );
+        $bulk = $this->methodSource(
+            $controller,
+            'public function massImport(): void',
+            'public function jobs(): void',
+        );
+        self::assertStringContainsString('$candidate = $this->requestedExportContext();', $single);
+        self::assertStringContainsString("'candidate' => \$candidate", $single);
+        self::assertStringContainsString("'candidate' => \$this->requestedExportContext()", $quick);
+        self::assertStringContainsString('$requestedContext = $this->requestedExportContext();', $bulk);
+        self::assertStringContainsString("'candidate' => \$requestedContext", $bulk);
+
+        $snapshot = $this->methodSource(
+            $controller,
+            'private function requestedExportContext(): array',
+            'private function saveSetup(): void',
+        );
+        foreach (
+            [
+                'requestedExportMode',
+                'requestedDocumentAuthority',
+                'requestedOssProfile',
+                'requestedEuB2cMode',
+                'requestedDeliveryChannel',
+            ] as $field
+        ) {
+            self::assertStringContainsString("'" . $field . "'", $snapshot);
+        }
+        self::assertStringContainsString("'delivery_requested' => false", $snapshot);
+    }
+
     private function methodSource(string $source, string $startMarker, string $endMarker): string
     {
         $start = strpos($source, $startMarker);

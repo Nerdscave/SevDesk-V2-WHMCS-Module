@@ -42,6 +42,40 @@ final class WhmcsGateway
             : Closure::fromCallable($localApi);
     }
 
+    /**
+     * Verify that a WHMCS outbound transaction is a real refund of a positive
+     * payment for the same invoice, never a chargeback-like transaction.
+     */
+    public function isVerifiedRefundTransaction(object $transaction): bool
+    {
+        $refundOf = (int) ($transaction->refundid ?? 0);
+        if ((float) ($transaction->amountout ?? 0) <= 0 || $refundOf < 1) {
+            return false;
+        }
+
+        $description = mb_strtolower(trim((string) ($transaction->description ?? '')));
+        foreach (
+            [
+                'chargeback',
+                'rücklastschrift',
+                'ruecklastschrift',
+                'dispute',
+                'kartenrückbelastung',
+                'kartenrueckbelastung',
+            ] as $marker
+        ) {
+            if (str_contains($description, $marker)) {
+                return false;
+            }
+        }
+
+        return Capsule::table('tblaccounts')
+            ->where('id', $refundOf)
+            ->where('invoiceid', (int) ($transaction->invoiceid ?? 0))
+            ->where('amountin', '>', 0)
+            ->exists();
+    }
+
     /** @return array<string, mixed> */
     public function invoice(int $invoiceId): array
     {
@@ -116,8 +150,8 @@ final class WhmcsGateway
 
     public function contactData(int $clientId): ContactData
     {
+        $customFieldId = $this->configuredContactFieldId();
         $client = $this->client($clientId);
-        $customFieldId = $this->config->int('custom_field_id');
         $sevdeskId = null;
         foreach (self::normaliseRows($client['customfields']['customfield'] ?? $client['customfields'] ?? []) as $field) {
             if ((int) ($field['id'] ?? 0) === $customFieldId) {
@@ -152,16 +186,31 @@ final class WhmcsGateway
 
     public function storeContactId(int $clientId, string $sevdeskId): void
     {
-        $customFieldId = $this->config->int('custom_field_id');
-        if ($customFieldId < 1) {
-            throw new RuntimeException('No WHMCS contact custom field is configured.');
-        }
+        $customFieldId = $this->configuredContactFieldId();
 
         $this->call('UpdateClient', [
             'clientid' => $this->positiveId($clientId, 'client'),
             'customfields' => base64_encode(serialize([$customFieldId => trim($sevdeskId)])),
             'skipvalidation' => true,
         ]);
+    }
+
+    private function configuredContactFieldId(): int
+    {
+        $customFieldId = $this->config->int('custom_field_id');
+        if (
+            $customFieldId < 1
+            || !Capsule::table('tblcustomfields')
+                ->where('id', $customFieldId)
+                ->where('type', 'client')
+                ->exists()
+        ) {
+            throw new RuntimeException(
+                'The configured sevdesk contact ID field is missing or is not a WHMCS client custom field.',
+            );
+        }
+
+        return $customFieldId;
     }
 
     /**
@@ -225,7 +274,7 @@ final class WhmcsGateway
             ->leftJoin('tblcurrencies as invoice_currency', 'client.currency', '=', 'invoice_currency.id')
             ->leftJoin('tblcurrencies as transaction_currency', 'payment.currency', '=', 'transaction_currency.id')
             ->whereNotNull('mapping.sevdesk_id')
-            ->where('mapping.sevdesk_id', '<>', '')
+            ->whereRaw("TRIM(mapping.sevdesk_id) <> ''")
             ->whereIn('invoice.status', ['Paid', 'Unpaid'])
             ->whereBetween('payment.date', [
                 $from->format('Y-m-d 00:00:00'),
@@ -254,6 +303,7 @@ final class WhmcsGateway
                 'payment.currency as transaction_currency_id',
                 'payment.gateway',
                 'mapping.sevdesk_id',
+                'mapping.document_type',
                 'invoice.invoicenum',
                 'invoice.userid',
                 'invoice.status as invoice_status',
@@ -302,6 +352,149 @@ final class WhmcsGateway
         }
 
         return $hasAddFunds;
+    }
+
+    /**
+     * Hand a prepared Invoice email to WHMCS. The caller owns attachment
+     * registration in EmailAttachmentContext immediately around this call.
+     *
+     * @param array<string, scalar> $customVariables
+     */
+    public function sendInvoiceEmail(int $invoiceId, string $templateName, array $customVariables = []): void
+    {
+        $templateName = trim($templateName);
+        if ($templateName === '') {
+            throw new \InvalidArgumentException('An Invoice email template is required.');
+        }
+
+        $parameters = [
+            'messagename' => $templateName,
+            'id' => $this->positiveId($invoiceId, 'invoice'),
+        ];
+        if ($customVariables !== []) {
+            $parameters['customvars'] = base64_encode(serialize($customVariables));
+        }
+
+        $this->call('SendEmail', $parameters);
+    }
+
+    /** @return list<string> */
+    public function activeCustomInvoiceTemplates(): array
+    {
+        $query = Capsule::table('tblemailtemplates')
+            ->whereRaw('LOWER(type) = ?', ['invoice'])
+            ->where('custom', 1)
+            ->where('disabled', 0)
+            ->where('name', '<>', '')
+            ->orderBy('name');
+
+        $names = [];
+        foreach ($query->pluck('name')->all() as $name) {
+            $name = trim((string) $name);
+            if ($name !== '') {
+                $names[$name] = true;
+            }
+        }
+
+        return array_keys($names);
+    }
+
+    public function isActiveCustomInvoiceTemplate(string $templateName): bool
+    {
+        return in_array(trim($templateName), $this->activeCustomInvoiceTemplates(), true);
+    }
+
+    /**
+     * WHMCS stores this option in tblconfiguration and also exposes it through
+     * the bootstrapped CONFIG array. Checking both keeps CLI/Cron and web
+     * execution consistent.
+     */
+    public function proformaInvoicingEnabled(): bool
+    {
+        $globalValue = $GLOBALS['CONFIG']['EnableProformaInvoicing'] ?? null;
+        if ($globalValue !== null) {
+            return self::truthy($globalValue);
+        }
+
+        $value = Capsule::table('tblconfiguration')
+            ->where('setting', 'EnableProformaInvoicing')
+            ->value('value');
+
+        return self::truthy($value);
+    }
+
+    public function invoiceOwnerId(int $invoiceId): int
+    {
+        return (int) Capsule::table('tblinvoices')
+            ->where('id', $this->positiveId($invoiceId, 'invoice'))
+            ->value('userid');
+    }
+
+    /**
+     * Verify the adapter manifest from the active WHMCS client theme, not the
+     * bundled reference copy. The operator confirmation remains a separate
+     * setup gate because a manifest cannot prove that the partial was placed at
+     * the correct include point in viewinvoice.tpl.
+     */
+    public function themeAdapterManifestInstalled(): bool
+    {
+        if (!defined('ROOTDIR')) {
+            return false;
+        }
+
+        $theme = trim((string) ($GLOBALS['CONFIG']['Template'] ?? ''));
+        if ($theme === '') {
+            $theme = trim((string) Capsule::table('tblconfiguration')
+                ->where('setting', 'Template')
+                ->value('value'));
+        }
+        if (preg_match('/^[A-Za-z0-9_-]{1,80}$/', $theme) !== 1) {
+            return false;
+        }
+
+        $themeDirectory = rtrim((string) ROOTDIR, '/\\') . '/templates/' . $theme;
+        $manifestPath = $themeDirectory . '/sevdesk-invoice-authority.json';
+        if (!is_file($manifestPath) || filesize($manifestPath) === false || filesize($manifestPath) > 32_768) {
+            return false;
+        }
+        try {
+            $contents = file_get_contents($manifestPath);
+            $manifest = is_string($contents)
+                ? json_decode($contents, true, 32, JSON_THROW_ON_ERROR)
+                : null;
+        } catch (\JsonException) {
+            return false;
+        }
+        if (!is_array($manifest) || !self::validThemeAdapterManifest($manifest, $theme)) {
+            return false;
+        }
+
+        $partial = (string) $manifest['partial'];
+
+        return basename($partial) === $partial && is_file($themeDirectory . '/' . $partial);
+    }
+
+    /** @param array<string,mixed> $manifest */
+    public static function validThemeAdapterManifest(array $manifest, string $activeTheme): bool
+    {
+        $contract = $manifest['contract'] ?? null;
+        if (
+            !is_array($contract)
+            || count($contract) !== 4
+            || count(array_filter($contract, 'is_string')) !== 4
+        ) {
+            return false;
+        }
+        $fields = array_values($contract);
+        sort($fields);
+        $required = ['authority', 'downloadUrl', 'invoiceNumber', 'state'];
+
+        return ($manifest['module'] ?? null) === 'sevdesk'
+            && ($manifest['contractVersion'] ?? null) === 1
+            && in_array((string) ($manifest['theme'] ?? ''), [$activeTheme, '*'], true)
+            && $fields === $required
+            && is_string($manifest['partial'] ?? null)
+            && preg_match('/^[A-Za-z0-9._-]{1,120}\.tpl$/', (string) $manifest['partial']) === 1;
     }
 
     /**

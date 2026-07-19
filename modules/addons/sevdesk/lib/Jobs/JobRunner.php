@@ -23,6 +23,9 @@ final class JobRunner
     public function run(int $maxItems = 10, int $maxSeconds = 50): array
     {
         $started = microtime(true);
+        if ($this->runtimeBlocked()) {
+            return ['processed' => 0, 'locked' => false, 'duration' => 0.0];
+        }
         if (!$this->acquireLock()) {
             return ['processed' => 0, 'locked' => true, 'duration' => 0.0];
         }
@@ -31,6 +34,13 @@ final class JobRunner
         try {
             $this->config->set('runner_last_seen', (new \DateTimeImmutable())->format(DATE_ATOM));
             while ($processed < max(1, $maxItems) && microtime(true) - $started < max(5, $maxSeconds)) {
+                // Activation or an upgrade can quarantine a process that was
+                // already inside this loop. Re-read both durable runtime gates
+                // before every claim so only the currently handled item may
+                // finish before the shared advisory lock becomes available.
+                if ($this->runtimeBlocked()) {
+                    break;
+                }
                 // Authentication failures are account-wide. Once one handler
                 // raises the alarm, no other job may consume attempts or reach
                 // sevdesk until setup has verified and cleared the credentials.
@@ -38,7 +48,14 @@ final class JobRunner
                     break;
                 }
 
-                $item = $this->jobs->claimNext();
+                // The fresh setting rows and the job/item claim are serialized
+                // in one database transaction. Quarantine, deactivation and a
+                // tenant-wide authentication alarm therefore linearize either
+                // before this claim (no handler starts) or after it (this is the
+                // one already-started item that may finish).
+                $item = $this->jobs->claimNext(
+                    claimAllowed: fn (): bool => $this->config->runtimeAllowsClaimWhileLocked(),
+                );
                 if ($item === null) {
                     break;
                 }
@@ -77,18 +94,38 @@ final class JobRunner
                     } catch (Throwable $error) {
                         $errorCode = 'unhandled_' . strtolower((new \ReflectionClass($error))->getShortName());
                         $checkpoint = (string) ($item->checkpoint ?? '');
-                        $risky = JobRepository::isRiskyCheckpoint($checkpoint);
-                        $outcome = $risky
-                            ? JobOutcome::ambiguous(
+                        $writeOutcomeUnknown = JobRepository::isWriteOutcomeUnknownCheckpoint($checkpoint);
+                        $verifiedSideEffect = JobRepository::isVerifiedSideEffectCheckpoint($checkpoint);
+                        if ($writeOutcomeUnknown) {
+                            $outcome = JobOutcome::ambiguous(
                                 'Nach einem möglichen Remote-Schreibvorgang trat ein interner Fehler auf. Vor einer Wiederholung ist ein Abgleich erforderlich.',
                                 $checkpoint,
                                 isset($item->sevdesk_id) ? (string) $item->sevdesk_id : null,
                                 errorCode: $errorCode,
-                            )
-                            : JobOutcome::permanentFailure(
+                            );
+                        } elseif ($verifiedSideEffect && (int) ($item->attempts ?? 0) < 4) {
+                            $outcome = JobOutcome::retry(
+                                'Nach einem bereits bestätigten Remote-Effekt trat beim lokalen Abschluss ein '
+                                    . 'interner Fehler auf. Der sichere Fortsetzungsschritt wird begrenzt wiederholt.',
+                                60,
+                                errorCode: $errorCode,
+                                checkpoint: $checkpoint,
+                            );
+                        } elseif ($verifiedSideEffect) {
+                            $outcome = JobOutcome::ambiguous(
+                                'Der lokale Abschluss nach einem bestätigten Remote-Effekt ist wiederholt '
+                                    . 'fehlgeschlagen. Vor einer weiteren Fortsetzung ist ein manueller Abgleich '
+                                    . 'erforderlich.',
+                                $checkpoint,
+                                isset($item->sevdesk_id) ? (string) $item->sevdesk_id : null,
+                                errorCode: $errorCode,
+                            );
+                        } else {
+                            $outcome = JobOutcome::permanentFailure(
                                 'Interner Fehler in einer Jobposition. Die übrigen Belege werden weiterverarbeitet.',
                                 errorCode: $errorCode,
                             );
+                        }
                         if (function_exists('logActivity')) {
                             logActivity('sevdesk job item ' . $item->id . ' failed with ' . get_class($error));
                         }
@@ -119,6 +156,17 @@ final class JobRunner
     private function authenticationAlarmActive(): bool
     {
         return trim((string) $this->config->get('health_alarm', '')) === 'api_authentication_failed';
+    }
+
+    /** @phpstan-impure Reads process-external settings before every claim. */
+    private function runtimeBlocked(): bool
+    {
+        $this->config->refresh();
+
+        return !$this->config->bool('module_active')
+            || $this->config->bool(Config::RUNTIME_REVIEW_SETTING)
+            || (string) $this->config->get(Config::RUNTIME_SIGNATURE_SETTING, '')
+                !== Config::RUNTIME_SIGNATURE;
     }
 
     private function acquireLock(): bool

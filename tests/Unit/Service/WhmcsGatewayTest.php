@@ -65,4 +65,35 @@ final class WhmcsGatewayTest extends TestCase
         $this->expectExceptionMessage('two simultaneous WHMCS taxes');
         $gateway->invoiceSnapshot(42);
     }
+
+    public function testThemeAdapterManifestContractIsExactAndThemeBound(): void
+    {
+        $manifest = [
+            'module' => 'sevdesk',
+            'contractVersion' => 1,
+            'theme' => 'twenty-one',
+            'partial' => 'sevdesk-invoice-authority.tpl',
+            'contract' => ['authority', 'state', 'invoiceNumber', 'downloadUrl'],
+        ];
+
+        self::assertTrue(WhmcsGateway::validThemeAdapterManifest($manifest, 'twenty-one'));
+        self::assertFalse(WhmcsGateway::validThemeAdapterManifest($manifest, 'custom-theme'));
+        $manifest['theme'] = '*';
+        self::assertTrue(WhmcsGateway::validThemeAdapterManifest($manifest, 'custom-theme'));
+        $manifest['contract'][] = 'remoteId';
+        self::assertFalse(WhmcsGateway::validThemeAdapterManifest($manifest, 'custom-theme'));
+        $manifest['contract'] = ['authority', 'state', 'invoiceNumber', 'authority'];
+        self::assertFalse(WhmcsGateway::validThemeAdapterManifest($manifest, 'custom-theme'));
+    }
+
+    public function testThemeAdapterManifestRejectsUnsafePartialPath(): void
+    {
+        self::assertFalse(WhmcsGateway::validThemeAdapterManifest([
+            'module' => 'sevdesk',
+            'contractVersion' => 1,
+            'theme' => '*',
+            'partial' => '../viewinvoice.tpl',
+            'contract' => ['authority', 'state', 'invoiceNumber', 'downloadUrl'],
+        ], 'twenty-one'));
+    }
 }

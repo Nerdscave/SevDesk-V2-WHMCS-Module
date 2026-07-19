@@ -11,8 +11,11 @@ final class TemplateContractTest extends TestCase
     private const REQUIRED_SETUP_FIELDS = [
         'token',
         'save',
+        'runtime_quarantine_token',
+        'runtime_review_confirmed',
         'sevdesk_api_key',
         'custom_field_id',
+        'customer_number_contact_creation_confirmed',
         'import_after',
         'import_only_paid',
         'sync_enabled',
@@ -36,6 +39,7 @@ final class TemplateContractTest extends TestCase
         'accountingTypeSmallBusinessOwner',
         'taxRuleSmallBusinessOwner',
         'small_business_confirmed',
+        'customer_number_contact_creation_confirmed',
     ];
 
     private const SAFETY_CONFIRMATIONS = [
@@ -150,6 +154,8 @@ final class TemplateContractTest extends TestCase
         }
 
         self::assertStringContainsString('OSS-Regeln 18–20 sind für Voucher nicht unterstützt', $setup);
+        self::assertStringContainsString('bei keinem Treffer wird kein neuer Kontakt angelegt', $setup);
+        self::assertStringContainsString('die bisherige deutsche Besteuerung und OSS dürfen nicht gleichzeitig aktiv sein', $setup);
         self::assertStringContainsString(
             'Hosting, Domains, Lizenzen und andere Dienstleistungen bleiben ausgeschlossen',
             $setup
@@ -169,6 +175,19 @@ final class TemplateContractTest extends TestCase
         self::assertStringContainsString('Token gespeichert – leer lassen zum Beibehalten', $controller);
         self::assertStringNotContainsString('sevdesk_api_key_masked', $setup . $controller);
         self::assertStringNotContainsString('substr($storedToken', $controller);
+    }
+
+    public function testRule19AndDomesticEuB2cProfilesCannotBeSavedTogether(): void
+    {
+        $controller = file_get_contents(
+            dirname(__DIR__, 2) . '/modules/addons/sevdesk/lib/Controllers/AdminController.php'
+        );
+
+        self::assertIsString($controller);
+        self::assertStringContainsString(
+            '$ossProfile === \'rule19_digital_services_confirmed\' && $mode !== \'blocked\'',
+            $controller,
+        );
     }
 
     public function testAllTaxProfilesProvideAccessibleExpandableInformation(): void

@@ -20,6 +20,9 @@ final class SevdeskClient
 {
     private const MAX_RESPONSE_BYTES = 2_097_152;
 
+    /** Bounded allowance for base64-encoded Invoice PDFs returned as JSON. */
+    private const MAX_LARGE_JSON_RESPONSE_BYTES = 15_728_640;
+
     private readonly string $baseUrl;
 
     private readonly string $apiToken;
@@ -31,7 +34,7 @@ final class SevdeskClient
         #[\SensitiveParameter]
         string $apiToken,
         string $baseUrl = 'https://my.sevdesk.de/api/v1',
-        string $userAgent = 'WHMCS-sevdesk/2.0.0',
+        string $userAgent = 'WHMCS-sevdesk/2.1.0-rc.1',
     ) {
         $apiToken = trim($apiToken);
         if ($apiToken === '') {
@@ -81,7 +84,26 @@ final class SevdeskClient
      */
     public function get(string $path, array $query = []): array
     {
-        return $this->request('GET', $path, ['query' => $query], false, 30.0);
+        return $this->request('GET', $path, ['query' => $query], false, 30.0, maxResponseBytes: self::MAX_RESPONSE_BYTES);
+    }
+
+    /**
+     * Read a documented JSON resource which may contain a base64-encoded PDF.
+     * The larger limit is opt-in so ordinary API responses remain capped at 2 MiB.
+     *
+     * @param array<string, scalar|array<array-key, scalar|null>|null> $query
+     * @return array<array-key, mixed>
+     */
+    public function getLargeJson(string $path, array $query = []): array
+    {
+        return $this->request(
+            'GET',
+            $path,
+            ['query' => $query],
+            false,
+            60.0,
+            maxResponseBytes: self::MAX_LARGE_JSON_RESPONSE_BYTES,
+        );
     }
 
     /**
@@ -181,6 +203,7 @@ final class SevdeskClient
         bool $outcomeMayBeUnknown,
         float $timeout,
         array $expectedStatuses = [],
+        int $maxResponseBytes = self::MAX_RESPONSE_BYTES,
     ): array {
         $options['headers'] = array_merge(
             $options['headers'] ?? [],
@@ -224,7 +247,12 @@ final class SevdeskClient
         }
 
         try {
-            return $this->decodeResponse($response, $outcomeMayBeUnknown, $expectedStatuses);
+            return $this->decodeResponse(
+                $response,
+                $outcomeMayBeUnknown,
+                $expectedStatuses,
+                $maxResponseBytes,
+            );
         } catch (ApiException $exception) {
             throw $exception;
         } catch (Throwable) {
@@ -247,11 +275,12 @@ final class SevdeskClient
         ResponseInterface $response,
         bool $outcomeMayBeUnknown,
         array $expectedStatuses,
+        int $maxResponseBytes,
     ): array {
         $status = $response->getStatusCode();
         $body = (string) $response->getBody();
 
-        if (strlen($body) > self::MAX_RESPONSE_BYTES) {
+        if (strlen($body) > $maxResponseBytes) {
             throw new ApiException(
                 'sevdesk returned an unexpectedly large response.',
                 $status,

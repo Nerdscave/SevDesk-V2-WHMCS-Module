@@ -22,7 +22,11 @@ quality:
     - composer cs
     - composer stan
     - composer test
-    - ./tools/build-release.sh 2.0.0
+    - ./tools/build-release.sh
+  artifacts:
+    paths:
+      - dist/sevdesk-*.tar.gz
+    expire_in: 1 week
 
 integration:
   stage: test

@@ -26,6 +26,8 @@ final class HookActivationContractTest extends TestCase
 
         self::assertStringContainsString("bool('module_active')", $gate);
         self::assertStringContainsString("bool('sync_enabled')", $gate);
+        self::assertStringContainsString('RUNTIME_SIGNATURE', $gate);
+        self::assertStringContainsString('RUNTIME_REVIEW_SETTING', $gate);
     }
 
     public function testEveryEventDrivenEnqueuePathUsesTheSharedGate(): void
@@ -49,6 +51,8 @@ final class HookActivationContractTest extends TestCase
         );
 
         self::assertStringContainsString("bool('module_active')", $cronHook);
+        self::assertStringContainsString('RUNTIME_SIGNATURE', $cronHook);
+        self::assertStringContainsString('RUNTIME_REVIEW_SETTING', $cronHook);
         self::assertStringNotContainsString('sync_enabled', $cronHook);
         self::assertStringContainsString('runner()->run(10, 50)', $cronHook);
     }
@@ -59,8 +63,19 @@ final class HookActivationContractTest extends TestCase
         self::assertIsString($worker);
 
         self::assertStringContainsString("bool('module_active')", $worker);
-        self::assertStringNotContainsString('sync_enabled', $worker);
+        self::assertStringContainsString('RUNTIME_SIGNATURE', $worker);
+        self::assertStringContainsString('RUNTIME_REVIEW_SETTING', $worker);
+        self::assertStringContainsString('Migrator::prepareWorkerRuntime($config)', $worker);
         self::assertStringContainsString('runner()->run($maxItems, $maxSeconds)', $worker);
+    }
+
+    public function testInvoiceQuickActionIsHiddenDuringRuntimeReview(): void
+    {
+        $start = strpos($this->hooks, "add_hook('AdminInvoicesControlsOutput'");
+        self::assertNotFalse($start);
+        $controls = substr($this->hooks, $start);
+
+        self::assertStringContainsString('RUNTIME_REVIEW_SETTING', $controls);
     }
 
     private function sourceBetween(string $startMarker, string $endMarker): string

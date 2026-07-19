@@ -2,6 +2,7 @@
 
 <div class="alert alert-warning" role="status">
     Das Aufheben einer Zuordnung löscht keinen sevdesk-Beleg; ein erneuter Export kann ein Duplikat erzeugen.
+    Legacy-Zuordnungen ohne Typ werden ausschließlich gelesen und erst nach einer zweiten Remote-Prüfung bestätigt.
 </div>
 
 <div class="well well-sm">
@@ -17,6 +18,7 @@
             <select id="mapping-status" name="status" class="form-control input-sm">
                 <option value="">Alle</option>
                 <option value="mapped"{if $filters.status === 'mapped'} selected{/if}>Vollständig</option>
+                <option value="untyped"{if $filters.status === 'untyped'} selected{/if}>Legacy-Typ ungeklärt</option>
                 <option value="incomplete"{if $filters.status === 'incomplete'} selected{/if}>Ohne sevdesk-ID</option>
                 <option value="orphan"{if $filters.status === 'orphan'} selected{/if}>Ohne WHMCS-Rechnung</option>
             </select>
@@ -34,6 +36,8 @@
                 <th scope="col">WHMCS-Rechnung</th>
                 <th scope="col">Rechnungsdatum</th>
                 <th scope="col">sevdesk-Beleg</th>
+                <th scope="col">Typ / Hoheit / Rule</th>
+                <th scope="col">Bereit / Zustellung</th>
                 <th scope="col">Zustand</th>
                 <th scope="col">Mapping-ID</th>
                 <th scope="col" class="sd-table-action"><span class="sr-only">Aktion</span></th>
@@ -60,22 +64,82 @@
                         {/if}
                     </td>
                     <td>
+                        {if $mapping.document_type === 'voucher'}
+                            <strong>Voucher</strong>
+                        {elseif $mapping.document_type === 'invoice'}
+                            <strong>Invoice</strong>
+                        {elseif $mapping.sevdesk_id}
+                            <span class="text-warning"><i class="fas fa-question-circle" aria-hidden="true"></i> ungeklärt</span>
+                        {else}
+                            <span class="text-muted">—</span>
+                        {/if}
+                        <small class="sd-mono">{$mapping.document_number|default:'keine Dokumentnummer'|escape:'html':'UTF-8'}</small>
+                        <small>Hoheit: {$mapping.document_authority|default:'nicht historisch erfasst'|escape:'html':'UTF-8'} · Rule: {$mapping.tax_rule|default:'—'|escape:'html':'UTF-8'}</small>
+                    </td>
+                    <td>
+                        <small>
+                            bereit: {$mapping.document_ready_at|default:'—'|escape:'html':'UTF-8'}<br>
+                            zugestellt: {$mapping.delivered_at|default:'—'|escape:'html':'UTF-8'}<br>
+                            Zustand: {$mapping.delivery_state|default:'unknown'|escape:'html':'UTF-8'}
+                        </small>
+                    </td>
+                    <td>
                         {if $mapping.invoice_exists === false}
                             {include file="partials/status_badge.tpl" status="warning"}
                             <small>verwaiste Zuordnung</small>
                         {elseif !$mapping.sevdesk_id}
                             {include file="partials/status_badge.tpl" status="ambiguous"}
                             <small>vor erneutem Export abgleichen</small>
+                        {elseif !$mapping.document_type}
+                            {include file="partials/status_badge.tpl" status="ambiguous"}
+                            <small>Belegtyp manuell bestätigen</small>
                         {else}
                             {include file="partials/status_badge.tpl" status="mapped"}
                         {/if}
                     </td>
                     <td><span class="sd-mono">{$mapping.mapping_id|escape:'html':'UTF-8'}</span></td>
                     <td class="sd-table-action">
+                        {if $mapping.invoice_exists !== false && $mapping.sevdesk_id && !$mapping.document_type}
+                            {if $typeInspection && $typeInspection.mappingId == $mapping.mapping_id}
+                                <div class="alert {if $typeInspection.context.markerEvidence}alert-info{else}alert-warning{/if}">
+                                    Genau ein Remote-Typ passt: <strong>{if $typeInspection.suggestedType === 'invoice'}Invoice{else}Voucher{/if}</strong>
+                                    mit Dokumentnummer <span class="sd-mono">{$typeInspection.documentNumber|escape:'html':'UTF-8'}</span>.<br>
+                                    <small>
+                                        Nachweis Dokumentnummer: {if $typeInspection.context.numberEvidence}<strong>ja</strong>{else}<strong>nein</strong>{/if} ·
+                                        Rewrite-Marker: {if $typeInspection.context.markerEvidence}<strong>ja</strong>{else}<strong>nein</strong>{/if}
+                                    </small>
+                                    {if !$typeInspection.context.markerEvidence}
+                                        <br><strong>Schwächerer Legacy-Vorschlag:</strong>
+                                        Das Dokument besitzt keinen Marker des Rewrites. Bitte die historische Zuordnung in WHMCS und sevdesk vor der Bestätigung manuell prüfen.
+                                    {/if}
+                                </div>
+                                <form method="post" action="{$moduleLink|escape:'html':'UTF-8'}&amp;a=assignmentManager" data-confirm="Belegtyp nach erneuter Remote-Prüfung verbindlich bestätigen?">
+                                    <input type="hidden" name="token" value="{$csrfToken|escape:'html':'UTF-8'}">
+                                    <input type="hidden" name="mapping_id" value="{$mapping.mapping_id|default:$mapping.id|escape:'html':'UTF-8'}">
+                                    <input type="hidden" name="document_type" value="{$typeInspection.suggestedType|escape:'html':'UTF-8'}">
+                                    <input type="hidden" name="page" value="{$pagination.page|escape:'html':'UTF-8'}">
+                                    <input type="hidden" name="filter_status" value="{$filters.status|escape:'html':'UTF-8'}">
+                                    <input type="hidden" name="filter_q" value="{$filters.q|escape:'html':'UTF-8'}">
+                                    <button type="submit" name="confirm_legacy_type" value="1" class="btn btn-primary btn-sm">Typ bestätigen</button>
+                                </form>
+                            {else}
+                                <form method="post" action="{$moduleLink|escape:'html':'UTF-8'}&amp;a=assignmentManager">
+                                    <input type="hidden" name="token" value="{$csrfToken|escape:'html':'UTF-8'}">
+                                    <input type="hidden" name="mapping_id" value="{$mapping.mapping_id|default:$mapping.id|escape:'html':'UTF-8'}">
+                                    <input type="hidden" name="page" value="{$pagination.page|escape:'html':'UTF-8'}">
+                                    <input type="hidden" name="filter_status" value="{$filters.status|escape:'html':'UTF-8'}">
+                                    <input type="hidden" name="filter_q" value="{$filters.q|escape:'html':'UTF-8'}">
+                                    <button type="submit" name="inspect_legacy_type" value="1" class="btn btn-default btn-sm">Typ read-only prüfen</button>
+                                </form>
+                            {/if}
+                        {/if}
                         <form method="post" action="{$moduleLink|escape:'html':'UTF-8'}&amp;a=assignmentManager" data-confirm="Zuordnung wirklich aufheben? Der Beleg in sevdesk bleibt bestehen und ein späterer Export kann ein Duplikat anlegen.">
                             <input type="hidden" name="token" value="{$csrfToken|escape:'html':'UTF-8'}">
                             <input type="hidden" name="mapping_id" value="{$mapping.mapping_id|default:$mapping.id|escape:'html':'UTF-8'}">
                             <input type="hidden" name="invoiceid" value="{$mapping.invoice_id|escape:'html':'UTF-8'}">
+                            <input type="hidden" name="page" value="{$pagination.page|escape:'html':'UTF-8'}">
+                            <input type="hidden" name="filter_status" value="{$filters.status|escape:'html':'UTF-8'}">
+                            <input type="hidden" name="filter_q" value="{$filters.q|escape:'html':'UTF-8'}">
                             <button type="submit" name="delete" value="1" class="btn btn-default btn-sm">Aufheben</button>
                         </form>
                     </td>

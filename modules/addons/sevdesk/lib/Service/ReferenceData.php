@@ -77,6 +77,28 @@ final class ReferenceData
         return trim((string) ($response['version'] ?? ''));
     }
 
+    /** @return list<array{id:string,name:string}> */
+    public function sevUsers(): array
+    {
+        return self::namedReferences($this->client->get('/SevUser'));
+    }
+
+    /** @return list<array{id:string,name:string}> */
+    public function unities(): array
+    {
+        return self::namedReferences($this->client->get('/Unity'));
+    }
+
+    public function hasSevUser(string $id): bool
+    {
+        return self::containsReference($this->sevUsers(), $id);
+    }
+
+    public function hasUnity(string $id): bool
+    {
+        return self::containsReference($this->unities(), $id);
+    }
+
     public function countryId(string $countryCode): ?string
     {
         $countryCode = strtoupper(trim($countryCode));
@@ -86,7 +108,11 @@ final class ReferenceData
 
         try {
             $response = $this->client->get('/StaticCountry', ['code' => $countryCode]);
-        } catch (ApiException) {
+        } catch (ApiException $exception) {
+            if ($exception->isAuthenticationFailure()) {
+                throw $exception;
+            }
+
             return $this->countries[$countryCode] = null;
         }
 
@@ -113,7 +139,11 @@ final class ReferenceData
 
         try {
             $rows = self::rows($this->client->get('/Category', ['objectType' => 'ContactAddress']));
-        } catch (ApiException) {
+        } catch (ApiException $exception) {
+            if ($exception->isAuthenticationFailure()) {
+                throw $exception;
+            }
+
             return null;
         }
 
@@ -131,7 +161,11 @@ final class ReferenceData
 
         try {
             $rows = self::rows($this->client->get('/CommunicationWayKey'));
-        } catch (ApiException) {
+        } catch (ApiException $exception) {
+            if ($exception->isAuthenticationFailure()) {
+                throw $exception;
+            }
+
             return null;
         }
 
@@ -201,5 +235,46 @@ final class ReferenceData
         $id = trim((string) $id);
 
         return preg_match('/^\d+$/', $id) === 1 ? $id : null;
+    }
+
+    /**
+     * @param array<array-key, mixed> $response
+     * @return list<array{id:string,name:string}>
+     */
+    private static function namedReferences(array $response): array
+    {
+        $references = [];
+        foreach (self::rows($response) as $row) {
+            $id = self::numericId($row['id'] ?? null);
+            if ($id === null) {
+                continue;
+            }
+            $name = trim(implode(' ', array_filter([
+                (string) ($row['name'] ?? ''),
+                (string) ($row['firstName'] ?? ''),
+                (string) ($row['lastName'] ?? ''),
+                (string) ($row['translationCode'] ?? ''),
+            ], static fn (string $value): bool => trim($value) !== '')));
+            $references[] = ['id' => $id, 'name' => $name !== '' ? $name : '#' . $id];
+        }
+
+        return $references;
+    }
+
+    /** @param list<array{id:string,name:string}> $references */
+    private static function containsReference(array $references, string $id): bool
+    {
+        $id = trim($id);
+        if (preg_match('/^\d+$/', $id) !== 1) {
+            return false;
+        }
+
+        foreach ($references as $reference) {
+            if ($reference['id'] === $id) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

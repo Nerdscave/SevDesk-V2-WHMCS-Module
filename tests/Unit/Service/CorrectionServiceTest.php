@@ -104,6 +104,62 @@ final class CorrectionServiceTest extends TestCase
         self::assertCount(0, $history);
     }
 
+    public function testInvoiceMappingIsBlockedWithoutCreditNoteOrVoucherFallback(): void
+    {
+        $history = [];
+        $callbackCalls = 0;
+        $service = new CorrectionService(
+            $this->client([], $history),
+            static function () use (&$callbackCalls): null {
+                ++$callbackCalls;
+
+                return null;
+            },
+            static function () use (&$callbackCalls): bool {
+                ++$callbackCalls;
+
+                return true;
+            },
+        );
+        $request = $this->request('119.00');
+        $request['documentType'] = 'invoice';
+
+        $result = $service->create(
+            $request,
+            $this->taxDecision(),
+            [new LineItem('Refund', '100.00', '19', true)],
+            true,
+        );
+
+        self::assertSame('blocked', $result['status']);
+        self::assertSame('invoice_correction_not_supported', $result['code']);
+        self::assertSame(0, $callbackCalls);
+        self::assertCount(0, $history);
+    }
+
+    public function testLegacyMappingWithoutDocumentTypeFailsClosed(): void
+    {
+        $history = [];
+        $service = new CorrectionService(
+            $this->client([], $history),
+            static fn (): null => null,
+            static fn (): bool => true,
+        );
+        $request = $this->request('119.00');
+        unset($request['documentType']);
+
+        $result = $service->create(
+            $request,
+            $this->taxDecision(),
+            [new LineItem('Refund', '100.00', '19', true)],
+            true,
+        );
+
+        self::assertSame('blocked', $result['status']);
+        self::assertSame('correction_mapping_document_type_unknown', $result['code']);
+        self::assertCount(0, $history);
+    }
+
     public function testExistingLocalRefundReferenceSkipsAllRemoteCalls(): void
     {
         $history = [];
@@ -321,6 +377,7 @@ final class CorrectionServiceTest extends TestCase
     /**
      * @return array{
      *     kind: string,
+     *     documentType: string,
      *     whmcsRefundTransactionId: string,
      *     invoiceId: int,
      *     invoiceNumber: string,
@@ -335,6 +392,7 @@ final class CorrectionServiceTest extends TestCase
     {
         return [
             'kind' => 'refund',
+            'documentType' => 'voucher',
             'whmcsRefundTransactionId' => 'RF-9',
             'invoiceId' => 10,
             'invoiceNumber' => 'INV-10',

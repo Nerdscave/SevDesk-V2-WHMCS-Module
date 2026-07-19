@@ -27,6 +27,9 @@ final class ContactService
     /** @var Closure(): (string|null) */
     private readonly Closure $resolveEmailKeyId;
 
+    /** @var Closure(): bool */
+    private readonly Closure $allowCustomerNumberContactCreate;
+
     /**
      * Collaborator signatures:
      *
@@ -44,12 +47,16 @@ final class ContactService
         private readonly string $contactCategoryId = '3',
         string|callable|null $addressCategoryId = null,
         string|callable|null $emailKeyId = null,
+        bool|callable $allowCustomerNumberContactCreate = false,
     ) {
         $this->persistContactId = Closure::fromCallable($persistContactId);
         $this->resolveCountryId = Closure::fromCallable($resolveCountryId);
         self::assertOptionalNumericId($contactCategoryId, 'Contact category');
         $this->resolveAddressCategoryId = self::optionalIdResolver($addressCategoryId, 'Address category');
         $this->resolveEmailKeyId = self::optionalIdResolver($emailKeyId, 'Email key');
+        $this->allowCustomerNumberContactCreate = is_bool($allowCustomerNumberContactCreate)
+            ? static fn (): bool => $allowCustomerNumberContactCreate
+            : Closure::fromCallable($allowCustomerNumberContactCreate);
     }
 
     /**
@@ -81,7 +88,6 @@ final class ContactService
                         'configured',
                     ));
                 }
-
                 return Result::failure(
                     'configured_contact_missing',
                     'The configured sevdesk contact no longer exists and requires manual reconciliation.',
@@ -93,9 +99,17 @@ final class ContactService
         }
 
         try {
-            $matches = $this->findByCustomerNumber($contact->whmcsClientId);
+            $search = $this->findByCustomerNumber($contact->whmcsClientId);
         } catch (ApiException $exception) {
             return $this->apiFailure('contact_search_failed', $exception);
+        }
+        $matches = $search['matches'];
+        if ($search['unverifiable'] > 0) {
+            return Result::failure(
+                'contact_search_unverifiable',
+                'sevdesk returned a possible customer-number match whose identity could not be proven.',
+                ['unverifiableCount' => $search['unverifiable']],
+            );
         }
 
         if (count($matches) > 1) {
@@ -140,6 +154,13 @@ final class ContactService
                 'contact_recovery_no_match_ambiguous',
                 'No unique sevdesk contact was found while recovering an earlier create request.',
                 ['ambiguous' => true, 'matchCount' => 0],
+            );
+        }
+
+        if (!(($this->allowCustomerNumberContactCreate)())) {
+            return Result::failure(
+                'contact_creation_not_confirmed',
+                'Creating a new sevdesk contact from the WHMCS customer number requires operator confirmation.',
             );
         }
 
@@ -220,7 +241,7 @@ final class ContactService
         return self::extractContactId($response) === $contactId;
     }
 
-    /** @return list<array<array-key, mixed>> */
+    /** @return array{matches:list<array<array-key,mixed>>,unverifiable:int} */
     private function findByCustomerNumber(int $whmcsClientId): array
     {
         $response = $this->client->get('/Contact', [
@@ -229,18 +250,38 @@ final class ContactService
         ]);
 
         if ($response === []) {
-            return [];
+            return ['matches' => [], 'unverifiable' => 0];
         }
 
-        if (!array_is_list($response)) {
-            return self::contactMatchesCustomerNumber($response, $whmcsClientId) ? [$response] : [];
+        $candidates = array_is_list($response) ? $response : [$response];
+        $matches = [];
+        $unverifiable = 0;
+        foreach ($candidates as $candidate) {
+            if (!is_array($candidate)) {
+                continue;
+            }
+            $contactId = self::extractContactId($candidate);
+            if ($contactId === null) {
+                continue;
+            }
+
+            $matchesCustomer = self::contactMatchesCustomerNumber($candidate, $whmcsClientId);
+            if ($matchesCustomer === null) {
+                $details = $this->client->get('/Contact/' . rawurlencode($contactId));
+                $matchesCustomer = self::matchingContactDetailsUseCustomerNumber(
+                    $details,
+                    $contactId,
+                    $whmcsClientId,
+                );
+            }
+            if ($matchesCustomer === true) {
+                $matches[] = $candidate;
+            } elseif ($matchesCustomer === null) {
+                ++$unverifiable;
+            }
         }
 
-        return array_values(array_filter(
-            $response,
-            static fn (mixed $candidate): bool => is_array($candidate)
-                && self::contactMatchesCustomerNumber($candidate, $whmcsClientId),
-        ));
+        return ['matches' => $matches, 'unverifiable' => $unverifiable];
     }
 
     /** @return array<string, mixed> */
@@ -283,6 +324,12 @@ final class ContactService
 
         try {
             $addressCategoryId = ($this->resolveAddressCategoryId)();
+        } catch (ApiException $exception) {
+            if ($exception->isAuthenticationFailure()) {
+                throw $exception;
+            }
+            $warnings[] = 'address_not_added:category_resolution_failed';
+            return;
         } catch (Throwable) {
             $warnings[] = 'address_not_added:category_resolution_failed';
             return;
@@ -294,6 +341,12 @@ final class ContactService
 
         try {
             $countryId = ($this->resolveCountryId)($contact->countryCode);
+        } catch (ApiException $exception) {
+            if ($exception->isAuthenticationFailure()) {
+                throw $exception;
+            }
+            $warnings[] = 'address_not_added:country_resolution_failed';
+            return;
         } catch (Throwable) {
             $warnings[] = 'address_not_added:country_resolution_failed';
             return;
@@ -324,6 +377,9 @@ final class ContactService
                 'name' => $contact->displayName(),
             ], true, [201]);
         } catch (ApiException $exception) {
+            if ($exception->isAuthenticationFailure()) {
+                throw $exception;
+            }
             $warnings[] = 'address_not_added:' . self::warningCode($exception);
         }
     }
@@ -341,6 +397,12 @@ final class ContactService
         }
         try {
             $emailKeyId = ($this->resolveEmailKeyId)();
+        } catch (ApiException $exception) {
+            if ($exception->isAuthenticationFailure()) {
+                throw $exception;
+            }
+            $warnings[] = 'email_not_added:key_resolution_failed';
+            return;
         } catch (Throwable) {
             $warnings[] = 'email_not_added:key_resolution_failed';
             return;
@@ -362,6 +424,9 @@ final class ContactService
                 'main' => true,
             ], true, [201]);
         } catch (ApiException $exception) {
+            if ($exception->isAuthenticationFailure()) {
+                throw $exception;
+            }
             $warnings[] = 'email_not_added:' . self::warningCode($exception);
         }
     }
@@ -391,16 +456,21 @@ final class ContactService
     /** @return Result */
     private function apiFailure(string $code, ApiException $exception): Result
     {
+        $context = [
+            'httpStatus' => $exception->httpStatus,
+            'sevdeskCode' => $exception->sevdeskCode,
+            'exceptionUuid' => $exception->exceptionUuid,
+            'retryAfterSeconds' => $exception->retryAfterSeconds,
+            'ambiguous' => $exception->outcomeUnknown,
+        ];
+        if (!$exception->outcomeUnknown && $code === 'contact_create_failed') {
+            $context['definiteWriteRejected'] = true;
+        }
+
         return Result::failure(
             $exception->outcomeUnknown ? $code . '_ambiguous' : $code,
             'A sevdesk contact operation failed.',
-            [
-                'httpStatus' => $exception->httpStatus,
-                'sevdeskCode' => $exception->sevdeskCode,
-                'exceptionUuid' => $exception->exceptionUuid,
-                'retryAfterSeconds' => $exception->retryAfterSeconds,
-                'ambiguous' => $exception->outcomeUnknown,
-            ],
+            $context,
         );
     }
 
@@ -461,17 +531,35 @@ final class ContactService
     }
 
     /** @param array<array-key, mixed> $candidate */
-    private static function contactMatchesCustomerNumber(array $candidate, int $whmcsClientId): bool
+    private static function contactMatchesCustomerNumber(array $candidate, int $whmcsClientId): ?bool
     {
         if (self::extractContactId($candidate) === null) {
             return false;
         }
 
-        // The API filter is authoritative, but checking a returned value when it
-        // is present prevents an unexpectedly broad response from linking the
-        // wrong customer. Some older responses omit customerNumber entirely.
-        return !array_key_exists('customerNumber', $candidate)
-            || (string) $candidate['customerNumber'] === (string) $whmcsClientId;
+        if (!array_key_exists('customerNumber', $candidate)) {
+            return null;
+        }
+
+        return (string) $candidate['customerNumber'] === (string) $whmcsClientId;
+    }
+
+    /** @param array<array-key, mixed> $response */
+    private static function matchingContactDetailsUseCustomerNumber(
+        array $response,
+        string $contactId,
+        int $whmcsClientId,
+    ): ?bool {
+        $candidates = array_is_list($response) ? $response : [$response];
+        foreach ($candidates as $candidate) {
+            if (!is_array($candidate) || self::extractContactId($candidate) !== $contactId) {
+                continue;
+            }
+
+            return self::contactMatchesCustomerNumber($candidate, $whmcsClientId);
+        }
+
+        return null;
     }
 
     private static function payloadId(string $id): int|string

@@ -106,6 +106,8 @@ final class WhmcsRuntimeCompatibilityTest extends MariaDbTestCase
             Capsule::table(Migrator::MAPPING_TABLE)->insert([
                 'invoice_id' => $invoiceId,
                 'sevdesk_id' => (string) (8_000 + $offset),
+                'document_type' => MappingRepository::DOCUMENT_TYPE_VOUCHER,
+                'document_number' => 'PART-' . $invoiceId,
             ]);
             Capsule::table('tblaccounts')->insert([
                 'id' => 1_000 + $offset,
@@ -140,6 +142,7 @@ final class WhmcsRuntimeCompatibilityTest extends MariaDbTestCase
         self::assertSame(1_000, (int) $first['items'][0]->whmcs_account_id);
         self::assertSame('Unpaid', $first['items'][0]->invoice_status);
         self::assertSame('EUR', $first['items'][0]->invoice_currency);
+        self::assertSame(MappingRepository::DOCUMENT_TYPE_VOUCHER, $first['items'][0]->document_type);
         self::assertCount(2, $second['items']);
         self::assertSame(1_010, (int) $second['items'][0]->whmcs_account_id);
     }
@@ -150,7 +153,7 @@ final class WhmcsRuntimeCompatibilityTest extends MariaDbTestCase
         $this->insertInvoiceWithClientCurrency();
         $this->insertAccount(0);
         $mappings = new MappingRepository();
-        $mappings->link(42, '99');
+        $mappings->linkDocument(42, '99', MappingRepository::DOCUMENT_TYPE_VOUCHER, 'SYN-42');
         $handler = new BookingJobHandler(
             new BookingService(new SevdeskClient(
                 new Client(['handler' => HandlerStack::create(new MockHandler([]))]),
@@ -164,6 +167,7 @@ final class WhmcsRuntimeCompatibilityTest extends MariaDbTestCase
             'whmcsAccountId' => 81,
             'whmcsInvoiceId' => 42,
             'whmcsTransactionId' => 'PAY-42',
+            'documentType' => MappingRepository::DOCUMENT_TYPE_VOUCHER,
             'voucherId' => '88',
             'amount' => '119.00',
             'bookingDate' => '2026-07-09',

@@ -44,13 +44,22 @@ final class CorrectionJobHandler
     /** @param callable(string, array<string, scalar|null>): bool $checkpoint */
     public function __invoke(object $item, callable $checkpoint): JobOutcome
     {
+        $currentCheckpoint = (string) ($item->checkpoint ?? '');
         try {
             $candidate = json_decode((string) ($item->candidate_json ?? ''), true, 64, JSON_THROW_ON_ERROR);
         } catch (JsonException) {
-            return JobOutcome::permanentFailure('Die gespeicherten Korrekturdaten sind ungültig.', errorCode: 'invalid_correction_candidate');
+            return self::preflightFailure(
+                $item,
+                'Die gespeicherten Korrekturdaten sind ungültig.',
+                'invalid_correction_candidate',
+            );
         }
         if (!is_array($candidate) || !is_array($candidate['request'] ?? null) || !is_array($candidate['positions'] ?? null)) {
-            return JobOutcome::permanentFailure('Die gespeicherten Korrekturdaten sind unvollständig.', errorCode: 'missing_correction_candidate');
+            return self::preflightFailure(
+                $item,
+                'Die gespeicherten Korrekturdaten sind unvollständig.',
+                'missing_correction_candidate',
+            );
         }
 
         $request = $candidate['request'];
@@ -62,31 +71,57 @@ final class CorrectionJobHandler
             || (int) $transaction->invoiceid !== $invoiceId
             || (float) $transaction->amountout <= 0
             || abs((float) $transaction->amountout - (float) ($request['refundAmount'] ?? 0)) > 0.005
-            || !$this->isVerifiedRefundTransaction($transaction)
+            || !$this->whmcs->isVerifiedRefundTransaction($transaction)
         ) {
-            return JobOutcome::permanentFailure(
+            return self::preflightFailure(
+                $item,
                 'Die zugrunde liegende WHMCS-Rückzahlung hat sich geändert oder wurde nicht gefunden.',
-                errorCode: 'refund_transaction_changed',
+                'refund_transaction_changed',
             );
         }
 
         $mapping = $this->mappings->findCompleteByInvoice($invoiceId);
         if ($mapping === null) {
-            return JobOutcome::permanentFailure('Die Originalrechnung besitzt keine vollständige sevdesk-Zuordnung.', errorCode: 'original_mapping_missing');
+            return self::preflightFailure(
+                $item,
+                'Die Originalrechnung besitzt keine vollständige sevdesk-Zuordnung.',
+                'original_mapping_missing',
+            );
+        }
+        $documentType = strtolower(trim((string) ($mapping->document_type ?? '')));
+        if ($documentType === 'invoice') {
+            return self::preflightFailure(
+                $item,
+                'Invoice-Zuordnungen können nicht mit einem negativen Voucher korrigiert werden. '
+                    . 'Dafür ist ein separat bestätigter CreditNote-Pfad erforderlich.',
+                'invoice_correction_not_supported',
+            );
+        }
+        if ($documentType !== 'voucher') {
+            return self::preflightFailure(
+                $item,
+                'Der Dokumenttyp der Legacy-Zuordnung ist nicht bestätigt. Bitte zuerst im Recovery klären.',
+                'correction_mapping_document_type_unknown',
+            );
         }
 
         try {
             $invoice = $this->whmcs->invoiceSnapshot($invoiceId);
             $transactionCurrency = (string) Capsule::table('tblcurrencies')->where('id', (int) $transaction->currency)->value('code');
             if ($transactionCurrency !== '' && strtoupper($transactionCurrency) !== $invoice->currency) {
-                return JobOutcome::permanentFailure(
+                return self::preflightFailure(
+                    $item,
                     'Rückzahlung und Originalrechnung verwenden unterschiedliche Währungen.',
-                    errorCode: 'refund_currency_mismatch',
+                    'refund_currency_mismatch',
                 );
             }
             $contact = $this->whmcs->contactData($invoice->clientId);
             if ($contact->sevdeskContactId === null) {
-                return JobOutcome::permanentFailure('Die sevdesk-Kontakt-ID der Originalrechnung fehlt.', errorCode: 'original_contact_missing');
+                return self::preflightFailure(
+                    $item,
+                    'Die sevdesk-Kontakt-ID der Originalrechnung fehlt.',
+                    'original_contact_missing',
+                );
             }
             $positions = [];
             foreach ($candidate['positions'] as $position) {
@@ -112,6 +147,7 @@ final class CorrectionJobHandler
             );
             $trustedRequest = array_merge($request, [
                 'kind' => 'refund',
+                'documentType' => 'voucher',
                 'invoiceId' => $invoiceId,
                 'invoiceNumber' => $invoice->invoiceNumber,
                 'originalVoucherId' => (string) $mapping->sevdesk_id,
@@ -122,9 +158,7 @@ final class CorrectionJobHandler
             ]);
         } catch (ApiException $error) {
             if ($error->isAuthenticationFailure()) {
-                $this->config->set('sync_enabled', '');
-                $this->config->set('health_alarm', 'api_authentication_failed');
-                $this->jobs->pause((int) $item->job_id);
+                $this->tripAuthenticationAlarm((int) $item->job_id);
 
                 return JobOutcome::retry(
                     'sevdesk hat die Authentifizierung abgelehnt; der Job wurde pausiert.',
@@ -132,6 +166,7 @@ final class CorrectionJobHandler
                     $error->httpStatus,
                     $error->exceptionUuid,
                     'api_authentication_failed',
+                    self::preflightResumeCheckpoint($currentCheckpoint),
                 );
             }
             if ($error->httpStatus === 429 && (int) ($item->attempts ?? 1) < 10) {
@@ -141,6 +176,7 @@ final class CorrectionJobHandler
                     429,
                     $error->exceptionUuid,
                     'correction_preflight_rate_limited',
+                    self::preflightResumeCheckpoint($currentCheckpoint),
                 );
             }
             if (
@@ -155,17 +191,23 @@ final class CorrectionJobHandler
                     $error->httpStatus,
                     $error->exceptionUuid,
                     'correction_preflight_failed',
+                    self::preflightResumeCheckpoint($currentCheckpoint),
                 );
             }
 
-            return JobOutcome::permanentFailure(
+            return self::preflightFailure(
+                $item,
                 'Die Korrektur-Vorprüfung wurde von sevdesk abgelehnt.',
+                'correction_preflight_failed',
                 $error->httpStatus,
                 $error->exceptionUuid,
-                'correction_preflight_failed',
             );
         } catch (\Throwable $error) {
-            return JobOutcome::permanentFailure('Die Korrektur-Vorprüfung konnte nicht abgeschlossen werden.', errorCode: 'correction_preflight_failed');
+            return self::preflightFailure(
+                $item,
+                'Die Korrektur-Vorprüfung konnte nicht abgeschlossen werden.',
+                'correction_preflight_failed',
+            );
         }
 
         $persistCheckpoint = static function (string $name, array $context = []) use ($checkpoint, $item): bool {
@@ -215,10 +257,12 @@ final class CorrectionJobHandler
         }
 
         $httpStatus = self::intOrNull($context['httpStatus'] ?? null);
+        $definiteWriteRejected = self::truthy($context['definiteWriteRejected'] ?? false);
+        $resumeCheckpoint = $definiteWriteRejected
+            ? 'queued'
+            : (string) ($item->checkpoint ?? 'queued');
         if (in_array($httpStatus, [401, 403], true)) {
-            $this->config->set('sync_enabled', '');
-            $this->config->set('health_alarm', 'api_authentication_failed');
-            $this->jobs->pause((int) $item->job_id);
+            $this->tripAuthenticationAlarm((int) $item->job_id);
 
             return JobOutcome::retry(
                 'sevdesk hat die Authentifizierung abgelehnt; der Job wurde pausiert.',
@@ -226,6 +270,7 @@ final class CorrectionJobHandler
                 $httpStatus,
                 self::stringOrNull($context['exceptionUuid'] ?? null),
                 'api_authentication_failed',
+                $resumeCheckpoint,
             );
         }
         if ($httpStatus === 429 && (int) ($item->attempts ?? 1) < 10) {
@@ -235,6 +280,7 @@ final class CorrectionJobHandler
                 429,
                 self::stringOrNull($context['exceptionUuid'] ?? null),
                 $code,
+                $resumeCheckpoint,
             );
         }
         $safeRetry = $httpStatus === 408
@@ -243,10 +289,36 @@ final class CorrectionJobHandler
         if ($status === 'failed' && $safeRetry && (int) ($item->attempts ?? 1) < 4) {
             $delays = [300, 900, 3600];
 
-            return JobOutcome::retry($message, $delays[min(max(1, (int) $item->attempts) - 1, 2)], $httpStatus, self::stringOrNull($context['exceptionUuid'] ?? null), $code);
+            return JobOutcome::retry(
+                $message,
+                $delays[min(max(1, (int) $item->attempts) - 1, 2)],
+                $httpStatus,
+                self::stringOrNull($context['exceptionUuid'] ?? null),
+                $code,
+                $resumeCheckpoint,
+            );
         }
 
-        return JobOutcome::permanentFailure($message, $httpStatus, self::stringOrNull($context['exceptionUuid'] ?? null), $code);
+        if (!$definiteWriteRejected && JobRepository::isRiskyCheckpoint((string) ($item->checkpoint ?? ''))) {
+            return JobOutcome::ambiguous(
+                'Die read-only Korrektur-Recovery blieb ohne beweiskräftiges Ergebnis. '
+                    . 'Ein zweiter Korrektur-Write bleibt gesperrt.',
+                (string) $item->checkpoint,
+                $remoteId,
+                $httpStatus,
+                self::stringOrNull($context['exceptionUuid'] ?? null),
+                $code,
+                $context,
+            );
+        }
+
+        return JobOutcome::permanentFailure(
+            $message,
+            $httpStatus,
+            self::stringOrNull($context['exceptionUuid'] ?? null),
+            $code,
+            $resumeCheckpoint,
+        );
     }
 
     public static function readOnlyRecoveryRequired(string $checkpoint): bool
@@ -256,6 +328,72 @@ final class CorrectionJobHandler
             self::READ_ONLY_RECOVERY_CHECKPOINTS,
             true,
         );
+    }
+
+    private static function preflightResumeCheckpoint(string $checkpoint): string
+    {
+        return self::readOnlyRecoveryRequired($checkpoint) ? $checkpoint : 'finished';
+    }
+
+    private static function preflightFailure(
+        object $item,
+        string $message,
+        string $errorCode,
+        ?int $httpStatus = null,
+        ?string $exceptionUuid = null,
+    ): JobOutcome {
+        $checkpoint = (string) ($item->checkpoint ?? '');
+        if (!self::readOnlyRecoveryRequired($checkpoint)) {
+            return JobOutcome::permanentFailure(
+                $message,
+                $httpStatus,
+                $exceptionUuid,
+                $errorCode,
+            );
+        }
+
+        return JobOutcome::ambiguous(
+            $message . ' Da bereits ein Korrektur-Write ungeklärt ist, bleibt ein weiterer Write gesperrt.',
+            $checkpoint,
+            self::stringOrNull($item->sevdesk_id ?? null),
+            $httpStatus,
+            $exceptionUuid,
+            $errorCode,
+            ['preflightFailure' => true],
+        );
+    }
+
+    private function tripAuthenticationAlarm(int $jobId): void
+    {
+        $safety = $this->config->tripAuthenticationSafetyGates();
+        self::logAuthenticationSafetyFailure($safety);
+        if ($jobId < 1) {
+            return;
+        }
+        try {
+            $this->jobs->pause($jobId);
+        } catch (\Throwable $error) {
+            if (function_exists('logActivity')) {
+                logActivity('sevdesk correction alarm could not pause the current job: ' . get_class($error));
+            }
+        }
+    }
+
+    /** @param array{alarm:bool,reviewFallback:bool,syncDisabled:bool} $safety */
+    private static function logAuthenticationSafetyFailure(array $safety): void
+    {
+        if (!function_exists('logActivity')) {
+            return;
+        }
+        if (!$safety['alarm']) {
+            logActivity('sevdesk correction authentication alarm used runtime-review fallback.');
+        }
+        if (!$safety['alarm'] && !$safety['reviewFallback']) {
+            logActivity('sevdesk correction authentication claim gates could not be persisted.');
+        }
+        if (!$safety['syncDisabled']) {
+            logActivity('sevdesk correction authentication alarm could not disable enqueueing.');
+        }
     }
 
     private static function intOrNull(mixed $value): ?int
@@ -271,34 +409,5 @@ final class CorrectionJobHandler
     private static function truthy(mixed $value): bool
     {
         return $value === true || $value === 1 || $value === '1' || $value === 'true';
-    }
-
-    private function isVerifiedRefundTransaction(object $transaction): bool
-    {
-        $originalPaymentId = (int) ($transaction->refundid ?? 0);
-        if ($originalPaymentId < 1) {
-            return false;
-        }
-
-        $description = mb_strtolower(trim((string) ($transaction->description ?? '')));
-        $chargebackMarkers = [
-            'chargeback',
-            'rücklastschrift',
-            'ruecklastschrift',
-            'dispute',
-            'kartenrückbelastung',
-            'kartenrueckbelastung',
-        ];
-        foreach ($chargebackMarkers as $marker) {
-            if (str_contains($description, $marker)) {
-                return false;
-            }
-        }
-
-        return Capsule::table('tblaccounts')
-            ->where('id', $originalPaymentId)
-            ->where('invoiceid', (int) ($transaction->invoiceid ?? 0))
-            ->where('amountin', '>', 0)
-            ->exists();
     }
 }

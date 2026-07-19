@@ -17,6 +17,11 @@ use WHMCS\Module\Addon\SevDesk\Repository\MappingRepository;
 use WHMCS\Module\Addon\SevDesk\Service\ContactService;
 use WHMCS\Module\Addon\SevDesk\Service\BookingService;
 use WHMCS\Module\Addon\SevDesk\Service\CorrectionService;
+use WHMCS\Module\Addon\SevDesk\Service\DocumentTargetResolver;
+use WHMCS\Module\Addon\SevDesk\Service\InvoiceExporter;
+use WHMCS\Module\Addon\SevDesk\Service\InvoicePdf;
+use WHMCS\Module\Addon\SevDesk\Service\InvoiceReconciliationService;
+use WHMCS\Module\Addon\SevDesk\Service\LegacyMappingTypeService;
 use WHMCS\Database\Capsule;
 use WHMCS\Module\Addon\SevDesk\Database\Migrator;
 use WHMCS\Module\Addon\SevDesk\Service\PdfRenderer;
@@ -49,7 +54,15 @@ final class Application
 
     private ?VoucherExporter $exporter = null;
 
+    private ?InvoiceExporter $invoiceExporter = null;
+
     private ?ReconciliationService $reconciliation = null;
+
+    private ?InvoiceReconciliationService $invoiceReconciliation = null;
+
+    private ?InvoicePdf $invoicePdf = null;
+
+    private ?LegacyMappingTypeService $legacyMappingType = null;
 
     private ?BookingService $bookings = null;
 
@@ -93,7 +106,7 @@ final class Application
             new Client(),
             $token,
             'https://my.sevdesk.de/api/v1',
-            'Nerdscave WHMCS-sevdesk/2.0.0',
+            'Nerdscave WHMCS-sevdesk/2.1.0-rc.1',
         );
     }
 
@@ -116,6 +129,7 @@ final class Application
             '3',
             fn (): ?string => $referenceData->contactAddressCategoryId(),
             fn (): ?string => $referenceData->emailKeyId(),
+            fn (): bool => $this->config->bool('customer_number_contact_creation_confirmed'),
         );
     }
 
@@ -131,6 +145,73 @@ final class Application
     public function reconciliation(): ReconciliationService
     {
         return $this->reconciliation ??= new ReconciliationService($this->client(), $this->mappings);
+    }
+
+    public function invoiceExporter(): InvoiceExporter
+    {
+        return $this->invoiceExporter ??= new InvoiceExporter(
+            $this->client(),
+            fn (int $invoiceId): ?string => $this->mappingId($invoiceId),
+            fn (int $invoiceId, string $remoteId, string $type, string $number): bool =>
+                $this->storeTypedMapping($invoiceId, $remoteId, $type, $number),
+            (string) $this->config->get('invoice_sev_user_id', ''),
+            (string) $this->config->get('invoice_unity_id', ''),
+        );
+    }
+
+    public function invoiceReconciliation(): InvoiceReconciliationService
+    {
+        return $this->invoiceReconciliation ??= new InvoiceReconciliationService(
+            $this->client(),
+            fn (int $invoiceId): ?string => $this->mappingId($invoiceId),
+            fn (int $invoiceId, string $remoteId, string $type, string $number): bool =>
+                $this->storeTypedMapping($invoiceId, $remoteId, $type, $number),
+            (string) $this->config->get('invoice_sev_user_id', ''),
+            (string) $this->config->get('invoice_unity_id', ''),
+        );
+    }
+
+    public function invoicePdf(): InvoicePdf
+    {
+        return $this->invoicePdf ??= new InvoicePdf($this->client());
+    }
+
+    public function legacyMappingType(): LegacyMappingTypeService
+    {
+        return $this->legacyMappingType ??= new LegacyMappingTypeService(
+            $this->client(),
+            function (
+                int $invoiceId,
+                string $remoteId,
+                string $documentType,
+                string $documentNumber,
+            ): void {
+                $current = $this->mappings->findByInvoice($invoiceId);
+                if (
+                    $current === null
+                    || trim((string) ($current->sevdesk_id ?? '')) !== $remoteId
+                    || ($current->document_type ?? null) !== null
+                ) {
+                    throw new RuntimeException('The legacy mapping changed before type confirmation.');
+                }
+
+                $this->mappings->enrichDocumentMetadata(
+                    $invoiceId,
+                    $remoteId,
+                    $documentType,
+                    $documentNumber,
+                );
+            },
+        );
+    }
+
+    public function documentTargetResolver(): DocumentTargetResolver
+    {
+        return new DocumentTargetResolver(
+            (string) $this->config->get('export_mode', DocumentTargetResolver::MODE_VOUCHER_ONLY),
+            (string) $this->config->get('document_authority', DocumentTargetResolver::AUTHORITY_WHMCS),
+            (string) $this->config->get('oss_profile', DocumentTargetResolver::OSS_BLOCKED),
+        );
     }
 
     public function bookings(): BookingService
@@ -154,11 +235,38 @@ final class Application
                 return $item === null ? null : (string) $item->sevdesk_id;
             },
             static function (string $reference, string $remoteId): bool {
-                return Capsule::table(Migrator::ITEMS_TABLE)
-                    ->where('action', 'correction_voucher')
-                    ->where('transaction_reference', $reference)
-                    ->whereIn('status', ['running', 'pending', 'retry_wait'])
-                    ->update(['sevdesk_id' => $remoteId, 'updated_at' => (new \DateTimeImmutable())->format('Y-m-d H:i:s')]) > 0;
+                $remoteId = trim($remoteId);
+                if ($remoteId === '') {
+                    return false;
+                }
+
+                return Capsule::connection()->transaction(static function () use ($reference, $remoteId): bool {
+                    $item = Capsule::table(Migrator::ITEMS_TABLE)
+                        ->where('action', 'correction_voucher')
+                        ->where('transaction_reference', $reference)
+                        ->whereIn('status', ['running', 'pending', 'retry_wait'])
+                        ->orderByDesc('id')
+                        ->lockForUpdate()
+                        ->first(['id', 'sevdesk_id']);
+                    if ($item === null) {
+                        return false;
+                    }
+
+                    $storedRemoteId = trim((string) ($item->sevdesk_id ?? ''));
+                    if ($storedRemoteId !== '') {
+                        return $storedRemoteId === $remoteId;
+                    }
+
+                    return Capsule::table(Migrator::ITEMS_TABLE)
+                        ->where('id', (int) $item->id)
+                        ->where(static function ($query): void {
+                            $query->whereNull('sevdesk_id')->orWhere('sevdesk_id', '');
+                        })
+                        ->update([
+                            'sevdesk_id' => $remoteId,
+                            'updated_at' => (new \DateTimeImmutable())->format('Y-m-d H:i:s'),
+                        ]) === 1;
+                });
             },
         );
     }
@@ -169,6 +277,17 @@ final class Application
             $this->config->taxProfiles(),
             (string) $this->config->get('eu_b2c_mode', TaxPolicy::EU_B2C_BLOCKED),
             $this->referenceData()->receiptGuidance($freshGuidance),
+            (string) $this->config->get('oss_profile', TaxPolicy::OSS_BLOCKED),
+        );
+    }
+
+    public function invoiceTaxPolicy(): TaxPolicy
+    {
+        return new TaxPolicy(
+            $this->config->taxProfiles(),
+            (string) $this->config->get('eu_b2c_mode', TaxPolicy::EU_B2C_BLOCKED),
+            null,
+            (string) $this->config->get('oss_profile', TaxPolicy::OSS_BLOCKED),
         );
     }
 
@@ -178,6 +297,8 @@ final class Application
             // Construct remote-aware handlers only after JobRunner has acquired
             // its lock and claimed an item of the corresponding action.
             'export_voucher' => fn (object $item, callable $checkpoint): JobOutcome =>
+                ($this->exportJobHandler())($item, $checkpoint),
+            'export_document' => fn (object $item, callable $checkpoint): JobOutcome =>
                 ($this->exportJobHandler())($item, $checkpoint),
             'reconcile_voucher' => fn (object $item, callable $checkpoint): JobOutcome =>
                 ($this->exportJobHandler())($item, $checkpoint),
@@ -204,6 +325,10 @@ final class Application
             $this->exporter(),
             $this->reconciliation(),
             fn (): TaxPolicy => $this->taxPolicy(),
+            $this->invoiceExporter(),
+            $this->invoiceReconciliation(),
+            $this->invoicePdf(),
+            fn (): DocumentTargetResolver => $this->documentTargetResolver(),
         );
     }
 
@@ -238,7 +363,18 @@ final class Application
 
     private function storeMapping(int $invoiceId, string $remoteId): bool
     {
-        $this->mappings->link($invoiceId, $remoteId);
+        $this->mappings->linkDocument(
+            $invoiceId,
+            $remoteId,
+            MappingRepository::DOCUMENT_TYPE_VOUCHER,
+        );
+
+        return true;
+    }
+
+    private function storeTypedMapping(int $invoiceId, string $remoteId, string $type, string $number): bool
+    {
+        $this->mappings->linkDocument($invoiceId, $remoteId, $type, $number);
 
         return true;
     }

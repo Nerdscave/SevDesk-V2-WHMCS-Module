@@ -80,7 +80,12 @@ final class ReconciliationService
         }
 
         try {
-            $this->mappings->link($invoice->invoiceId, $remoteId);
+            $this->mappings->linkDocument(
+                $invoice->invoiceId,
+                $remoteId,
+                MappingRepository::DOCUMENT_TYPE_VOUCHER,
+                $invoice->invoiceNumber,
+            );
         } catch (Throwable) {
             return ExportResult::ambiguous(
                 $invoice->invoiceId,

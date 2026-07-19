@@ -500,6 +500,7 @@ final class VoucherExporter
 
     private function apiFailure(int $invoiceId, ApiException $exception, string $code): ExportResult
     {
+        $definiteVoucherWriteRejected = !$exception->outcomeUnknown && $code === 'voucher_create_failed';
         if ($exception->outcomeUnknown) {
             return ExportResult::ambiguous(
                 $invoiceId,
@@ -518,11 +519,16 @@ final class VoucherExporter
             $code .= '_permanent';
         }
 
+        $context = $exception->context();
+        if ($definiteVoucherWriteRejected) {
+            $context['definiteWriteRejected'] = true;
+        }
+
         return ExportResult::failed(
             $invoiceId,
             $code,
             'The sevdesk API operation failed.',
-            $exception->context(),
+            $context,
         );
     }
 

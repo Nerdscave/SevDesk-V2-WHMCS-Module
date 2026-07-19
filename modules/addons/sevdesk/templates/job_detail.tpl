@@ -65,6 +65,7 @@
                     <th scope="col">Rechnung</th>
                     <th scope="col">Status</th>
                     <th scope="col">Versuche</th>
+                    <th scope="col">Ziel / Ablauf</th>
                     <th scope="col">sevdesk</th>
                     <th scope="col">Meldung</th>
                     <th scope="col">Aktualisiert</th>
@@ -76,6 +77,11 @@
                         <td><a href="invoices.php?action=edit&amp;id={$item.invoice_id|escape:'url'}" target="_blank" rel="noopener">{$item.invoicenum|default:'Rechnung'|escape:'html':'UTF-8'}</a><small class="sd-mono">ID {$item.invoice_id|escape:'html':'UTF-8'}</small></td>
                         <td>{include file="partials/status_badge.tpl" status=$item.status}</td>
                         <td class="sd-mono">{$item.attempts|default:0|escape:'html':'UTF-8'}</td>
+                        <td>
+                            <span class="sd-mono">{$item.document_type|default:'—'|escape:'html':'UTF-8'}{if $item.document_authority} / {$item.document_authority|escape:'html':'UTF-8'}{/if}</span>
+                            <small>Rule {$item.tax_rule|default:'—'|escape:'html':'UTF-8'} · {$item.delivery_state|default:'not_delivered'|escape:'html':'UTF-8'}</small>
+                            <small class="sd-mono">{$item.action|escape:'html':'UTF-8'} · {$item.checkpoint|escape:'html':'UTF-8'}</small>
+                        </td>
                         <td>{if $item.sevdesk_id}<a class="sd-mono" href="https://my.sevdesk.de/#/ex/detail/id/{$item.sevdesk_id|escape:'url'}" target="_blank" rel="noopener">{$item.sevdesk_id|escape:'html':'UTF-8'}</a>{else}<span class="text-muted">—</span>{/if}</td>
                         <td>{$item.message|default:'—'|escape:'html':'UTF-8'}{if $item.error_code}<small class="sd-mono">{$item.error_code|escape:'html':'UTF-8'}</small>{/if}{if $item.error_code === 'unsupported_oss'}<small><a href="https://api.sevdesk.de/" target="_blank" rel="noopener">sevdesk-Einschränkung öffnen</a></small>{/if}</td>
                         <td>{$item.updated_at|default:'—'|escape:'html':'UTF-8'}</td>

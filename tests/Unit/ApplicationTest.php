@@ -69,6 +69,18 @@ final class ApplicationTest extends TestCase
         self::assertSame($expectedRisk, JobRepository::isRiskyCheckpoint($checkpoint));
     }
 
+    public function testCheckpointClassificationSeparatesUnknownWritesFromVerifiedEffects(): void
+    {
+        self::assertTrue(JobRepository::isWriteOutcomeUnknownCheckpoint('invoice_write_requested'));
+        self::assertFalse(JobRepository::isVerifiedSideEffectCheckpoint('invoice_write_requested'));
+
+        self::assertFalse(JobRepository::isWriteOutcomeUnknownCheckpoint('invoice_opened'));
+        self::assertTrue(JobRepository::isVerifiedSideEffectCheckpoint('invoice_opened'));
+
+        self::assertFalse(JobRepository::isWriteOutcomeUnknownCheckpoint('booking_completed'));
+        self::assertTrue(JobRepository::isVerifiedSideEffectCheckpoint('booking_completed'));
+    }
+
     /** @return iterable<string, array{string,bool}> */
     public static function checkpointProvider(): iterable
     {

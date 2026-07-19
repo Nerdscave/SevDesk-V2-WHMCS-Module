@@ -10,6 +10,14 @@ final class Config
 {
     public const MODULE = 'sevdesk';
 
+    public const RUNTIME_SIGNATURE_SETTING = 'rewrite_runtime_signature';
+
+    public const RUNTIME_SIGNATURE = 'nerdscave-sevdesk-rewrite-v1';
+
+    public const RUNTIME_REVIEW_SETTING = 'runtime_review_required';
+
+    public const RUNTIME_QUARANTINE_TOKEN_SETTING = 'runtime_quarantine_token';
+
     /** @var array<string, string>|null */
     private ?array $values = null;
 
@@ -17,6 +25,21 @@ final class Config
     private const DEFAULTS = [
         'module_active' => '',
         'sync_enabled' => '',
+        'runtime_review_required' => '',
+        'runtime_quarantine_token' => '',
+        'health_alarm' => '',
+        'export_mode' => 'voucher_only',
+        'document_authority' => 'whmcs',
+        'oss_profile' => 'blocked',
+        'invoice_canary_confirmed' => '',
+        'invoice_sev_user_id' => '',
+        'invoice_unity_id' => '',
+        'invoice_delivery_channel' => 'sevdesk',
+        'whmcs_invoice_email_template' => '',
+        'sevdesk_email_subject' => 'Ihre Rechnung {invoice_number}',
+        'sevdesk_email_body' => "Guten Tag,\n\nim Anhang finden Sie Ihre Rechnung {invoice_number}.",
+        'theme_adapter_confirmed' => '',
+        'customer_number_contact_creation_confirmed' => '',
         'import_after' => '01-01-1999',
         'import_only_paid' => 'on',
         'eu_b2b_goods_confirmed' => '',
@@ -86,6 +109,12 @@ final class Config
         $this->values = null;
     }
 
+    /** Discard the process-local setting cache before a concurrency gate read. */
+    public function refresh(): void
+    {
+        $this->values = null;
+    }
+
     /** @return array<string,string> Settings actually persisted, without defaults. */
     public function stored(): array
     {
@@ -109,6 +138,259 @@ final class Config
         }
 
         $this->values = null;
+    }
+
+    /**
+     * Stop every remote-capable path after an untrusted replacement or a
+     * structural runtime failure. Review, generation token and invalid runtime
+     * signature form one atomic intent. The later writes reassert that state
+     * independently so a selective database error still fails closed.
+     */
+    public function quarantineRuntime(): string
+    {
+        $quarantineToken = self::newQuarantineToken();
+
+        if (!$this->persistRuntimeQuarantineIntentAtomically($quarantineToken)) {
+            // A token-row failure must not leave the old generation eligible
+            // for setup release. Invalidating the signature together with the
+            // review marker is the fail-closed secondary latch.
+            $this->persistInvalidRuntimeReviewAtomically();
+        }
+
+        foreach (
+            [
+                [self::RUNTIME_SIGNATURE_SETTING, ''],
+                ['sync_enabled', ''],
+                // Signature and sync are deliberately independent safety
+                // writes. Reassert review last so either atomic latch remains
+                // visibly fail-closed if a later write fails.
+                [self::RUNTIME_REVIEW_SETTING, 'on'],
+            ] as [$key, $value]
+        ) {
+            try {
+                $this->set($key, $value);
+            } catch (\Throwable) {
+                $this->values = null;
+            }
+        }
+
+        return $quarantineToken;
+    }
+
+    /**
+     * Lock every durable gate that decides whether a newly claimed item may
+     * start. The caller must already be inside a database transaction.
+     *
+     * @return array{moduleActive:bool,runtimeReviewRequired:bool,runtimeSignature:string,
+     *     quarantineToken:string,authenticationAlarm:string}
+     */
+    public function lockRuntimeGates(): array
+    {
+        $keys = [
+            'health_alarm',
+            'module_active',
+            self::RUNTIME_QUARANTINE_TOKEN_SETTING,
+            self::RUNTIME_REVIEW_SETTING,
+            self::RUNTIME_SIGNATURE_SETTING,
+        ];
+        $stored = [];
+        foreach (
+            Capsule::table('tbladdonmodules')
+                ->where('module', self::MODULE)
+                ->whereIn('setting', $keys)
+                ->orderBy('setting')
+                ->lockForUpdate()
+                ->get() as $row
+        ) {
+            $stored[(string) $row->setting] = (string) $row->value;
+        }
+        $this->values = null;
+
+        return [
+            'moduleActive' => self::truthy($stored['module_active'] ?? self::DEFAULTS['module_active']),
+            'runtimeReviewRequired' => self::truthy(
+                $stored[self::RUNTIME_REVIEW_SETTING] ?? self::DEFAULTS[self::RUNTIME_REVIEW_SETTING],
+            ),
+            'runtimeSignature' => $stored[self::RUNTIME_SIGNATURE_SETTING] ?? '',
+            'quarantineToken' => $stored[self::RUNTIME_QUARANTINE_TOKEN_SETTING]
+                ?? self::DEFAULTS[self::RUNTIME_QUARANTINE_TOKEN_SETTING],
+            'authenticationAlarm' => $stored['health_alarm'] ?? self::DEFAULTS['health_alarm'],
+        ];
+    }
+
+    /** The lockRuntimeGates() call is the claim's database linearization point. */
+    public function runtimeAllowsClaimWhileLocked(): bool
+    {
+        $gates = $this->lockRuntimeGates();
+
+        return $gates['moduleActive']
+            && !$gates['runtimeReviewRequired']
+            && $gates['runtimeSignature'] === self::RUNTIME_SIGNATURE
+            && trim($gates['authenticationAlarm']) !== 'api_authentication_failed';
+    }
+
+    /**
+     * Release inventory quarantine only if no newer quarantine was raised while
+     * setup performed its read-only tenant validation. Runtime gate rows must
+     * already be locked by lockRuntimeGates() in the same transaction.
+     */
+    public function clearRuntimeReviewIfUnchanged(string $expectedQuarantineToken): bool
+    {
+        $gates = $this->lockRuntimeGates();
+        if (
+            !$gates['runtimeReviewRequired']
+            || $gates['runtimeSignature'] !== self::RUNTIME_SIGNATURE
+            || !hash_equals($expectedQuarantineToken, $gates['quarantineToken'])
+        ) {
+            return false;
+        }
+
+        $updated = Capsule::table('tbladdonmodules')
+            ->where('module', self::MODULE)
+            ->where('setting', self::RUNTIME_REVIEW_SETTING)
+            ->where('value', 'on')
+            ->update(['value' => '']);
+        $this->values = null;
+
+        return $updated === 1;
+    }
+
+    /**
+     * Persist every local 401/403 safety gate independently. If the primary
+     * tenant alarm row cannot be written, runtime review is the claim-blocking
+     * fallback. Callers may additionally pause their current job.
+     *
+     * @return array{alarm:bool,reviewFallback:bool,syncDisabled:bool}
+     */
+    public function tripAuthenticationSafetyGates(): array
+    {
+        $alarm = false;
+        $reviewFallback = false;
+        $syncDisabled = false;
+        try {
+            $this->set('health_alarm', 'api_authentication_failed');
+            $alarm = true;
+        } catch (\Throwable) {
+            $fallbackToken = self::newQuarantineToken();
+            $intentPersisted = $this->persistRuntimeReviewIntentAtomically($fallbackToken);
+            $invalidReviewPersisted = $intentPersisted
+                ? false
+                : $this->persistInvalidRuntimeReviewAtomically();
+            if (!$intentPersisted && !$invalidReviewPersisted) {
+                try {
+                    // Last-resort claim stop when neither transactional
+                    // fallback could be stored. A successful fallback must not
+                    // overwrite a newer, validated setup release afterwards.
+                    $this->set(self::RUNTIME_REVIEW_SETTING, 'on');
+                } catch (\Throwable) {
+                    $this->values = null;
+                }
+            }
+            $this->refresh();
+            $reviewFallback = $this->bool(self::RUNTIME_REVIEW_SETTING) && (
+                ($intentPersisted && hash_equals(
+                    $fallbackToken,
+                    (string) $this->get(self::RUNTIME_QUARANTINE_TOKEN_SETTING, ''),
+                ))
+                || ($invalidReviewPersisted
+                    && (string) $this->get(self::RUNTIME_SIGNATURE_SETTING, '') === '')
+            );
+        }
+        try {
+            $this->set('sync_enabled', '');
+            $syncDisabled = true;
+        } catch (\Throwable) {
+            $this->values = null;
+        }
+
+        return [
+            'alarm' => $alarm,
+            'reviewFallback' => $reviewFallback,
+            'syncDisabled' => $syncDisabled,
+        ];
+    }
+
+    /**
+     * Persist a replacement/migration quarantine as one indivisible gate state.
+     * A newly loaded setup form must never see the new token together with a
+     * still-valid runtime signature.
+     */
+    private function persistRuntimeQuarantineIntentAtomically(string $quarantineToken): bool
+    {
+        try {
+            Capsule::connection()->transaction(function () use ($quarantineToken): void {
+                $this->lockRuntimeGates();
+                $this->set(self::RUNTIME_QUARANTINE_TOKEN_SETTING, $quarantineToken);
+                $this->set(self::RUNTIME_REVIEW_SETTING, 'on');
+                $this->set(self::RUNTIME_SIGNATURE_SETTING, '');
+            });
+
+            return true;
+        } catch (\Throwable) {
+            $this->values = null;
+
+            return false;
+        }
+    }
+
+    /**
+     * Persist the authentication-review generation under the same ordered gate
+     * locks used by setup and worker claims. This path deliberately keeps the
+     * signature valid so the guarded mail and PDF paths remain available.
+     */
+    private function persistRuntimeReviewIntentAtomically(string $quarantineToken): bool
+    {
+        try {
+            Capsule::connection()->transaction(function () use ($quarantineToken): void {
+                $this->lockRuntimeGates();
+                $this->set(self::RUNTIME_QUARANTINE_TOKEN_SETTING, $quarantineToken);
+                $this->set(self::RUNTIME_REVIEW_SETTING, 'on');
+            });
+
+            return true;
+        } catch (\Throwable) {
+            $this->values = null;
+
+            return false;
+        }
+    }
+
+    /**
+     * Secondary latch for a failed generation-token write. It prevents both a
+     * worker claim and an old setup form from releasing the runtime.
+     */
+    private function persistInvalidRuntimeReviewAtomically(): bool
+    {
+        try {
+            Capsule::connection()->transaction(function (): void {
+                $this->lockRuntimeGates();
+                $this->set(self::RUNTIME_REVIEW_SETTING, 'on');
+                $this->set(self::RUNTIME_SIGNATURE_SETTING, '');
+            });
+
+            return true;
+        } catch (\Throwable) {
+            $this->values = null;
+
+            return false;
+        }
+    }
+
+    /** Persist the quarantine marker before any migration may continue. */
+    public function quarantineRuntimeOrFail(): void
+    {
+        $quarantineToken = $this->quarantineRuntime();
+        $this->refresh();
+        if (
+            !$this->bool(self::RUNTIME_REVIEW_SETTING)
+            || !hash_equals(
+                $quarantineToken,
+                (string) $this->get(self::RUNTIME_QUARANTINE_TOKEN_SETTING, ''),
+            )
+            || (string) $this->get(self::RUNTIME_SIGNATURE_SETTING, '') !== ''
+        ) {
+            throw new \RuntimeException('The sevdesk replacement inventory quarantine could not be persisted.');
+        }
     }
 
     /** @return array{accountDatevId:int,taxRuleId:int}|null */
@@ -185,6 +467,20 @@ final class Config
         $this->values = [];
         foreach (Capsule::table('tbladdonmodules')->where('module', self::MODULE)->get() as $row) {
             $this->values[(string) $row->setting] = (string) $row->value;
+        }
+    }
+
+    private static function truthy(string $value): bool
+    {
+        return in_array(strtolower($value), ['1', 'true', 'yes', 'on', 'enabled'], true);
+    }
+
+    private static function newQuarantineToken(): string
+    {
+        try {
+            return bin2hex(random_bytes(16));
+        } catch (\Throwable) {
+            return hash('sha256', uniqid('sevdesk-quarantine-', true));
         }
     }
 

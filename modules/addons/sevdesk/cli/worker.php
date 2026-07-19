@@ -18,12 +18,25 @@ require_once $bootstrap;
 require_once dirname(__DIR__) . '/lib/Autoloader.php';
 
 use WHMCS\Module\Addon\SevDesk\Application;
+use WHMCS\Module\Addon\SevDesk\Config;
 use WHMCS\Module\Addon\SevDesk\Database\Migrator;
 
 try {
-    Migrator::up();
+    $config = new Config();
+    Migrator::prepareWorkerRuntime($config);
+} catch (Throwable $error) {
+    fwrite(STDERR, 'sevdesk worker failed safely: ' . get_class($error) . PHP_EOL);
+    exit(1);
+}
+
+try {
     $application = Application::instance();
-    if (!$application->config->bool('module_active')) {
+    if (
+        !$application->config->bool('module_active')
+        || $application->config->bool(Config::RUNTIME_REVIEW_SETTING)
+        || (string) $application->config->get(Config::RUNTIME_SIGNATURE_SETTING, '')
+            !== Config::RUNTIME_SIGNATURE
+    ) {
         throw new RuntimeException('The sevdesk module is deactivated.');
     }
 
