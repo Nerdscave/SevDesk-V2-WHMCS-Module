@@ -286,9 +286,7 @@ final class JobRepository
                 }
 
                 $token = bin2hex(random_bytes(16));
-                $leasedUntil = (new DateTimeImmutable())
-                    ->add(new DateInterval('PT' . $leaseSeconds . 'S'))
-                    ->format('Y-m-d H:i:s');
+                $leasedUntil = self::secondsAfter($now, $leaseSeconds);
                 $updated = Capsule::table(Migrator::ITEMS_TABLE)
                     ->where('id', $current->id)
                     ->whereIn('status', ['pending', 'retry_wait'])
@@ -375,9 +373,7 @@ final class JobRepository
         $terminal = in_array($outcome->status, ['succeeded', 'skipped', 'permanent_failed', 'ambiguous'], true);
         $availableAt = $now;
         if ($outcome->status === 'retry_wait') {
-            $availableAt = (new DateTimeImmutable())
-                ->add(new DateInterval('PT' . max(60, $outcome->retryAfterSeconds ?? 300) . 'S'))
-                ->format('Y-m-d H:i:s');
+            $availableAt = self::secondsAfter($now, max(60, $outcome->retryAfterSeconds ?? 300));
         }
 
         Capsule::connection()->transaction(function () use (
@@ -431,7 +427,7 @@ final class JobRepository
                 ? 'invoice_payment_pending'
                 : $outcome->checkpoint;
             $storedAvailableAt = $resumePaidExport
-                ? (new DateTimeImmutable())->add(new DateInterval('PT60S'))->format('Y-m-d H:i:s')
+                ? self::secondsAfter($now, 60)
                 : $availableAt;
             $storedTerminal = $resumePaidExport ? false : $terminal;
             $storedErrorCode = $resumePaidExport ? 'invoice_payment_event_followup' : $outcome->errorCode;
@@ -1793,7 +1789,36 @@ final class JobRepository
 
     private function now(): string
     {
-        return (new DateTimeImmutable())->format('Y-m-d H:i:s');
+        // WHMCS web requests and its PHP CLI may use different default
+        // timezones. Queue timestamps are MySQL DATETIME values, so every
+        // availability, lease and retry comparison must use the database
+        // session's wall clock instead of the current PHP process clock.
+        $clock = Capsule::selectOne(
+            "SELECT DATE_FORMAT(CURRENT_TIMESTAMP, '%Y-%m-%d %H:%i:%s') AS database_now",
+        );
+        $current = $clock->database_now ?? null;
+        if (!is_string($current) || preg_match('/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/', $current) !== 1) {
+            throw new \RuntimeException('The database clock returned an invalid timestamp.');
+        }
+
+        return $current;
+    }
+
+    private static function secondsAfter(string $databaseTime, int $seconds): string
+    {
+        // UTC is only a neutral arithmetic zone here. The input and output stay
+        // on the database wall clock, without PHP normalising a DST gap in its
+        // own default timezone.
+        $clock = DateTimeImmutable::createFromFormat(
+            '!Y-m-d H:i:s',
+            $databaseTime,
+            new \DateTimeZone('UTC'),
+        );
+        if (!$clock instanceof DateTimeImmutable) {
+            throw new \RuntimeException('The database clock timestamp could not be parsed.');
+        }
+
+        return $clock->add(new DateInterval('PT' . max(0, $seconds) . 'S'))->format('Y-m-d H:i:s');
     }
 
     private function isDuplicateKey(QueryException $error): bool

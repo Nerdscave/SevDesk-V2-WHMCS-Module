@@ -53,6 +53,81 @@ final class InvoiceRemoteVerifierTest extends TestCase
         );
     }
 
+    public function testNormalInvoiceAcceptsOmittedCountryButRejectsReportedMismatch(): void
+    {
+        $omittedCountry = $this->remoteInvoice();
+        unset($omittedCountry['deliveryAddressCountry']);
+        self::assertNull($this->verifier()->invoiceMismatch(
+            $omittedCountry,
+            $this->invoice(),
+            '42',
+            '1',
+            100,
+            '99',
+            'DE',
+        ));
+
+        $wrongCountry = $omittedCountry;
+        $wrongCountry['addressCountry'] = ['code' => 'FR'];
+        self::assertSame(
+            'delivery_country_mismatch',
+            $this->verifier()->invoiceMismatch(
+                $wrongCountry,
+                $this->invoice(),
+                '42',
+                '1',
+                100,
+                '99',
+                'DE',
+            ),
+        );
+    }
+
+    public function testOssInvoiceRequiresReadableCountryConfirmation(): void
+    {
+        $omittedCountry = $this->remoteInvoice();
+        unset($omittedCountry['deliveryAddressCountry']);
+        $omittedCountry['taxRule']['id'] = '19';
+        self::assertSame(
+            'delivery_country_unverifiable',
+            $this->verifier()->invoiceMismatch(
+                $omittedCountry,
+                $this->invoice(),
+                '42',
+                '19',
+                100,
+                '99',
+                'DE',
+            ),
+        );
+
+        $reportedCountry = $omittedCountry;
+        $reportedCountry['addressCountry'] = ['code' => 'DE'];
+        self::assertSame(
+            'delivery_country_unverifiable',
+            $this->verifier()->invoiceMismatch(
+                $reportedCountry,
+                $this->invoice(),
+                '42',
+                '19',
+                100,
+                '99',
+                'DE',
+            ),
+        );
+
+        $reportedCountry['deliveryAddressCountry'] = 'DE';
+        self::assertNull($this->verifier()->invoiceMismatch(
+            $reportedCountry,
+            $this->invoice(),
+            '42',
+            '19',
+            100,
+            '99',
+            'DE',
+        ));
+    }
+
     public function testListAndAssociativeSinglePositionResponsesShareOneVerifier(): void
     {
         $position = $this->remotePosition();

@@ -158,7 +158,7 @@ Ist das Custom-Field leer, kann die exakte Kundennummernsuche nur Alt-Kontakte f
 | `EInvoiceEligibilityService` | ZUGFeRD-Auswahl, Kontakt-/Referenzprüfung und PII-freien Snapshot bestimmen |
 | `InvoiceXml` | natives XML laden, strukturell begrenzen und SHA-256 bilden |
 | Reconciliation | nach unbekannten Writes nur lesen und genau einen vollständigen Treffer akzeptieren |
-| `InvoicePdf` | finale PDF laden, Signatur/Größe prüfen und SHA-256 bilden |
+| `InvoicePdf` | finale PDF als JSON/Base64 oder direkte PDF-Antwort laden, Signatur/Größe prüfen und SHA-256 bilden |
 | Steuerentscheidung | Kundendaten und Invoice-Fakten in einen expliziten Steuerfall übersetzen |
 | sevDesk-Client | Authentifizierung, Timeouts, HTTP, Fehlerübersetzung und Response-Validierung |
 | `BookingService` | typbewusste Vorschau und vollständige Revalidation vor `bookAmount` |
@@ -365,6 +365,8 @@ Ein Item enthält weiterhin nur technische Ablaufdaten:
 - `created_at`, `started_at`, `finished_at`, `updated_at`.
 
 Unique auf `dedupe_key` sowie Indizes auf Job/Status, Status/Verfügbarkeit und Invoice-ID bleiben bestehen. Es gibt keine Foreign Keys zu WHMCS-Kerntabellen.
+
+Alle Queue-Zeitwerte richten sich nach `CURRENT_TIMESTAMP` der Datenbankverbindung. Das ist wichtig, weil PHP-FPM und PHP-CLI trotz gleicher WHMCS-Installation unterschiedliche Standardzeitzonen verwenden können. Leases und Wartezeiten werden auf dieser Datenbankzeit berechnet; die PHP-Zeitzone darf weder einen sofort fälligen Job verschieben noch einen Retry verfrühen. Vorhandene Zeitwerte werden bei einem Upgrade nicht pauschal umgerechnet.
 
 ## Zustände und Checkpoints
 

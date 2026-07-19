@@ -74,12 +74,24 @@ final class InvoiceRemoteVerifier
         if (self::remoteBoolean($remote['showNet'] ?? null) !== $invoice->lineItems[0]->net) {
             return 'net_mode_mismatch';
         }
-        if (
-            $deliveryCountryCode !== null
-            && strtoupper(trim((string) ($remote['deliveryAddressCountry'] ?? '')))
-                !== strtoupper(trim($deliveryCountryCode))
-        ) {
-            return 'delivery_country_mismatch';
+        if ($deliveryCountryCode !== null) {
+            $expectedCountry = strtoupper(trim($deliveryCountryCode));
+            $reportedDeliveryCountry = self::normaliseCountryCode($remote['deliveryAddressCountry'] ?? null);
+            if ($reportedDeliveryCountry !== null && $reportedDeliveryCountry !== $expectedCountry) {
+                return 'delivery_country_mismatch';
+            }
+            // Normal Invoice GET responses may omit both country fields. OSS is
+            // different: without a readable destination the tax result is not proven.
+            if (in_array($taxRuleId, ['18', '19', '20'], true)) {
+                if ($reportedDeliveryCountry === null) {
+                    return 'delivery_country_unverifiable';
+                }
+            } else {
+                $reportedBillingCountry = self::normaliseCountryCode($remote['addressCountry'] ?? null);
+                if ($reportedBillingCountry !== null && $reportedBillingCountry !== $expectedCountry) {
+                    return 'delivery_country_mismatch';
+                }
+            }
         }
         if ($eInvoiceContext !== null) {
             if (
@@ -110,6 +122,20 @@ final class InvoiceRemoteVerifier
         }
 
         return null;
+    }
+
+    private static function normaliseCountryCode(mixed $value): ?string
+    {
+        if (is_array($value)) {
+            $value = $value['code'] ?? $value['countryCode'] ?? $value['shortCode'] ?? null;
+        }
+        if (!is_string($value)) {
+            return null;
+        }
+
+        $countryCode = strtoupper(trim($value));
+
+        return preg_match('/^[A-Z]{2}$/', $countryCode) === 1 ? $countryCode : null;
     }
 
     /**

@@ -13,6 +13,9 @@ rc.2 sichert vor allem den Wechsel in `invoice_only` ab und ergänzt einen begre
 - Legacy-Mappings lassen sich gesammelt vorprüfen. Die Sammelbestätigung akzeptiert nur eindeutige Markertreffer; markerlose und kollidierende Belege bleiben Einzelfälle.
 - Vollständige Mappings können nicht mehr einfach aufgehoben werden. Die lokale Zeile wird nur entfernt, wenn beide Voucher-/Invoice-by-ID-Abfragen die Abwesenheit eindeutig mit 400 oder 404 bestätigen.
 - Native ZUGFeRD-Invoices werden von sevDesk erzeugt. Das Modul prüft Invoice, Empfängeradresse, PaymentMethod, XML und PDF, speichert aber keine Dokumentkopie in WHMCS.
+- Queue, Leases und Wartezeiten richten sich jetzt nach der Datenbankzeit. Dadurch bleiben Web- und Cron-Läufe auch dann synchron, wenn PHP-FPM und PHP-CLI unterschiedliche Standardzeitzonen verwenden.
+- Der PDF-Abruf verarbeitet sowohl die dokumentierte JSON-/Base64-Antwort als auch die in der Praxis vorkommende direkte PDF-Antwort. Beide Wege bleiben auf einen einzigen, streng geprüften GET begrenzt.
+- Normale Nicht-OSS-Invoices dürfen beim Readback ein von sevDesk ausgelassenes Länderfeld haben. Ein gemeldetes falsches Land blockiert weiterhin; Rule 19 bleibt ohne ausdrücklich lesbares Lieferland gesperrt.
 
 ## Austausch eines bestehenden Moduls
 
@@ -81,13 +84,12 @@ Rule 19 bleibt eine normale Invoice. Rules 18/20, B2G, XRechnung und historische
 
 Folgende Gates sind noch offen:
 
-- vollständiger Lauf unter PHP 8.3 einschließlich XMLReader;
-- MariaDB-Integrationstests;
 - WHMCS 8.13.4 mit Rollen, Hooks, Proforma, Theme-Adapter, Mail und Kundenbereich;
 - Voucher-Canaries für die tatsächlich verwendeten Steuerfälle;
 - Invoice-API-Canary mit Rule 19, Marker, Pflichtreferenzen, PDF, Versand, `bookAmount` und Prüfung auf Voucher-/Invoice-ID-Kollisionen;
 - eigener ZUGFeRD-Canary mit Create, Readback, `getXml`, externer EN-16931-Prüfung, PDF, `sendBy`, `sendViaEmail(sendXml=false)`, geprüftem sevDesk-/ZUGFeRD-PDF-Anhang über WHMCS und Kundendownload;
-- kleiner Live-Lauf mit normalen Invoices unter WHMCS-Hoheit, bevor der Altbestand eingereiht wird.
+
+Abgeschlossen sind die automatisierten Prüfungen unter PHP 8.3 mit XMLReader, der vollständige MariaDB-Integrationstest und ein kleiner mailfreier Rule-1-Live-Lauf unter WHMCS-Hoheit. Der Live-Lauf ersetzt nicht den noch offenen Invoice-Canary für Rule 19, Versand und Zahlungsbuchung.
 
 Der RC kann als GitHub-Pre-Release veröffentlicht werden, sobald die automatisierten Repository-Checks und der Archivscan grün sind. Das ist keine Freigabe für Produktivdaten. Die finale `2.1.0` folgt erst nach den genannten Gates.
 

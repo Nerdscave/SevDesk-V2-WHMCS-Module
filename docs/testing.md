@@ -101,6 +101,7 @@ Mit einer isolierten MySQL-/MariaDB-Datenbank:
 - Job-/Item-Constraints und Pagination;
 - eindeutiger `dedupe_key` bei überlappenden Jobs;
 - MySQL Advisory Lock und atomarer Claim bei zwei Workern;
+- sofortiger Claim bei abweichenden PHP-Zeitzonen von Web und CLI, solange beide dieselbe Datenbank-Session-Zeit verwenden; Lease, normaler Retry und `invoice_payment_event_followup` müssen aus Sicht von `CURRENT_TIMESTAMP` korrekt in der Zukunft liegen;
 - Lease-Ablauf und Übernahme;
 - Checkpoint-gesteuerte Entscheidung zwischen `retry_wait` und `ambiguous`;
 - Merge eines Outcomes gegen die aktuelle Checkpoint-Zeile, damit ein veralteter
@@ -131,7 +132,7 @@ Abzudecken sind:
 - `GET /Invoice/{id}` und `getPositions` mit exakter ID-/Nummer-/Kontakt-/Rule-/Status-/Summenprüfung;
 - native E-Invoice mit `propertyIsEInvoice=true`, strukturierter Adresse, `PaymentMethod`, `takeDefaultAddress=false` sowie exakter Rückprüfung von Flag, Kontakt, Unity, PaymentMethod und Adresshash;
 - `getXml` mit gültigem CII, leerer/übergroßer/ungültiger Antwort, DTD/Entity, Hashabweichung und fehlender XMLReader-Laufzeit;
-- `sendBy`, `sendViaEmail`, `getPdf` und typabhängiges `/Invoice/{id}/bookAmount`;
+- `sendBy`, `sendViaEmail`, `getPdf` und typabhängiges `/Invoice/{id}/bookAmount`; bei `getPdf` sowohl dokumentiertes JSON/Base64 als auch die reale Raw-PDF-Antwort, fehlerhaftes Content-Encoding, HTTP 206/401, MIME, Signatur, Trailer und Größenlimit;
 - `sendViaEmail(sendXml=false)` für ZUGFeRD, ohne lose XML-Datei im WHMCS-Mail- oder Kundenpfad;
 - widersprüchliche, unvollständige oder übergroße Invoice-/PDF-Antworten;
 - 400, 401, 403, 404, 409, 422, 429 und 5xx;
@@ -191,6 +192,7 @@ Geprüft werden:
 
 - Voucher: Kontakt, WHMCS-PDF, Datum, Marker, Währung, Status, Positionen, `taxRule`, `accountDatev`, Mapping und zweiter Lauf ohne Duplikat;
 - Invoice: normale `RE` im Draft-Status 100, unveränderte WHMCS-Nummer, Marker, Kontakt, `SevUser`, `Unity`, `deliveryAddressCountry`, Netto/Brutto, Rule und WHMCS-Steuersatz;
+- bei normalen Nicht-OSS-Invoices akzeptiert der Readback ein von sevDesk ausgelassenes Länderfeld, aber nie einen abweichenden gemeldeten Ländercode; Rule 19 bleibt ohne lesbar bestätigtes Lieferland blockiert;
 - Invoice-Positionen ohne frei konfiguriertes `accountDatev`;
 - `sendBy`, `sendViaEmail`, finale `getPdf`-Antwort und `/Invoice/{id}/bookAmount`;
 - erneute exakte Draft-Prüfung direkt vor `sendBy` und `sendViaEmail`; eine zwischenzeitliche Header- oder Positionsänderung verhindert jeden Write;

@@ -32,6 +32,34 @@ final class InvoicePdfTest extends TestCase
         ], $service->fetch('88'));
     }
 
+    public function testFetchAcceptsLiveRawPdfResponse(): void
+    {
+        $pdf = "%PDF-1.7\nsynthetic raw response\n%%EOF";
+        $service = new InvoicePdf($this->client(new Response(
+            200,
+            ['Content-Type' => 'application/pdf; charset=UTF-8'],
+            $pdf,
+        )));
+
+        self::assertSame([
+            'filename' => 'invoice-88.pdf',
+            'contents' => $pdf,
+            'sha256' => hash('sha256', $pdf),
+        ], $service->fetch('88'));
+    }
+
+    public function testRawPdfStillRequiresPdfSignatureAndTrailer(): void
+    {
+        $service = new InvoicePdf($this->client(new Response(
+            200,
+            ['Content-Type' => 'application/pdf'],
+            'not a pdf',
+        )));
+
+        $this->expectException(\RuntimeException::class);
+        $service->fetch('88');
+    }
+
     public function testInvalidSignatureIsRejected(): void
     {
         $service = new InvoicePdf($this->client(new Response(200, [], json_encode([

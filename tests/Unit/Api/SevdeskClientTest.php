@@ -96,6 +96,116 @@ final class SevdeskClientTest extends TestCase
         self::assertStringContainsString('download=1', (string) $history[1]['request']->getUri());
     }
 
+    public function testRawPdfResourceDisablesBrokenHttpContentDecoding(): void
+    {
+        $pdf = "%PDF-1.7\nsynthetic\n%%EOF";
+        $history = [];
+        $stack = HandlerStack::create(new MockHandler([
+            new Response(200, ['Content-Type' => 'application/pdf; charset=UTF-8'], $pdf),
+        ]));
+        $stack->push(Middleware::history($history));
+        $client = new SevdeskClient(new Client(['handler' => $stack]), 'token');
+
+        self::assertSame([
+            'kind' => 'binary',
+            'mimeType' => 'application/pdf',
+            'content' => $pdf,
+        ], $client->getPdfResource('/Invoice/99/getPdf', ['download' => true]));
+        self::assertSame('identity', $history[0]['request']->getHeaderLine('Accept-Encoding'));
+        self::assertSame(60.0, $history[0]['options']['timeout']);
+        self::assertFalse($history[0]['options']['decode_content']);
+        if (defined('CURLOPT_HTTP_CONTENT_DECODING')) {
+            self::assertFalse($history[0]['options']['curl'][constant('CURLOPT_HTTP_CONTENT_DECODING')]);
+        }
+    }
+
+    public function testPdfResourceRetainsDocumentedJsonEnvelopeCompatibility(): void
+    {
+        $client = $this->clientWith(new Response(
+            200,
+            ['Content-Type' => 'application/json'],
+            '{"mimeType":"application/pdf"}',
+        ));
+
+        self::assertSame([
+            'kind' => 'json',
+            'payload' => ['mimeType' => 'application/pdf'],
+        ], $client->getPdfResource('/Invoice/99/getPdf'));
+    }
+
+    public function testRawPdfResourceKeepsTheTenMebibyteLimit(): void
+    {
+        $client = $this->clientWith(new Response(
+            200,
+            ['Content-Type' => 'application/pdf'],
+            str_repeat('x', 10_485_761),
+        ));
+
+        try {
+            $client->getPdfResource('/Invoice/99/getPdf');
+            self::fail('The raw PDF size limit must be enforced.');
+        } catch (ApiException $exception) {
+            self::assertSame(200, $exception->httpStatus);
+            self::assertSame('response_too_large', $exception->sevdeskCode);
+            self::assertFalse($exception->outcomeUnknown);
+        }
+    }
+
+    public function testPdfResourceRequiresHttp200(): void
+    {
+        $client = $this->clientWith(new Response(
+            201,
+            ['Content-Type' => 'application/json'],
+            '{"mimeType":"application/pdf"}',
+        ));
+
+        try {
+            $client->getPdfResource('/Invoice/99/getPdf');
+            self::fail('The PDF resource must require HTTP 200.');
+        } catch (ApiException $exception) {
+            self::assertSame(201, $exception->httpStatus);
+            self::assertSame('unexpected_http_status', $exception->sevdeskCode);
+            self::assertFalse($exception->outcomeUnknown);
+        }
+    }
+
+    public function testPdfResourceRejectsPartialRawResponse(): void
+    {
+        $client = $this->clientWith(new Response(
+            206,
+            ['Content-Type' => 'application/pdf'],
+            "%PDF-1.7\npartial\n%%EOF",
+        ));
+
+        try {
+            $client->getPdfResource('/Invoice/99/getPdf');
+            self::fail('A partial PDF response must not be accepted.');
+        } catch (ApiException $exception) {
+            self::assertSame(206, $exception->httpStatus);
+            self::assertSame('unexpected_http_status', $exception->sevdeskCode);
+            self::assertFalse($exception->outcomeUnknown);
+        }
+    }
+
+    public function testPdfResourceRetainsAuthenticationFailureClassification(): void
+    {
+        $client = $this->clientWith(new Response(
+            401,
+            ['Content-Type' => 'application/json'],
+            '{"error":{"code":"AUTHENTICATION_FAILED"}}',
+        ));
+
+        try {
+            $client->getPdfResource('/Invoice/99/getPdf');
+            self::fail('Expected authentication failure.');
+        } catch (ApiException $exception) {
+            self::assertSame(401, $exception->httpStatus);
+            self::assertSame('AUTHENTICATION_FAILED', $exception->sevdeskCode);
+            self::assertTrue($exception->isAuthenticationFailure());
+            self::assertFalse($exception->outcomeUnknown);
+        }
+    }
+
     public function testApiExceptionOnlyKeepsWhitelistedErrorMetadata(): void
     {
         $body = json_encode([

@@ -158,6 +158,8 @@ Verbindliche Regeln:
 - nach Create werden Invoice und alle Positionen gelesen und ID, Nummer, Status, Kontakt, Rule, Währung, Positionen und Summen exakt verglichen;
 - erst die bestätigte Remote-ID plus `document_type=invoice` ergibt ein erfolgreiches Mapping.
 
+sevDesk übernimmt `deliveryAddressCountry` beim Create, lässt aber bei normalen Invoice-GETs je nach Mandant sowohl dieses Feld als auch `addressCountry` weg. Meldet die API einen Ländercode, muss er exakt passen. Fehlen beide Felder bei einer normalen Nicht-OSS-Invoice, kann der übrige vollständige Abgleich fortgesetzt werden. Für die OSS-Rules 18 bis 20 muss dagegen ausdrücklich `deliveryAddressCountry` lesbar und passend sein; die Rechnungsadresse ist dafür kein Ersatz. In diesem Release ist davon nur die freigegebene Rule 19 erreichbar.
+
 Die fehlende freie `accountDatev`-Zuordnung ist eine sichtbare Einschränkung von `invoice_only`, nicht etwas, das das Modul verdeckt ergänzt.
 
 ### Native ZUGFeRD-Invoice
@@ -186,7 +188,8 @@ Rule 19 sowie Rules 18/20, Behördenfälle und historische Backfills werden nie 
 - `sendBy` öffnet eine Invoice ohne kundenseitige sevDesk-Mail und wird für WHMCS-Hoheit sowie den WHMCS-Mailkanal verwendet.
 - `sendViaEmail` öffnet und versendet über sevDesk. Empfänger, Betreff und Text werden lokal validiert.
 - Unmittelbar vor beiden Writes werden Draft-Header und Positionen erneut vollständig gelesen und exakt mit dem gefrorenen Snapshot verglichen. Abweichungen verhindern Open und Versand.
-- `getPdf` wird erst nach nachweisbarer Finalisierung verwendet. Der Abruf akzeptiert nur PDF-MIME, Base64, `%PDF`-Signatur, EOF-Marker und höchstens 10 MiB.
+- `getPdf` wird erst nach nachweisbarer Finalisierung verwendet. Laut Spezifikation kommt die PDF als JSON/Base64; der reale Endpunkt kann stattdessen direkt `application/pdf` liefern. Das Modul akzeptiert beide Formen mit genau einem GET, verlangt HTTP 200 und prüft danach PDF-MIME, `%PDF`-Signatur, EOF-Marker und höchstens 10 MiB.
+- Nur für diesen PDF-GET sind Guzzles automatische Inhaltsdekodierung und die entsprechende cURL-Dekodierung abgeschaltet. Das umgeht fehlerhafte `Content-Encoding`-Antworten einzelner sevDesk-Installationen, ohne den übrigen API-Client aufzuweichen.
 - Die PDF wird nicht dauerhaft in WHMCS gespeichert; SHA-256, Ready- und Delivery-Zeitpunkt dürfen im Mapping stehen.
 - Bei ZUGFeRD wird vor Öffnung, Versand und PDF-Fortsetzung zusätzlich der unveränderliche XML-Hash geprüft.
 

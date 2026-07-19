@@ -526,6 +526,95 @@ final class JobRepositoryTest extends MariaDbTestCase
         self::assertSame('running', $this->jobs->findJob($jobId)?->status);
     }
 
+    public function testClaimAndRetryUseDatabaseClockAcrossPhpTimezoneChanges(): void
+    {
+        $originalPhpTimezone = date_default_timezone_get();
+        $originalDatabaseTimezone = (string) (
+            Capsule::selectOne('SELECT @@session.time_zone AS current_timezone')->current_timezone ?? 'SYSTEM'
+        );
+
+        try {
+            self::assertTrue(Capsule::statement("SET time_zone = '+02:00'"));
+            self::assertTrue(date_default_timezone_set('Etc/GMT-2'));
+
+            $jobId = $this->jobs->create('timezone-regression', [[
+                'invoice_id' => 440,
+                'action' => 'export_document',
+            ]]);
+            $queued = Capsule::table(Migrator::ITEMS_TABLE)->where('job_id', $jobId)->first();
+            self::assertNotNull($queued);
+
+            self::assertTrue(date_default_timezone_set('UTC'));
+            $claimed = $this->jobs->claimNext(300);
+
+            self::assertNotNull($claimed);
+            self::assertSame((int) $queued->id, (int) $claimed->id);
+            $leaseSeconds = (int) (
+                Capsule::selectOne(
+                    'SELECT TIMESTAMPDIFF(SECOND, CURRENT_TIMESTAMP, ?) AS seconds',
+                    [(string) $claimed->leased_until],
+                )->seconds ?? 0
+            );
+            self::assertGreaterThanOrEqual(295, $leaseSeconds);
+            self::assertLessThanOrEqual(300, $leaseSeconds);
+
+            $this->jobs->finish($claimed, JobOutcome::retry(
+                'Synthetic timezone-safe retry.',
+                60,
+                errorCode: 'timezone_retry',
+            ));
+            $waiting = Capsule::table(Migrator::ITEMS_TABLE)->where('id', $claimed->id)->first();
+            self::assertNotNull($waiting);
+            self::assertSame('retry_wait', $waiting->status);
+            $retrySeconds = (int) (
+                Capsule::selectOne(
+                    'SELECT TIMESTAMPDIFF(SECOND, CURRENT_TIMESTAMP, ?) AS seconds',
+                    [(string) $waiting->available_at],
+                )->seconds ?? 0
+            );
+            self::assertGreaterThanOrEqual(55, $retrySeconds);
+            self::assertLessThanOrEqual(60, $retrySeconds);
+
+            $createdJob = $this->jobs->create('automatic_export', [[
+                'invoice_id' => 441,
+                'action' => 'export_document',
+                'dedupe_key' => 'export_voucher:441',
+                'candidate' => $this->hybridCandidate('InvoiceCreated'),
+            ]]);
+            $paymentPending = $this->jobs->claimNext();
+            self::assertNotNull($paymentPending);
+            self::assertTrue($this->jobs->checkpoint(
+                (int) $paymentPending->id,
+                (string) $paymentPending->lease_token,
+                'invoice_payment_pending',
+                ['invoicePaymentPending' => true],
+            ));
+            $this->jobs->create('automatic_export', [[
+                'invoice_id' => 441,
+                'action' => 'export_document',
+                'dedupe_key' => 'export_voucher:441',
+                'candidate' => $this->hybridCandidate('InvoicePaid'),
+            ]]);
+            $this->jobs->finish($paymentPending, JobOutcome::skipped('Invoice requires payment.'));
+
+            $followUp = Capsule::table(Migrator::ITEMS_TABLE)->where('job_id', $createdJob)->first();
+            self::assertNotNull($followUp);
+            self::assertSame('retry_wait', $followUp->status);
+            self::assertSame('invoice_payment_event_followup', $followUp->error_code);
+            $followUpSeconds = (int) (
+                Capsule::selectOne(
+                    'SELECT TIMESTAMPDIFF(SECOND, CURRENT_TIMESTAMP, ?) AS seconds',
+                    [(string) $followUp->available_at],
+                )->seconds ?? 0
+            );
+            self::assertGreaterThanOrEqual(55, $followUpSeconds);
+            self::assertLessThanOrEqual(60, $followUpSeconds);
+        } finally {
+            date_default_timezone_set($originalPhpTimezone);
+            Capsule::statement('SET time_zone = ?', [$originalDatabaseTimezone]);
+        }
+    }
+
     public function testTransactionalClaimGateCanStopBeforeHandlerOwnershipBegins(): void
     {
         $jobId = $this->jobs->create('runtime-gated', [[

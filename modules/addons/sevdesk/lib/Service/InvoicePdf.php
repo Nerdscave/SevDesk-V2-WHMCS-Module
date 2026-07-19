@@ -22,30 +22,39 @@ final class InvoicePdf
             throw new \InvalidArgumentException('A valid sevdesk Invoice ID is required.');
         }
 
-        $response = $this->client->getLargeJson(
+        $resource = $this->client->getPdfResource(
             '/Invoice/' . rawurlencode($remoteId) . '/getPdf',
             ['download' => true, 'preventSendBy' => true],
         );
-        if (array_is_list($response) && count($response) === 1 && is_array($response[0])) {
-            $response = $response[0];
+        if ($resource['kind'] === 'binary') {
+            $contents = $resource['content'];
+            $mimeType = $resource['mimeType'];
+            $filename = 'invoice-' . $remoteId . '.pdf';
+        } else {
+            $response = $resource['payload'];
+            if (array_is_list($response) && count($response) === 1 && is_array($response[0])) {
+                $response = $response[0];
+            }
+
+            $mimeType = strtolower(trim((string) ($response['mimeType'] ?? '')));
+            $encoded = $response['base64encoded'] ?? null;
+            $content = $response['content'] ?? null;
+            if (
+                $mimeType !== 'application/pdf'
+                || !in_array($encoded, [true, 1, '1', 'true'], true)
+                || !is_string($content)
+                || $content === ''
+            ) {
+                throw new \RuntimeException('sevdesk returned no supported Invoice PDF response.');
+            }
+            $decoded = base64_decode($content, true);
+            $contents = is_string($decoded) ? $decoded : '';
+            $filename = (string) ($response['filename'] ?? 'invoice-' . $remoteId . '.pdf');
         }
 
-        $mimeType = strtolower(trim((string) ($response['mimeType'] ?? '')));
-        $encoded = $response['base64encoded'] ?? null;
-        $content = $response['content'] ?? null;
         if (
-            $mimeType !== 'application/pdf'
-            || !in_array($encoded, [true, 1, '1', 'true'], true)
-            || !is_string($content)
-            || $content === ''
-        ) {
-            throw new \RuntimeException('sevdesk returned no supported Invoice PDF response.');
-        }
-
-        $contents = base64_decode($content, true);
-        if (
-            !is_string($contents)
-            || $contents === ''
+            $contents === ''
+            || $mimeType !== 'application/pdf'
             || strlen($contents) > self::MAX_PDF_BYTES
             || !str_starts_with($contents, '%PDF-')
             || !str_contains(substr($contents, -2048), '%%EOF')
@@ -54,7 +63,7 @@ final class InvoicePdf
         }
 
         return [
-            'filename' => self::safeFilename((string) ($response['filename'] ?? 'invoice-' . $remoteId . '.pdf')),
+            'filename' => self::safeFilename($filename),
             'contents' => $contents,
             'sha256' => hash('sha256', $contents),
         ];

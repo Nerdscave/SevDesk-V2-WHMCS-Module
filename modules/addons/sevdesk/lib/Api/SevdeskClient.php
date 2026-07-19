@@ -23,6 +23,9 @@ final class SevdeskClient
     /** Bounded allowance for base64-encoded Invoice PDFs returned as JSON. */
     private const MAX_LARGE_JSON_RESPONSE_BYTES = 15_728_640;
 
+    /** Raw Invoice PDFs do not need the Base64 envelope allowance. */
+    private const MAX_PDF_RESPONSE_BYTES = 10_485_760;
+
     private readonly string $baseUrl;
 
     private readonly string $apiToken;
@@ -104,6 +107,76 @@ final class SevdeskClient
             60.0,
             maxResponseBytes: self::MAX_LARGE_JSON_RESPONSE_BYTES,
         );
+    }
+
+    /**
+     * sevdesk installations return getPdf either as the documented JSON/Base64
+     * envelope or directly as application/pdf. Keep both contracts bounded.
+     *
+     * @param array<string, scalar|array<array-key, scalar|null>|null> $query
+     * @return array{kind:'binary',mimeType:string,content:string}|array{kind:'json',payload:array<array-key,mixed>}
+     */
+    public function getPdfResource(string $path, array $query = []): array
+    {
+        $curlOptions = [];
+        if (defined('CURLOPT_HTTP_CONTENT_DECODING')) {
+            $curlOptions[constant('CURLOPT_HTTP_CONTENT_DECODING')] = false;
+        }
+        $response = $this->send(
+            'GET',
+            $path,
+            [
+                'query' => $query,
+                'headers' => ['Accept-Encoding' => 'identity'],
+                'curl' => $curlOptions,
+                'decode_content' => false,
+            ],
+            false,
+            60.0,
+        );
+        $status = $response->getStatusCode();
+        if ($status >= 200 && $status < 300 && $status !== 200) {
+            throw new ApiException(
+                'sevdesk returned an unexpected success status.',
+                $status,
+                'unexpected_http_status',
+            );
+        }
+        $contentType = strtolower(trim(explode(';', $response->getHeaderLine('Content-Type'), 2)[0]));
+        if ($status === 200 && $contentType === 'application/pdf') {
+            try {
+                $content = (string) $response->getBody();
+            } catch (Throwable) {
+                throw new ApiException(
+                    'The sevdesk PDF response could not be read.',
+                    $response->getStatusCode(),
+                    'response_read_error',
+                );
+            }
+            if (strlen($content) > self::MAX_PDF_RESPONSE_BYTES) {
+                throw new ApiException(
+                    'sevdesk returned an unexpectedly large PDF response.',
+                    $response->getStatusCode(),
+                    'response_too_large',
+                );
+            }
+
+            return [
+                'kind' => 'binary',
+                'mimeType' => $contentType,
+                'content' => $content,
+            ];
+        }
+
+        return [
+            'kind' => 'json',
+            'payload' => $this->decodeResponse(
+                $response,
+                false,
+                [200],
+                self::MAX_LARGE_JSON_RESPONSE_BYTES,
+            ),
+        ];
     }
 
     /**
@@ -205,6 +278,38 @@ final class SevdeskClient
         array $expectedStatuses = [],
         int $maxResponseBytes = self::MAX_RESPONSE_BYTES,
     ): array {
+        $response = $this->send($method, $path, $options, $outcomeMayBeUnknown, $timeout);
+
+        try {
+            return $this->decodeResponse(
+                $response,
+                $outcomeMayBeUnknown,
+                $expectedStatuses,
+                $maxResponseBytes,
+            );
+        } catch (ApiException $exception) {
+            throw $exception;
+        } catch (Throwable) {
+            throw new ApiException(
+                'The sevdesk response could not be read.',
+                $response->getStatusCode(),
+                'response_read_error',
+                null,
+                self::retryAfter($response),
+                self::isUnknownWriteOutcome($outcomeMayBeUnknown, $response->getStatusCode()),
+            );
+        }
+    }
+
+    /** @param array<string, mixed> $options */
+    private function send(
+        string $method,
+        string $path,
+        #[\SensitiveParameter]
+        array $options,
+        bool $outcomeMayBeUnknown,
+        float $timeout,
+    ): ResponseInterface {
         $options['headers'] = array_merge(
             $options['headers'] ?? [],
             [
@@ -246,25 +351,7 @@ final class SevdeskClient
             );
         }
 
-        try {
-            return $this->decodeResponse(
-                $response,
-                $outcomeMayBeUnknown,
-                $expectedStatuses,
-                $maxResponseBytes,
-            );
-        } catch (ApiException $exception) {
-            throw $exception;
-        } catch (Throwable) {
-            throw new ApiException(
-                'The sevdesk response could not be read.',
-                $response->getStatusCode(),
-                'response_read_error',
-                null,
-                self::retryAfter($response),
-                self::isUnknownWriteOutcome($outcomeMayBeUnknown, $response->getStatusCode()),
-            );
-        }
+        return $response;
     }
 
     /**

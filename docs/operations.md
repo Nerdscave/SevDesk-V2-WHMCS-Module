@@ -2,7 +2,7 @@
 
 ## Freigabestatus
 
-Dieses Runbook gilt für `2.1.0-rc.2`. Der RC ist für Testinstallationen gedacht, nicht für Produktivdaten. Vor der Freigabe stehen noch der vollständige Lauf mit PHP 8.3 und MariaDB, die Prüfung unter WHMCS 8.13.4, die bisherigen Voucher-Canaries, der Invoice-API-Canary und der getrennte ZUGFeRD-Canary in einem echten sevDesk-Testmandanten aus.
+Dieses Runbook gilt für `2.1.0-rc.2`. Der RC ist für Testinstallationen gedacht, nicht für Produktivdaten. Die automatisierten Prüfungen unter PHP 8.3 mit XMLReader und MariaDB sowie ein kleiner mailfreier Rule-1-Live-Lauf unter WHMCS-Hoheit sind abgeschlossen. Vor der Freigabe stehen noch die vollständige Prüfung unter WHMCS 8.13.4, die bisherigen Voucher-Canaries, der Invoice-API-Canary mit Rule 19, Versand und Zahlungsbuchung sowie der getrennte ZUGFeRD-Canary in einem echten sevDesk-Testmandanten aus.
 
 Bis dahin bleiben `invoice_canary_confirmed`, `e_invoice_canary_confirmed` und bei neuen Rollouts auch `sync_enabled` deaktiviert. Ein 2.0-Bestand behält beim Upgrade den Modus `voucher_only` und erhält `runtime_review_required=on`. Diese Quarantäne stoppt automatische und manuelle Verarbeitung. Sie endet erst nach einer erfolgreichen read-only Prüfung und der Bestätigung im Setup.
 
@@ -17,7 +17,7 @@ Bis dahin bleiben `invoice_canary_confirmed`, `e_invoice_canary_confirmed` und b
 - API-Basis `https://my.sevdesk.de/api/v1`
 - ausreichend berechtigter sevDesk-API-Benutzer
 
-PHP-CLI und PHP-FPM müssen dieselbe relevante Konfiguration und dieselben Erweiterungen verwenden.
+PHP-CLI und PHP-FPM müssen dieselbe relevante Konfiguration und dieselben Erweiterungen verwenden. Ihre PHP-Standardzeitzone darf abweichen; die Queue verwendet dafür bewusst die Uhr der Datenbankverbindung. Web und CLI müssen jedoch dieselbe MariaDB-Session-Zeitzone sehen. Das lässt sich in beiden Laufzeiten mit `SELECT @@session.time_zone, CURRENT_TIMESTAMP` prüfen.
 
 ## Vor jeder Installation oder jedem Upgrade
 
@@ -348,6 +348,13 @@ Der Aufruf führt die additive, idempotente Schemaprüfung aus und schreibt
 Item konstruiert der Runner keine sevdesk-Remote-Services und sendet keinen
 API-Request. Mapping-, Job- und Itemzahlen müssen danach unverändert sein.
 
+Bleibt ein `pending`-Item trotz abgelaufenem `available_at` liegen, zuerst
+`available_at`, `CURRENT_TIMESTAMP` und `@@session.time_zone` vergleichen.
+Zeitwerte nicht von Hand korrigieren. In `2.1.0-rc.2` verwendet der Runner
+für Claim, Lease und Retry durchgehend die Datenbankzeit; ältere Prozesse mit
+PHP-UTC konnten von PHP-FPM in Ortszeit angelegte Jobs bis zu zwei Stunden zu
+spät sehen.
+
 ## Normaler Bulk-Ablauf
 
 1. Im Adminbereich Zeitraum und Filter wählen.
@@ -476,14 +483,16 @@ Der Checkpoint bestimmt die einzig zulässige Aktion:
 - nach `invoice_created` vor `mapping_persisted`: bekannte Invoice-ID lesen, exakt prüfen und erst dann Typ/ID mappen; bei ZUGFeRD zusätzlich `getXml` prüfen und den ersten XML-Hash einfrieren;
 - nach `invoice_xml_verified`: bekannte Invoice-ID, E-Rechnungsflag, PaymentMethod, Kontakt, Adresshash und gespeicherten XML-Hash erneut lesen; ein fehlendes oder abweichendes XML bleibt `ambiguous`;
 - nach `mapping_persisted` ohne auffindbares lokales Mapping: nur den exakten Draft lesend suchen und typisiert wiederherstellen; niemals neu erstellen;
-- nach `invoice_open_write_requested`: Status, `sendType`, Kontakt, Lieferland und Positionen lesen; `sendBy` nicht automatisch wiederholen;
-- nach `invoice_delivery_write_requested`: Status, `sendType`, `sendDate`, Kontakt, Lieferland und Positionen lesen; `sendViaEmail` nicht automatisch wiederholen;
+- nach `invoice_open_write_requested`: Status, `sendType`, Kontakt, einen von sevDesk gemeldeten Ländercode und Positionen lesen; `sendBy` nicht automatisch wiederholen. Bei Rule 19 ist ein lesbar bestätigtes Lieferland Pflicht;
+- nach `invoice_delivery_write_requested`: Status, `sendType`, `sendDate`, Kontakt, einen von sevDesk gemeldeten Ländercode und Positionen lesen; `sendViaEmail` nicht automatisch wiederholen. Bei Rule 19 ist ein lesbar bestätigtes Lieferland Pflicht;
 - nach `whmcs_email_write_requested`: der Providerübergang kann unbekannt sein. Item bleibt `ambiguous`; manueller Resend nur nach Bestätigung des Doppelversandrisikos;
 - nach `whmcs_email_handed_off`: ausschließlich lokale Ready-/Delivery-Metadaten vervollständigen; weder `SendEmail` noch PDF-/sevDesk-Endpunkte erneut aufrufen; als an WHMCS-Mailprovider übergeben markieren, nicht als im Empfängerpostfach zugestellt.
 
 Fehlt das Mapping erst nach einem Open-, Delivery- oder Mail-Checkpoint, bleibt der Job mit unverändertem Checkpoint `ambiguous`. Dieser Zustand wird nicht automatisch auf Create-Recovery zurückgestuft; Remote-Dokument und lokale Zuordnung müssen einzeln geprüft werden.
 
 Nach einem erfolgreichen Ready-Schritt wird die finale PDF erneut über `getPdf` geladen, auf Signatur und Größe geprüft und gegen `pdf_sha256` verglichen. Ein anderer Hash ist ein Prüffall; eine lokale PDF-Kopie wird nicht angelegt.
+
+Der PDF-Endpunkt kann entweder JSON/Base64 oder direkt `application/pdf` liefern. Ein `transport_error` nur bei `getPdf` kann von einem fehlerhaften `Content-Encoding` stammen. Ab 2.1.0-rc.2 nutzt der Download deshalb ausschließlich auf diesem Endpunkt einen nicht automatisch dekodierten, auf HTTP 200 und 10 MiB begrenzten Abruf. Ein zweiter Fallback-Request ist nicht vorgesehen.
 
 Für eine E-Rechnung wird vor Öffnung und Zustellung zusätzlich `getXml` gegen `xml_sha256` geprüft. Ein neuer Hash ersetzt den gespeicherten Wert nicht. Die Recovery bleibt beim vorhandenen Remote-Dokument und darf weder eine normale Invoice noch eine zweite E-Rechnung erzeugen.
 
