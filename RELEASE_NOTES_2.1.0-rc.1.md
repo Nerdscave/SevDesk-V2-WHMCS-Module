@@ -68,9 +68,3 @@ Das vollständige Canary-Protokoll bleibt außerhalb von Git. Im Repository darf
 ## Release-Datei
 
 Das installierbare Archiv heißt `sevdesk-2.1.0-rc.1.tar.gz`. Es enthält ausschließlich das Addon, die Upgrade- und Betriebsanleitung sowie die Lizenz. Tests, Entwicklungsabhängigkeiten und lokale Arbeitsdaten sind nicht enthalten.
-
-SHA-256:
-
-```text
-f53a46ce77ad2a23c2d77eef5bb1dafdf559ccb380e1d12d23258cef0bc6a6f5
-```
