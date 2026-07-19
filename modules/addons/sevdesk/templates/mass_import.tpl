@@ -88,7 +88,8 @@
                                     {if $invoice.help_url}<small><a href="{$invoice.help_url|escape:'html':'UTF-8'}" target="_blank" rel="noopener">sevdesk-Einschränkung öffnen</a></small>{/if}
                                 {else}
                                     {include file="partials/status_badge.tpl" status="pending"}
-                                    <small>Profil {$invoice.tax_profile|escape:'html':'UTF-8'} · Rule {$invoice.tax_rule|escape:'html':'UTF-8'} · Konto {$invoice.account_datev|escape:'html':'UTF-8'}</small>
+                                    <small>Ziel {$invoice.document_type|default:'—'|escape:'html':'UTF-8'} · Hoheit {$invoice.document_authority|default:'—'|escape:'html':'UTF-8'} · Rule {$invoice.tax_rule|escape:'html':'UTF-8'}{if $invoice.document_type === 'invoice'} · kein frei gewähltes accountDatev{else} · Konto {$invoice.account_datev|escape:'html':'UTF-8'}{/if}</small>
+                                    <small>{$invoice.delivery_state|default:'—'|escape:'html':'UTF-8'}</small>
                                 {/if}
                             </td>
                         </tr>

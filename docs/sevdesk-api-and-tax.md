@@ -2,57 +2,65 @@
 
 ## Terminologie
 
-**sevDesk-Update 2.0** meint in diesem Projekt die Buchhaltungslogik mit `taxRule`, `accountDatev`, `ReceiptGuidance` und strengerer Validierung.
-
-Die HTTP-API heißt weiterhin:
+**sevDesk-Update 2.0** meint in diesem Projekt die Buchhaltungslogik mit `taxRule`, `accountDatev`, `ReceiptGuidance` und strengerer Validierung. Die HTTP-API bleibt:
 
 ```text
 https://my.sevdesk.de/api/v1
 ```
 
-Eine `/api/v2` ist weder Voraussetzung noch Teil der Implementierung. Die technische Primärquelle im Repository ist `docs/sevdesk-openapi.yaml`.
+Eine `/api/v2` ist weder Voraussetzung noch Teil der Implementierung. Technische Referenz im Repository ist `docs/sevdesk-openapi.yaml`; sie wurde für die Invoice-Erweiterung nicht verändert.
 
 ## Verbindlicher API-Vertrag
 
-### Authentifizierung
+### Authentifizierung und Transport
 
-- API-Token als unveränderter Wert im Header `Authorization`
-- `Accept: application/json`
-- `Content-Type: application/json` für JSON und passender Multipart-Typ beim PDF-Upload
-- aussagekräftiger `User-Agent`, zum Beispiel Modulname und eigene Version ohne Domain oder Kundendaten
-- Token niemals in URL, Jobdaten oder Fehlertext schreiben
+- API-Token ausschließlich im Header `Authorization`;
+- `Accept: application/json`;
+- passender `Content-Type` für JSON beziehungsweise Voucher-PDF-Upload;
+- aussagekräftiger `User-Agent` aus Modulname und Version ohne Mandanten- oder Kundendaten;
+- explizite Connect- und Request-Timeouts;
+- Token niemals in URL, Jobdaten oder Fehlertext.
 
-Das Token hat laut Dokumentation kein kurzes automatisches Ablaufdatum. Ein Tokenwechsel wird trotzdem wie jeder andere Wechsel von Zugangsdaten behandelt.
-
-### Systemversion
-
-Vor dem ersten Write und im Health Check liest das Modul `/Tools/bookkeepingSystemVersion`. Es erwartet sevDesk-Update 2.0. Eine abweichende oder nicht lesbare Version blockiert Writes und zeigt den Grund an.
+Vor dem ersten Write und im Health Check liest das Modul `/Tools/bookkeepingSystemVersion` und erwartet sevDesk-Update 2.0. Eine abweichende oder nicht lesbare Version blockiert Writes.
 
 ### Benötigte Endpunkte
 
 | Zweck | Endpunkt |
 | --- | --- |
 | Buchhaltungssystem prüfen | `GET /Tools/bookkeepingSystemVersion` |
-| alle zulässigen Kontenkombinationen | `GET /ReceiptGuidance/forAllAccounts` |
-| bestimmtes Konto prüfen | `GET /ReceiptGuidance/forAccountNumber` |
-| Konten für eine Tax Rule prüfen | `GET /ReceiptGuidance/forTaxRule` |
-| Erlöskonten eingrenzen | `GET /ReceiptGuidance/forRevenue` |
+| Konto-/Rule-Fähigkeit | `GET /ReceiptGuidance/forAllAccounts`, `/forAccountNumber`, `/forTaxRule`, `/forRevenue` |
 | Kontakt lesen/anlegen | benötigte `Contact`-Endpunkte |
-| PDF temporär hochladen | `POST /Voucher/Factory/uploadTempFile` |
+| Voucher-PDF temporär hochladen | `POST /Voucher/Factory/uploadTempFile` |
 | Voucher samt Positionen anlegen | `POST /Voucher/Factory/saveVoucher` |
-| Voucher für Recovery lesen/suchen | benötigte `Voucher`-GET-Endpunkte |
+| Voucher lesen/suchen/buchen | benötigte `Voucher`-GET-Endpunkte, `PUT /Voucher/{id}/bookAmount` |
+| normale Invoice anlegen | `POST /Invoice/Factory/saveInvoice` |
+| Invoice und Positionen lesen | `GET /Invoice/{id}`, `GET /Invoice/{id}/getPositions` |
+| Invoice ohne Mail öffnen | `PUT /Invoice/{id}/sendBy` |
+| Invoice per sevDesk senden | `POST /Invoice/{id}/sendViaEmail` |
+| finale Invoice-PDF abrufen | `GET /Invoice/{id}/getPdf` |
+| Invoice-Zahlung buchen | `PUT /Invoice/{id}/bookAmount` plus typabhängige Read-/Log-Endpunkte |
 
-Das Modul verwendet nur diese Aufrufe. Weitere Endpunkte kommen hinzu, sobald eine freigegebene Funktion sie braucht.
+Invoice-Erstellung, Öffnen, PDF und Versand sind getrennte Schritte. Erfolg eines Schritts beweist keinen späteren Schritt.
 
-## Voucher-first
+## Dokumentziel und kein Fallback
 
-Die erste Version übernimmt die bereits in WHMCS erzeugte Rechnung als sevDesk-Voucher und hängt das WHMCS-PDF an. Der Buchhaltungsnachlauf verwendet damit das bestehende WHMCS-Dokument und legt keine zusätzliche sevDesk-Ausgangsrechnung an.
+`DocumentTargetResolver` friert vor dem ersten Remote-Write genau ein Ziel ein:
 
-Vor dem ersten Produktivlauf muss die Steuerberatung dieses Vorgehen bestätigen, und es muss in einem sevDesk-Testmandanten geprüft werden. Lässt sich ein Steuerfall technisch nicht als Voucher abbilden, blockiert das Modul ihn. Ein automatischer Wechsel auf ein anderes Objektmodell findet nicht statt.
+| `export_mode` | Verhalten |
+| --- | --- |
+| `voucher_only` | alle freigegebenen Steuerfälle als Voucher |
+| `invoice_for_oss` | Rule 19 als Invoice, sonst freigegebener Voucher-Pfad |
+| `invoice_only` | alle im Invoice-Vertrag freigegebenen Rules als Invoice |
 
-## Voucher-Payload
+`document_authority=sevdesk` ist nur mit `invoice_only` zulässig. Invoice-Ziele sind immer paid-only und verlangen eine finale WHMCS-Rechnungsnummer.
 
-Die Struktur folgt der lokalen OpenAPI-Spezifikation. Ein vereinfachtes Beispiel mit rein synthetischen Werten:
+Das bestätigte Rule-19-Profil ist gegenseitig ausschließend zur früheren Betreiberfreigabe `eu_b2c_mode=domestic_confirmed`. Das Setup blockiert diese widersprüchliche Kombination, damit derselbe EU-B2C-Fall nicht zugleich als deutsche Rule 1 und als OSS-Rule 19 freigegeben ist.
+
+Ein fehlgeschlagener Voucher-Write wird niemals als Invoice wiederholt. Ein begonnenes Invoice-Item wird niemals zum Voucher zurückgeroutet. Der gespeicherte Zieltyp ist Teil von Mapping, Recovery und Booking-Snapshot.
+
+## Voucher-Vertrag
+
+Voucher übernehmen die WHMCS-Rechnung samt WHMCS-PDF. Ein vereinfachtes synthetisches Payload-Beispiel:
 
 ```json
 {
@@ -60,16 +68,10 @@ Die Struktur folgt der lokalen OpenAPI-Spezifikation. Ein vereinfachtes Beispiel
     "objectName": "Voucher",
     "mapAll": true,
     "voucherDate": "01.01.2030",
-    "supplier": {
-      "id": "CONTACT_ID",
-      "objectName": "Contact"
-    },
-    "description": "WHMCS INV-EXAMPLE",
+    "supplier": {"id": "CONTACT_ID", "objectName": "Contact"},
+    "description": "WHMCS INV-EXAMPLE [WHMCS-INVOICE:123]",
     "status": 100,
-    "taxRule": {
-      "id": "1",
-      "objectName": "TaxRule"
-    },
+    "taxRule": {"id": "1", "objectName": "TaxRule"},
     "creditDebit": "D",
     "voucherType": "VOU",
     "currency": "EUR"
@@ -82,10 +84,7 @@ Die Struktur folgt der lokalen OpenAPI-Spezifikation. Ein vereinfachtes Beispiel
       "sumGross": 12.34,
       "net": false,
       "taxRate": 19.0,
-      "accountDatev": {
-        "id": "CONFIGURED_ACCOUNT_ID",
-        "objectName": "AccountDatev"
-      },
+      "accountDatev": {"id": "CONFIGURED_ACCOUNT_ID", "objectName": "AccountDatev"},
       "comment": "Synthetische Testposition"
     }
   ],
@@ -93,168 +92,186 @@ Die Struktur folgt der lokalen OpenAPI-Spezifikation. Ein vereinfachtes Beispiel
 }
 ```
 
-Für jeden Payload gilt:
+Für jeden Voucher gilt:
 
-- `mapAll` ist ein Boolean, nicht der String `"true"`.
-- Nicht gesetzte Werte sind echtes JSON-`null`, nicht der String `"null"`.
-- Jede Position hat `accountDatev`, Betrag, `taxRate`, `net` und ein korrektes `objectName`.
-- Alle Positionen eines Vouchers verwenden konsistent Netto- oder Bruttobeträge.
-- Der WHMCS-Modus `TaxType` bestimmt, ob `sumNet`/`net=true` oder `sumGross`/`net=false` gesendet wird.
-- Der Voucher wird mit Status 50 oder 100 erstellt; für den normalen Nachlauf ist Status 100 vorgesehen. „Bezahlt“ wird nicht durch einen unzulässigen Create-Status simuliert.
-- Der vom Upload zurückgegebene Dateiname wird unverändert an `saveVoucher` übergeben.
-- Erfolg setzt HTTP 201, eine valide Voucher-ID und das erfolgreiche lokale Mapping voraus.
+- echte JSON-Booleans und `null`, keine String-Ersatzwerte;
+- `accountDatev`, Betrag, `taxRate`, Netto-/Bruttokennzeichen und `objectName` an jeder Position;
+- konsistenter Netto- oder Bruttomodus;
+- normaler Status 100, kein bezahlter Create-Sonderstatus;
+- unveränderter Dateiname aus dem temporären Upload;
+- HTTP 201, valide Remote-ID, exakte Rückprüfung und typisiertes Mapping als Erfolgsvoraussetzung.
+
+## Invoice-Vertrag
+
+Eine Invoice wird nicht aus der WHMCS-PDF importiert. Das Modul erstellt eine normale sevDesk-Invoice und sevDesk erzeugt deren offizielle PDF. Ein vereinfachtes synthetisches Payload-Beispiel:
+
+```json
+{
+  "invoice": {
+    "objectName": "Invoice",
+    "mapAll": true,
+    "invoiceNumber": "INV-2030-001",
+    "invoiceDate": "01.01.2030",
+    "deliveryDate": "01.01.2030",
+    "invoiceType": "RE",
+    "status": 100,
+    "contact": {"id": "CONTACT_ID", "objectName": "Contact"},
+    "contactPerson": {"id": "SEV_USER_ID", "objectName": "SevUser"},
+    "currency": "EUR",
+    "showNet": false,
+    "taxRule": {"id": "19", "objectName": "TaxRule"},
+    "customerInternalNote": "[WHMCS-INVOICE:123]",
+    "deliveryAddressCountry": "FR",
+    "propertyIsEInvoice": false
+  },
+  "invoicePosSave": [
+    {
+      "objectName": "InvoicePos",
+      "mapAll": true,
+      "quantity": 1,
+      "unity": {"id": "UNITY_ID", "objectName": "Unity"},
+      "positionNumber": 1,
+      "name": "Synthetische digitale Leistung",
+      "text": "Synthetische digitale Leistung",
+      "price": 12.34,
+      "taxRate": 20.0
+    }
+  ],
+  "invoicePosDelete": null,
+  "discountSave": null,
+  "discountDelete": null,
+  "takeDefaultAddress": true
+}
+```
+
+Verbindliche Regeln:
+
+- `invoiceType=RE`, Create-Status 100;
+- unveränderte finale WHMCS-Nummer als `invoiceNumber`;
+- Marker `[WHMCS-INVOICE:<invoice_id>]` in einem lesbaren internen Feld;
+- positive EUR-Rechnung ohne angewendetes Guthaben und ohne negative Position;
+- exakt derselbe Netto-/Bruttomodus und WHMCS-Steuersatz wie im gefrorenen Snapshot;
+- konfigurierter, im Mandanten existierender `SevUser` und eine Standard-`Unity`;
+- v1 verwendet je WHMCS-Position Menge 1;
+- kein benutzerdefiniertes `accountDatev` an Invoice-Positionen;
+- nach Create werden Invoice und alle Positionen gelesen und ID, Nummer, Status, Kontakt, Rule, Währung, Positionen und Summen exakt verglichen;
+- erst die bestätigte Remote-ID plus `document_type=invoice` ergibt ein erfolgreiches Mapping.
+
+Die fehlende freie `accountDatev`-Zuordnung ist eine sichtbare Einschränkung von `invoice_only`, nicht etwas, das das Modul verdeckt ergänzt.
+
+### Öffnen, Versand und PDF
+
+- `sendBy` öffnet eine Invoice ohne kundenseitige sevDesk-Mail und wird für WHMCS-Hoheit sowie den WHMCS-Mailkanal verwendet.
+- `sendViaEmail` öffnet und versendet über sevDesk. Empfänger, Betreff und Text werden lokal validiert.
+- Unmittelbar vor beiden Writes werden Draft-Header und Positionen erneut vollständig gelesen und exakt mit dem gefrorenen Snapshot verglichen. Abweichungen verhindern Open und Versand.
+- `getPdf` wird erst nach nachweisbarer Finalisierung verwendet. Der Abruf akzeptiert nur PDF-MIME, Base64, `%PDF`-Signatur, EOF-Marker und höchstens 10 MiB.
+- Die PDF wird nicht dauerhaft in WHMCS gespeichert; SHA-256, Ready- und Delivery-Zeitpunkt dürfen im Mapping stehen.
+
+Nach `invoice_write_requested`, `invoice_open_write_requested` oder `invoice_delivery_write_requested` ist ein Transportfehler potenziell nicht wiederholbar. Recovery darf dann nur GETs ausführen. Ein fehlender Nachweis oder ein fehlendes Mapping nach einem späteren Write bleibt `ambiguous`; es gibt keinen Rückfall auf `saveInvoice`. Volle 1.000er-Seiten bei Kandidaten oder Positionen gelten als abgeschnitten und nicht beweiskräftig.
 
 ## Steuerregeln in sevDesk-Update 2.0
 
-Für die erste Version sind vor allem diese Revenue-Regeln relevant:
+| ID | Code/Fall | API-/Modulstatus |
+| ---: | --- | --- |
+| 1 | `USTPFL_UMS_EINN` | Voucher nach Guidance; Invoice im freigegebenen Vertrag |
+| 2 | `AUSFUHREN` | nur fachlich bestätigte Ausfuhrfälle |
+| 3 | `INNERGEM_LIEF` | nur bestätigte innergemeinschaftliche Warenlieferung, nie pauschal für EU |
+| 4 | steuerfreie Umsätze § 4 UStG | nur mit expliziter fachlicher Regel |
+| 5 | Reverse Charge nach § 13b UStG | nur mit expliziter fachlicher Regel |
+| 11 | Kleinunternehmer nach § 19 UStG | bei entsprechend bestätigtem Mandantenprofil |
+| 17 | nicht im Inland steuerbare Leistung | nur fachlich freigegeben |
+| 18 | OSS-Sonderfall | in OSS-v1 blockiert |
+| 19 | OSS elektronische Leistungen | nur Invoice, nur bestätigtes digitales EU-B2C-Profil |
+| 20 | OSS-Sonderfall | in OSS-v1 blockiert |
+| 21 | Reverse Charge nach § 18b UStG | in dieser Invoice-/Voucher-Freigabe blockiert |
 
-| ID | Code/Fall | Zulässige Positionssteuersätze laut Spezifikation | Modulstatus |
-| ---: | --- | --- | --- |
-| 1 | `USTPFL_UMS_EINN`, steuerpflichtige Umsätze | 0, 7, 19 | unterstützt nach Guidance-Prüfung |
-| 2 | `AUSFUHREN` | 0 | nur für fachlich bestätigte Ausfuhrfälle |
-| 3 | `INNERGEM_LIEF` | 0, 7, 19 | nur für bestätigte innergemeinschaftliche Lieferung, nie pauschal für EU |
-| 4 | steuerfreie Umsätze § 4 UStG | 0 | nur mit expliziter fachlicher Regel |
-| 5 | Reverse Charge nach § 13b UStG | 0 | nur mit expliziter fachlicher Regel |
-| 11 | Kleinunternehmer nach § 19 UStG | 0 | unterstützt, wenn der Mandant so konfiguriert und geprüft ist |
-| 17 | nicht im Inland steuerbare Leistung | 0 | manueller/fachlich freizugebender Fall |
-| 18–20 | One Stop Shop | landabhängig | für Voucher laut Spezifikation nicht unterstützt; blockiert |
-| 21 | Reverse Charge nach § 18b UStG | 0 | für Voucher laut Spezifikation nicht unterstützt; blockiert |
-
-Die Tabelle ist kein Steuerberatungsergebnis. Sie beschreibt API-Fähigkeiten und die Sicherheitsgrenze des Moduls.
+Die Tabelle ist kein Steuerberatungsergebnis. Sie beschreibt API-Fähigkeiten und die Fail-Closed-Grenze des Moduls.
 
 ## Fachliche Klassifikation
 
-Der Tax-Resolver prüft die Fälle in fester Reihenfolge. Er liefert entweder eine eindeutige Klassifikation oder einen Prüffall.
+Der Tax-Resolver verwendet unter anderem Kleinunternehmerstatus, Land, Organisation, USt-ID, `taxexempt`, WHMCS-Steuersatz, Netto-/Bruttomodus, Positionsarten, Währung und eine zuverlässig bestätigte Leistungsart. Fehlen Pflichtdaten oder gibt es widersprüchliche Fälle, entsteht kein Payload.
 
-### Eingaben
+| Fall | Entscheidung |
+| --- | --- |
+| deutscher steuerpflichtiger Kunde | Rule 1; Voucher oder Invoice gemäß Modus |
+| EU-Privatkunde, fachlich kein OSS | Rule 1 nach bestätigtem Nicht-OSS-Profil; Ziel gemäß Modus |
+| bestätigte digitale EU-B2C-Leistung | Rule 19; nur `invoice_for_oss`/`invoice_only`, OSS-Profil und Canary |
+| Rule-18-/Rule-20-Fall | blockiert |
+| EU-Geschäftskunde ohne vollständige Nachweise | blockiert; EU-Land oder `taxexempt` allein genügt nicht |
+| bestätigte innergemeinschaftliche Warenlieferung | Rule 3 nur Organisation + USt-ID + `taxexempt` + Setupbestätigung |
+| Hosting/andere EU-B2B-Dienstleistung | Rule 3 verboten; ohne eigenes Profil blockiert |
+| Drittland-Ausfuhr | Rule 2 nur nach fachlicher Freigabe |
+| Drittland-Dienstleistung | blockiert, bis eigene Regel bestätigt ist |
+| mehrere Steuer- oder Leistungsfälle | blockiert; keine vermutete Aufteilung |
+| Guthaben, Null-/Negativbetrag, negative Position, Refund, Storno | normaler Export blockiert oder eigener bestätigter Voucher-Korrekturpfad |
+| Fremdwährung | blockiert, bis separat freigegeben |
 
-- globale Kleinunternehmer-Einstellung
-- Land des Kunden
-- Kundentyp: Firma oder Person
-- USt-ID und deren fachlich festgelegter Validierungsstatus
-- WHMCS-`taxexempt`
-- Steuersatz und Besteuerungsart der Invoice
-- Netto-/Bruttomodus
-- Rechnungspositionstypen, insbesondere Guthaben/Refund
-- Währung
-- für die Steuerentscheidung erforderliche Leistungsart, soweit zuverlässig vorhanden
+Die Rule-19-Bestätigung gilt für **alle Positionen** der betreffenden Rechnung. Das Modul wertet Beschreibungen nicht aus. Kann der Betreiber diese Homogenität nicht zusichern, bleibt der Fall blockiert.
 
-Fehlen erforderliche Daten, markiert der Resolver den Fall als blockiert.
+## B2B-Nachweis und Rule 3
 
-### Geplante Entscheidungsmatrix
+`taxexempt=true` allein ist kein EU-B2B-Nachweis. Rule 3 ist standardmäßig deaktiviert und darf nur für innergemeinschaftliche Warenlieferungen freigegeben werden. Erforderlich sind Organisation, USt-ID, `taxexempt` und die ausdrückliche Setupbestätigung. Hosting, Domains, Lizenzen und andere Dienstleistungen sind von diesem Profil ausgeschlossen. Northern Ireland und andere Sondergebiete benötigen eigene Tests und Freigaben.
 
-| Fall | Grundentscheidung | Erste Version |
-| --- | --- | --- |
-| Kleinunternehmer-Mandant | Rule 11, 0 %, passendes Guidance-Konto | unterstützt nach Health Check |
-| deutscher steuerpflichtiger Kunde | Rule 1, WHMCS-Steuersatz | unterstützt |
-| EU-Privatkunde, fachlich kein OSS-Fall | Rule 1, WHMCS-Steuersatz | unterstützt; eigener EU-B2C-Regressionsfall |
-| EU-Privatkunde, OSS erforderlich | Rules 18–20 wären nötig | blockiert, weil Voucher nicht unterstützt |
-| EU-Geschäftskunde | nicht allein aus Land oder `taxexempt` ableiten | nur mit freigegebener B2B-/Leistungsart-Regel |
-| bestätigte innergemeinschaftliche Warenlieferung | Rule 3 und Guidance-kompatibles Konto | nur für Organisation + USt-ID + `taxexempt` und nach expliziter Setup-Bestätigung unterstützt |
-| EU-B2B-Dienstleistung/Reverse Charge | je nach Fall Rule 5, 17 oder 21 | blockiert, solange Matrix und Voucher-Fähigkeit nicht eindeutig sind |
-| Drittland-Ausfuhr | Rule 2 | nur nach fachlicher Freigabe |
-| Drittland-Dienstleistung | häufig anderer Fall als Ausfuhr | blockiert, bis Rule/Konto freigegeben sind |
-| AddFunds, negative Position, Refund, Gutschrift, Storno | Credit-/Sonderfall | manuelle Prüfung |
-| mehrere Steuerfälle in einer Invoice | Das Modul darf den Voucher nicht anhand von Vermutungen aufteilen | manuelle Prüfung |
-| Fremdwährung | zusätzliche Wechselkursregeln | manuell, bis separat getestet und freigegeben |
+## `ReceiptGuidance` und Invoice-Fähigkeit
 
-Vor dem Produktivbetrieb muss schriftlich festgelegt sein, welche Positionen als Lieferung oder Dienstleistung gelten und welche Rule daraus folgt. Die Bezeichnung „EU B2B“ allein reicht dafür nicht.
+Account-Datev-IDs sind mandantenspezifisch. Im Voucher-Pfad prüft das Modul vor jedem Write:
 
-## B2B-Nachweis
+1. Konto existiert im aktuellen Mandanten.
+2. Konto ist für Revenue/Voucher zulässig.
+3. Konto erlaubt die Tax Rule.
+4. Konto erlaubt den Positionssteuersatz.
+5. Kombination ist für den Dokumenttyp Voucher zulässig.
 
-`taxexempt = true` allein reicht als technischer Nachweis für EU B2B nicht aus. Das Profil ist standardmäßig deaktiviert. Der Betreiber kann Rule 3 erst auf der geschützten Setupseite freigeben. Dazu muss er bestätigen, dass das Profil nur für innergemeinschaftliche Warenlieferungen gilt. Diese Freigabe darf nicht für Hosting, Domains, Lizenzen oder andere Dienstleistungen verwendet werden.
+Invoice-Positionen übernehmen kein frei konfiguriertes `accountDatev`. Der Invoice-Steuerpfad lädt deshalb auch keine Voucher-`ReceiptGuidance`; er prüft stattdessen die freigegebene Invoice-Rule, den tatsächlichen WHMCS-Steuersatz, Pflichtreferenzen und den Invoice-API-Vertrag. B2B-Nachweise, Rule-3-Warenprofil und Betreiberbestätigungen bleiben identisch streng. In `invoice_for_oss` gilt dieser guidance-freie Pfad nur für den bestätigten Rule-19-Fall, während alle Voucher-Ziele weiter gegen Guidance geprüft werden. Eine erfolgreiche Guidance- oder Contract-Prüfung beweist nur technische Kompatibilität, nicht die steuerliche Richtigkeit.
 
-Der jeweilige WHMCS-Kunde muss außerdem als Organisation geführt werden und eine USt-ID besitzen. Die Regel muss widersprüchliche Daten erkennen:
+## Verbindliche Regressionen
 
-- Privatkunde ohne Firma/USt-ID darf nie `INNERGEM_LIEF` erhalten.
-- Sind Firma und USt-ID vorhanden, muss die Klassifikation sie berücksichtigen.
-- Ein gesetztes `taxexempt` ohne die verlangten B2B-Daten wird zum Prüffall.
-- Ein vorhandenes Rule-3-Konto ohne gespeicherte Warenlieferungsbestätigung bleibt blockiert.
-- Dienstleistungsfälle bleiben unabhängig von Firma und USt-ID in manueller Prüfung, solange kein eigenes bestätigtes Voucher-Profil implementiert ist.
-- Northern Ireland und andere umsatzsteuerliche Sondergebiete brauchen eigene Testfälle, bevor sie freigegeben werden.
+### EU B2C ohne OSS
 
-Eine USt-ID-Prüfung über einen externen Dienst gehört nicht automatisch zum ersten Release. Wird sie fachlich erforderlich, müssen Verfügbarkeit, Nachweis und Datenschutz gesondert entschieden werden.
+EU-Land außerhalb Deutschlands, keine Firma/USt-ID und `taxexempt=false` darf nie Rule 3 erhalten. Je nach ausdrücklich freigegebenem Profil entsteht Rule 1 oder ein klarer Prüffall.
 
-## `ReceiptGuidance` als technische Freigabe
+### Rule 19
 
-Die konfigurierten Account-Datev-IDs sind mandantenspezifisch. Beim Speichern der Einstellungen und vor einem Job prüft das Modul mindestens:
+Eine bezahlte EU-B2C-Rechnung mit finaler Nummer und tatsächlichem WHMCS-Landsteuersatz wird nur dann Rule-19-Invoice, wenn Modus, OSS-Profil, Canary und digitale Homogenität bestätigt sind. In `voucher_only`, ohne Profil, vor Zahlung, ohne finale Nummer oder bei Rules 18/20 findet kein Remote-Write statt.
 
-1. Existiert das Konto im aktuellen sevDesk-Mandanten?
-2. Ist es ein zulässiges Erlöskonto für Voucher?
-3. Erlaubt es die gewählte Tax Rule?
-4. Erlaubt es den Positionssteuersatz?
-5. Ist die Kombination für den Dokumenttyp Voucher zugelassen?
+### Konto mit unzulässiger Rule
 
-Der Worker lädt die benötigte Guidance einmal pro Lauf in den Speicher. Für die erste Version ist keine dauerhafte Cache-Schicht nötig. Kann er die Guidance nicht laden, schreibt er keinen Voucher.
-
-Eine erfolgreiche Guidance-Prüfung beweist nur API-Kompatibilität, nicht die steuerliche Richtigkeit der fachlichen Klassifikation.
-
-## Verbindliche Regressionstests
-
-Mindestens diese Tests sind Release-Blocker:
-
-### EU B2C
-
-Gegeben:
-
-- EU-Land außerhalb Deutschlands
-- keine Firma
-- keine USt-ID
-- `taxexempt = false`
-- steuerpflichtige WHMCS-Invoice
-
-Erwartet:
-
-- Klassifikation EU B2C, nicht EU B2B
-- kein `INNERGEM_LIEF`
-- Rule 1 und der konfigurierte EU-B2C-Account nur dann, wenn Guidance Regel und Steuersatz erlaubt
-- andernfalls klarer Prüffall vor dem Remote-Write
-
-### Konto mit unzulässiger Steuerregel
-
-Gegeben ist ein Konto, dessen Guidance nur `AUSFUHREN` zulässt. Eine abweichende Rule wie `STFREIE_UMS_P4` muss der Payload-Builder ablehnen. Das Item endet mit einem verständlichen lokalen Validierungsfehler, bevor eine Anfrage an sevDesk geht.
+Erlaubt ein Voucher-Konto laut Guidance nur `AUSFUHREN`, muss jede andere Rule lokal vor PDF-, Kontakt- oder Voucher-Write scheitern.
 
 ## Beträge und Positionen
 
-- Dezimalwerte werden ohne binäre Rundungsartefakte auf die WHMCS-Währungspräzision normalisiert.
-- Summe der Positionen, Steuer und Invoice-Gesamtsumme müssen innerhalb einer festgelegten Cent-Toleranz zusammenpassen.
-- Rabatt, Credit oder negative Position dürfen das Vorzeichen des Vouchers nicht unbemerkt ändern.
-- Bei `taxed = false` wird ein Steuersatz von 0 nur verwendet, wenn die gewählte Rule/Konto-Kombination diesen Fall fachlich und technisch erlaubt.
-- Eine leere oder reine Nullsummen-Invoice ist ein manueller Prüffall.
-- Positionsbeschreibungen werden als Beleginhalt übertragen, aber nicht in Diagnose- oder Joblogs dupliziert.
+- Dezimalwerte werden ohne binäre Rundungsartefakte normalisiert.
+- Beim Voucher- und Korrekturpfad gelten die jeweils dokumentierten Cent-Toleranzen für aus WHMCS abgeleitete Summen. Der normale Invoice-Pfad vergleicht Payload und gelesene Remote-Werte dagegen exakt in normalisierten Minor Units; eine Abweichung von einem Cent ist dort bereits ein Vertragsfehler.
+- Invoice- und Voucher-Payload müssen denselben gefrorenen Netto-/Bruttomodus abbilden.
+- Negative Positionen bleiben im normalen Export verboten.
+- Leere und Nullsummen-Rechnungen sind Prüffälle.
+- Beschreibungen sind Dokumentinhalt, aber kein Klassifikationssignal und kein Joblogfeld.
 
 ## Kontaktzuordnung
 
-Das konfigurierte WHMCS-Client-Custom-Field enthält die sevDesk-Kontakt-ID. Das Modul liest bestehende Werte weiter.
+Das konfigurierte WHMCS-Client-Custom-Field bleibt die Kontaktzuordnung. Enthält es eine Remote-ID, wird `GET /Contact/{id}` ausgeführt. Ein vorhandener Kontakt wird als explizite Legacy-/Betreiberzuordnung wiederverwendet, auch wenn dessen optionales `customerNumber` fehlt oder historisch anders vergeben wurde. Das Modul verändert weder diese ID noch vorhandene Kontaktstammdaten. Liefert die ID keinen Kontakt, wird der Vorgang als `configured_contact_missing` blockiert; Suche und Neuanlage sind dann ausdrücklich kein Fallback.
 
-- Vor Wiederverwendung wird die Remote-ID lesend geprüft.
-- Ein fehlender Kontakt wird einmal erstellt und die ID erst nach bestätigtem Erfolg in WHMCS gespeichert.
-- Ein ungültiger oder nicht mehr existierender Kontakt erzeugt einen sichtbaren Recovery-Fall; das Modul erzeugt nicht ungefragt einen zweiten Kontakt.
-- Nach einem Kontakt-Create mit unbekanntem Ausgang liest die Recovery nur noch. Sie verknüpft genau einen Treffer anhand der Kundennummer. Bei keinem oder mehreren Treffern bleibt das Item `ambiguous`; ein weiterer `POST /Contact` ist ausgeschlossen.
-- Eine Änderung des konfigurierten Custom Fields erfordert eine Warnung und eine explizite Migration.
+Vor dieser Auflösung muss die konfigurierte `custom_field_id` auf ein existierendes WHMCS-Feld mit `type=client` zeigen. Fehlt das Setting, wurde das Feld gelöscht oder hat es einen anderen Typ, scheitert der Worker lokal, bevor er einen sevDesk-Kontakt liest, sucht oder anlegt.
+
+Nur bei leerem Feld sucht das Modul über `GET /Contact?customerNumber=<WHMCS-Client-ID>`. Genau ein passender Treffer darf in das Custom-Field geschrieben werden; mehrere Treffer ergeben `contact_conflict`.
+
+Bleibt die Suche leer, ist eine Neuanlage nur mit der gespeicherten Bestätigung `customer_number_contact_creation_confirmed` erlaubt. Ohne sie endet der Vorgang als `contact_creation_not_confirmed`, noch vor dem Pre-Write-Checkpoint und `POST /Contact`.
+
+Nach einem möglicherweise ausgeführten Contact-Create sucht die Recovery ausschließlich nach derselben WHMCS-Kundennummer. Sie verknüpft nur genau einen passenden Treffer. Kein oder mehrere Treffer bleiben `ambiguous`; ein zweiter `POST /Contact` ist ausgeschlossen.
 
 ## HTTP-Fehlerklassen
 
-| Klasse | Bedeutung | Retry |
-| --- | --- | --- |
-| 400 | syntaktisch/fachlich ungültiger Request | nein |
-| 401 | Token fehlt oder ist ungültig | nein; weitere Claims stoppen |
-| 403 | fehlende Berechtigung | nein; weitere Claims stoppen |
-| 404 | Objekt/Endpunkt fehlt | nur nach fachlicher Einordnung |
-| 409 | Konflikt/Zustand unzulässig | normalerweise nein |
-| 422 | Validierung von Tax Rule, Konto oder Daten | nein |
-| 429 | Rate Limit | ja, begrenzt mit `Retry-After`/Backoff |
-| 5xx | sevDesk- oder Gatewayfehler | ja, begrenzt |
-| Connect-/Read-Timeout | Ausgang abhängig vom Zeitpunkt | begrenzt; nach POST zuerst Recovery prüfen |
+| Klasse | Verhalten |
+| --- | --- |
+| 400/409/422 | kein automatischer Retry; Payload, Rule oder Lifecycle korrigieren |
+| 401/403 | mandantenweiter Auth-Stopp bis erfolgreicher read-only Setupprüfung |
+| 404 | fachlich und dokumenttypabhängig einordnen |
+| 429 | begrenzter Backoff, sofern noch kein unklarer Write vorliegt |
+| 5xx/Timeout | vor Write begrenzt retrybar; während/nach Write zuerst Reconciliation |
+| ungültiges JSON/Pflichtfeld fehlt | sicherer Fehler bei Reads; nach Write potenziell `ambiguous` |
 
-Das Modul speichert HTTP-Status, internen Ergebniscode, die sevDesk-Exception-UUID, soweit vorhanden, und eine bereinigte Kurzmeldung. Rohpayload, Token und Kundendaten bleiben außerhalb des Logs.
+Logs speichern höchstens HTTP-Status, stabilen Code, Exception-UUID und bereinigte Kurzmeldung. Rohpayload, Token, E-Mail, Adressen und PDF bleiben außerhalb.
 
 ## Pflege der OpenAPI-Spezifikation
 
-`docs/sevdesk-openapi.yaml` wird nicht automatisch überschrieben. Bei einem geplanten Update:
-
-1. offizielle Quelle und Abrufdatum dokumentieren;
-2. API-Basis, Update-2.0-Hinweise, Voucher-, Contact- und ReceiptGuidance-Endpunkte vergleichen;
-3. Tax-Rule- und „unsupported use cases“-Tabellen prüfen;
-4. Contract-Tests aktualisieren;
-5. erst danach das Spezifikationsupdate separat committen.
+`docs/sevdesk-openapi.yaml` wird nicht nebenbei aktualisiert. Ein eigenes Spezifikationsupdate braucht Quelle, Abrufdatum, Breaking-Change-Prüfung und aktualisierte Contract-Tests. Der Invoice-Canary dokumentiert Abweichungen von der vorhandenen Referenz, ändert sie aber nicht automatisch.

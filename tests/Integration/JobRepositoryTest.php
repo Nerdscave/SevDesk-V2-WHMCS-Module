@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace WHMCS\Module\Addon\SevDesk\Tests\Integration;
 
 use WHMCS\Database\Capsule;
+use WHMCS\Module\Addon\SevDesk\Config;
 use WHMCS\Module\Addon\SevDesk\Database\Migrator;
 use WHMCS\Module\Addon\SevDesk\Jobs\JobOutcome;
 use WHMCS\Module\Addon\SevDesk\Repository\JobRepository;
@@ -40,6 +41,79 @@ final class JobRepositoryTest extends MariaDbTestCase
         self::assertSame('skipped', $overlap->status);
         self::assertNull($overlap->dedupe_key);
         self::assertSame('completed', $this->jobs->findJob($overlappingJob)?->status);
+    }
+
+    public function testPaidHybridTriggerMarksPendingCreatedOwnerWithoutReplacingIt(): void
+    {
+        $createdJob = $this->jobs->create('automatic_export', [[
+            'invoice_id' => 421,
+            'action' => 'export_document',
+            'dedupe_key' => 'export_voucher:421',
+            'candidate' => $this->hybridCandidate('InvoiceCreated'),
+        ]]);
+        $paidJob = $this->jobs->create('automatic_export', [[
+            'invoice_id' => 421,
+            'action' => 'export_document',
+            'dedupe_key' => 'export_voucher:421',
+            'candidate' => $this->hybridCandidate('InvoicePaid'),
+        ]]);
+
+        $owner = Capsule::table(Migrator::ITEMS_TABLE)->where('job_id', $createdJob)->first();
+        $loser = Capsule::table(Migrator::ITEMS_TABLE)->where('job_id', $paidJob)->first();
+        $candidate = json_decode((string) $owner->candidate_json, true, 32, JSON_THROW_ON_ERROR);
+
+        self::assertSame('pending', $owner->status);
+        self::assertSame('export_voucher:421', $owner->dedupe_key);
+        self::assertTrue($candidate['paidTriggerObserved']);
+        self::assertSame('skipped', $loser->status);
+        self::assertNull($loser->dedupe_key);
+
+        $claimed = $this->jobs->claimNext();
+        self::assertNotNull($claimed);
+        self::assertSame((int) $owner->id, (int) $claimed->id);
+    }
+
+    public function testPaidHybridTriggerRequeuesOwnerThatObservedUnpaidState(): void
+    {
+        $createdJob = $this->jobs->create('automatic_export', [[
+            'invoice_id' => 422,
+            'action' => 'export_document',
+            'dedupe_key' => 'export_voucher:422',
+            'candidate' => $this->hybridCandidate('InvoiceCreated'),
+        ]]);
+        $claimed = $this->jobs->claimNext();
+        self::assertNotNull($claimed);
+        self::assertTrue($this->jobs->checkpoint(
+            (int) $claimed->id,
+            (string) $claimed->lease_token,
+            'invoice_payment_pending',
+            ['invoicePaymentPending' => true],
+        ));
+
+        $this->jobs->create('automatic_export', [[
+            'invoice_id' => 422,
+            'action' => 'export_document',
+            'dedupe_key' => 'export_voucher:422',
+            'candidate' => $this->hybridCandidate('InvoicePaid'),
+        ]]);
+        $this->jobs->finish($claimed, JobOutcome::skipped('Invoice requires payment.'));
+
+        $waiting = Capsule::table(Migrator::ITEMS_TABLE)->where('job_id', $createdJob)->first();
+        $candidate = json_decode((string) $waiting->candidate_json, true, 32, JSON_THROW_ON_ERROR);
+        self::assertSame('retry_wait', $waiting->status);
+        self::assertSame('invoice_payment_pending', $waiting->checkpoint);
+        self::assertSame('export_voucher:422', $waiting->dedupe_key);
+        self::assertSame('invoice_payment_event_followup', $waiting->error_code);
+        self::assertFalse($candidate['paidTriggerObserved']);
+        self::assertNotEmpty($candidate['paidTriggerConsumedAt']);
+
+        Capsule::table(Migrator::ITEMS_TABLE)->where('id', $waiting->id)->update([
+            'available_at' => '2000-01-01 00:00:00',
+        ]);
+        $reclaimed = $this->jobs->claimNext();
+        self::assertNotNull($reclaimed);
+        self::assertSame((int) $claimed->id, (int) $reclaimed->id);
+        self::assertSame(2, (int) $reclaimed->attempts);
     }
 
     public function testAmbiguousOutcomeRetainsDedupeReservation(): void
@@ -210,6 +284,58 @@ final class JobRepositoryTest extends MariaDbTestCase
         self::assertSame($reference, $item->dedupe_key);
     }
 
+    public function testUnknownWhmcsEmailNeedsFreshDuplicateRiskConfirmationForEveryRetry(): void
+    {
+        $jobId = $this->jobs->create('automatic_export', [[
+            'invoice_id' => 435,
+            'action' => 'export_document',
+            'dedupe_key' => 'export_voucher:435',
+            'candidate' => [
+                'targetDocumentType' => 'invoice',
+                'targetDocumentAuthority' => 'sevdesk',
+                'targetDeliveryChannel' => 'whmcs_template',
+            ],
+        ]]);
+        $claimed = $this->jobs->claimNext();
+        self::assertNotNull($claimed);
+        self::assertTrue($this->jobs->checkpoint(
+            (int) $claimed->id,
+            (string) $claimed->lease_token,
+            'whmcs_email_write_requested',
+            ['remoteId' => '900435', 'emailRetryConfirmed' => false],
+        ));
+        $this->jobs->finish(
+            $claimed,
+            JobOutcome::ambiguous('Synthetic unknown provider hand-off.', 'whmcs_email_write_requested'),
+        );
+
+        self::assertFalse($this->jobs->reconcile((int) $claimed->id));
+        self::assertTrue($this->jobs->confirmEmailRetry((int) $claimed->id));
+        $pending = Capsule::table(Migrator::ITEMS_TABLE)->where('job_id', $jobId)->first();
+        $candidate = json_decode((string) $pending->candidate_json, true, 32, JSON_THROW_ON_ERROR);
+        self::assertSame('pending', $pending->status);
+        self::assertSame('export_voucher:435', $pending->dedupe_key);
+        self::assertTrue($candidate['emailRetryConfirmed']);
+
+        $retry = $this->jobs->claimNext();
+        self::assertNotNull($retry);
+        self::assertTrue($this->jobs->checkpoint(
+            (int) $retry->id,
+            (string) $retry->lease_token,
+            'whmcs_email_write_requested',
+            ['remoteId' => '900435', 'emailRetryConfirmed' => false],
+        ));
+        $this->jobs->finish(
+            $retry,
+            JobOutcome::ambiguous('Synthetic second unknown provider hand-off.', 'whmcs_email_write_requested'),
+        );
+
+        $again = Capsule::table(Migrator::ITEMS_TABLE)->where('job_id', $jobId)->first();
+        $candidate = json_decode((string) $again->candidate_json, true, 32, JSON_THROW_ON_ERROR);
+        self::assertFalse($candidate['emailRetryConfirmed']);
+        self::assertTrue($this->jobs->confirmEmailRetry((int) $retry->id));
+    }
+
     public function testLargeJobContinuesAfterFailureInTheMiddle(): void
     {
         $items = [];
@@ -259,6 +385,36 @@ final class JobRepositoryTest extends MariaDbTestCase
         self::assertSame('export_voucher:46', $next->dedupe_key);
     }
 
+    public function testManualReviewNoticeKeepsItsBusinessDedupeKey(): void
+    {
+        $dedupe = 'review:invoice_cancelled:460';
+        $firstJob = $this->jobs->create('accounting_review', [[
+            'invoice_id' => 460,
+            'action' => 'review_notice',
+            'dedupe_key' => $dedupe,
+        ]]);
+        $claim = $this->jobs->claimNext();
+        self::assertNotNull($claim);
+        $this->jobs->finish($claim, JobOutcome::permanentFailure(
+            'Synthetic manual review.',
+            errorCode: 'manual_review_required',
+        ));
+
+        $duplicateJob = $this->jobs->create('accounting_review', [[
+            'invoice_id' => 460,
+            'action' => 'review_notice',
+            'dedupe_key' => $dedupe,
+        ]]);
+
+        $first = Capsule::table(Migrator::ITEMS_TABLE)->where('job_id', $firstJob)->first();
+        $duplicate = Capsule::table(Migrator::ITEMS_TABLE)->where('job_id', $duplicateJob)->first();
+        self::assertSame('permanent_failed', $first->status);
+        self::assertSame($dedupe, $first->dedupe_key);
+        self::assertSame('skipped', $duplicate->status);
+        self::assertNull($duplicate->dedupe_key);
+        self::assertNull($this->jobs->claimNext());
+    }
+
     public function testExpiredSafeLeaseIsReclaimedWithNewToken(): void
     {
         $jobId = $this->jobs->create('single', [[
@@ -279,6 +435,28 @@ final class JobRepositoryTest extends MariaDbTestCase
         self::assertSame(2, (int) $reclaimed->attempts);
         self::assertSame('running', $reclaimed->status);
         self::assertSame('running', $this->jobs->findJob($jobId)?->status);
+    }
+
+    public function testTransactionalClaimGateCanStopBeforeHandlerOwnershipBegins(): void
+    {
+        $jobId = $this->jobs->create('runtime-gated', [[
+            'invoice_id' => 441,
+            'action' => 'must_not_start',
+        ]]);
+        $config = new Config();
+        $config->set('module_active', 'on');
+        $config->set(Config::RUNTIME_SIGNATURE_SETTING, Config::RUNTIME_SIGNATURE);
+        $config->set(Config::RUNTIME_REVIEW_SETTING, 'on');
+
+        $claim = $this->jobs->claimNext(
+            claimAllowed: static fn (): bool => $config->runtimeAllowsClaimWhileLocked(),
+        );
+
+        self::assertNull($claim);
+        $item = Capsule::table(Migrator::ITEMS_TABLE)->where('job_id', $jobId)->first();
+        self::assertSame('pending', $item->status);
+        self::assertSame(0, (int) $item->attempts);
+        self::assertNull($item->lease_token);
     }
 
     public function testExpiredRiskyLeaseBecomesAmbiguousAndIsNotClaimedAgain(): void
@@ -309,6 +487,57 @@ final class JobRepositoryTest extends MariaDbTestCase
         self::assertSame('completed_with_errors', $this->jobs->findJob($jobId)?->status);
     }
 
+    public function testExpiredVerifiedSideEffectLeaseIsSafelyReclaimed(): void
+    {
+        $jobId = $this->jobs->create('single', [[
+            'invoice_id' => 451,
+            'action' => 'export_document',
+        ]]);
+        $claim = $this->jobs->claimNext(300);
+        self::assertNotNull($claim);
+        self::assertTrue($this->jobs->checkpoint(
+            (int) $claim->id,
+            (string) $claim->lease_token,
+            'mapping_persisted',
+            ['remoteId' => '900451'],
+        ));
+        Capsule::table(Migrator::ITEMS_TABLE)->where('id', $claim->id)->update([
+            'leased_until' => '2000-01-01 00:00:00',
+        ]);
+
+        $reclaimed = $this->jobs->claimNext(300);
+
+        self::assertNotNull($reclaimed);
+        self::assertSame((int) $claim->id, (int) $reclaimed->id);
+        self::assertSame('mapping_persisted', $reclaimed->checkpoint);
+        self::assertSame('900451', $reclaimed->sevdesk_id);
+        self::assertSame(2, (int) $reclaimed->attempts);
+        self::assertSame('running', $this->jobs->findJob($jobId)?->status);
+    }
+
+    public function testManualReviewBookingFailuresCannotBypassRetryGuard(): void
+    {
+        foreach (['booking_not_applied', 'manual_review_required'] as $offset => $errorCode) {
+            $jobId = $this->jobs->create('payment_booking', [[
+                'invoice_id' => 460 + $offset,
+                'action' => 'book_payment',
+                'dedupe_key' => 'book_payment:guard-' . $offset,
+            ]]);
+            $claim = $this->jobs->claimNext();
+            self::assertNotNull($claim);
+            $this->jobs->finish($claim, JobOutcome::permanentFailure(
+                'Synthetic guarded failure.',
+                errorCode: $errorCode,
+            ));
+
+            self::assertFalse($this->jobs->retry((int) $claim->id));
+            self::assertSame(
+                'permanent_failed',
+                Capsule::table(Migrator::ITEMS_TABLE)->where('job_id', $jobId)->value('status'),
+            );
+        }
+    }
+
     public function testCancelledJobKeepsExpiredRiskyLeaseAmbiguous(): void
     {
         $jobId = $this->jobs->create('single', [[
@@ -335,6 +564,34 @@ final class JobRepositoryTest extends MariaDbTestCase
         self::assertNull($item->lease_token);
     }
 
+    public function testCancelledJobKeepsExpiredVerifiedSideEffectReserved(): void
+    {
+        $jobId = $this->jobs->create('single', [[
+            'invoice_id' => 471,
+            'action' => 'export_document',
+        ]]);
+        $claim = $this->jobs->claimNext();
+        self::assertNotNull($claim);
+        self::assertTrue($this->jobs->checkpoint(
+            (int) $claim->id,
+            (string) $claim->lease_token,
+            'invoice_created',
+            ['remoteId' => '900471'],
+        ));
+        $this->jobs->cancel($jobId);
+        Capsule::table(Migrator::ITEMS_TABLE)->where('id', $claim->id)->update([
+            'leased_until' => '2000-01-01 00:00:00',
+        ]);
+
+        self::assertNull($this->jobs->claimNext());
+
+        $item = Capsule::table(Migrator::ITEMS_TABLE)->where('id', $claim->id)->first();
+        self::assertSame('ambiguous', $item->status);
+        self::assertSame('export_voucher:471', $item->dedupe_key);
+        self::assertSame('900471', $item->sevdesk_id);
+        self::assertNull($item->lease_token);
+    }
+
     public function testCancelledJobReleasesExpiredSafeLeaseAsCancelled(): void
     {
         $jobId = $this->jobs->create('single', [[
@@ -354,6 +611,74 @@ final class JobRepositoryTest extends MariaDbTestCase
         self::assertSame('cancelled', $item->status);
         self::assertNull($item->dedupe_key);
         self::assertNull($item->lease_token);
+    }
+
+    public function testCancelledRunningItemDiscardsASafeRetryAndReleasesItsDedupeKey(): void
+    {
+        $jobId = $this->jobs->create('single', [[
+            'invoice_id' => 481,
+            'action' => 'export_document',
+        ]]);
+        $claim = $this->jobs->claimNext();
+        self::assertNotNull($claim);
+        self::assertTrue($this->jobs->checkpoint(
+            (int) $claim->id,
+            (string) $claim->lease_token,
+            'invoice_write_requested',
+        ));
+
+        $this->jobs->cancel($jobId);
+        $this->jobs->finish($claim, JobOutcome::retry(
+            'Synthetic definite rate-limit rejection.',
+            300,
+            429,
+            errorCode: 'api_rate_limited',
+            checkpoint: 'document_type_selected',
+        ));
+
+        $item = Capsule::table(Migrator::ITEMS_TABLE)->where('id', $claim->id)->first();
+        self::assertSame('cancelled', $item->status);
+        self::assertSame('document_type_selected', $item->checkpoint);
+        self::assertSame('cancelled_by_admin', $item->error_code);
+        self::assertNull($item->dedupe_key);
+        self::assertNull($item->lease_token);
+        self::assertSame('cancelled', $this->jobs->findJob($jobId)?->status);
+        self::assertNull($this->jobs->claimNext());
+    }
+
+    public function testCancelledRunningItemKeepsAVerifiedSideEffectAsAmbiguous(): void
+    {
+        $jobId = $this->jobs->create('single', [[
+            'invoice_id' => 482,
+            'action' => 'export_document',
+        ]]);
+        $claim = $this->jobs->claimNext();
+        self::assertNotNull($claim);
+        self::assertTrue($this->jobs->checkpoint(
+            (int) $claim->id,
+            (string) $claim->lease_token,
+            'mapping_persisted',
+            ['remoteId' => '900482'],
+        ));
+
+        $this->jobs->cancel($jobId);
+        $this->jobs->finish($claim, JobOutcome::retry(
+            'Synthetic read failure after a verified side effect.',
+            300,
+            503,
+            errorCode: 'invoice_read_failed',
+            checkpoint: 'mapping_persisted',
+        ));
+
+        $item = Capsule::table(Migrator::ITEMS_TABLE)->where('id', $claim->id)->first();
+        self::assertSame('ambiguous', $item->status);
+        self::assertSame('mapping_persisted', $item->checkpoint);
+        self::assertSame('invoice_read_failed', $item->error_code);
+        self::assertSame('export_voucher:482', $item->dedupe_key);
+        self::assertSame('900482', $item->sevdesk_id);
+        self::assertNull($item->lease_token);
+        self::assertSame('cancelled', $this->jobs->findJob($jobId)?->status);
+        self::assertNull($this->jobs->claimNext());
     }
 
     public function testCancelledJobsRejectRetryAndReconciliation(): void
@@ -417,6 +742,20 @@ final class JobRepositoryTest extends MariaDbTestCase
             20,
             Capsule::table(Migrator::ITEMS_TABLE)->where('status', 'running')->count(),
         );
+    }
+
+    /** @return array<string,mixed> */
+    private function hybridCandidate(string $trigger): array
+    {
+        return [
+            'trigger' => $trigger,
+            'requestedExportMode' => 'invoice_for_oss',
+            'requestedDocumentAuthority' => 'whmcs',
+            'requestedOssProfile' => 'rule19_digital_services_confirmed',
+            'requestedEuB2cMode' => 'blocked',
+            'requestedDeliveryChannel' => null,
+            'delivery_requested' => false,
+        ];
     }
 
     /**

@@ -36,7 +36,7 @@ final class SevdeskClientTest extends TestCase
 
         self::assertSame([['id' => 12]], $client->get('/Contact', ['customerNumber' => '42']));
         self::assertSame('raw-api-token', $history[0]['request']->getHeaderLine('Authorization'));
-        self::assertSame('WHMCS-sevdesk/2.0.0', $history[0]['request']->getHeaderLine('User-Agent'));
+        self::assertSame('WHMCS-sevdesk/2.1.0-rc.1', $history[0]['request']->getHeaderLine('User-Agent'));
         self::assertSame(5.0, $history[0]['options']['connect_timeout']);
         self::assertSame(30.0, $history[0]['options']['timeout']);
         self::assertStringContainsString('customerNumber=42', (string) $history[0]['request']->getUri());
@@ -69,6 +69,31 @@ final class SevdeskClientTest extends TestCase
         self::assertSame(['filename' => 'remote.pdf'], $response);
         self::assertSame(60.0, $history[0]['options']['timeout']);
         self::assertStringContainsString('unsafe-invoice.pdf', (string) $history[0]['request']->getBody());
+    }
+
+    public function testLargeJsonIsOptInForBase64EncodedInvoicePdfs(): void
+    {
+        $base64 = str_repeat('A', 2_100_000);
+        $body = json_encode(['objects' => ['base64Encoded' => $base64]], JSON_THROW_ON_ERROR);
+        $history = [];
+        $stack = HandlerStack::create(new MockHandler([
+            new Response(200, [], $body),
+            new Response(200, [], $body),
+        ]));
+        $stack->push(Middleware::history($history));
+        $client = new SevdeskClient(new Client(['handler' => $stack]), 'token');
+
+        try {
+            $client->get('/Invoice/99/getPdf');
+            self::fail('The ordinary JSON limit must remain at 2 MiB.');
+        } catch (ApiException $exception) {
+            self::assertSame('response_too_large', $exception->sevdeskCode);
+        }
+
+        $response = $client->getLargeJson('/Invoice/99/getPdf', ['download' => true]);
+        self::assertSame($base64, $response['base64Encoded']);
+        self::assertSame(60.0, $history[1]['options']['timeout']);
+        self::assertStringContainsString('download=1', (string) $history[1]['request']->getUri());
     }
 
     public function testApiExceptionOnlyKeepsWhitelistedErrorMetadata(): void

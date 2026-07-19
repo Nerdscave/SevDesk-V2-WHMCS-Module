@@ -10,10 +10,12 @@ use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Middleware;
 use GuzzleHttp\Psr7\Response;
 use PHPUnit\Framework\TestCase;
+use WHMCS\Module\Addon\SevDesk\Api\ApiException;
 use WHMCS\Module\Addon\SevDesk\Api\SevdeskClient;
 use WHMCS\Module\Addon\SevDesk\Domain\ContactData;
 use WHMCS\Module\Addon\SevDesk\Domain\ContactResolution;
 use WHMCS\Module\Addon\SevDesk\Service\ContactService;
+use WHMCS\Module\Addon\SevDesk\Service\ReferenceData;
 
 final class ContactServiceTest extends TestCase
 {
@@ -47,6 +49,7 @@ final class ContactServiceTest extends TestCase
 
                 return '2';
             },
+            allowCustomerNumberContactCreate: true,
         );
 
         $result = $service->resolve(
@@ -125,6 +128,47 @@ final class ContactServiceTest extends TestCase
         self::assertCount(1, $history);
     }
 
+    public function testConfiguredLegacyContactWithoutCustomerNumberRemainsAuthoritative(): void
+    {
+        $history = [];
+        $client = $this->client([
+            new Response(200, [], '{"objects":[{"id":55,"name":"Legacy GmbH"}]}'),
+        ], $history);
+        $service = new ContactService($client, static fn (): bool => true, static fn (): int => 1);
+
+        $result = $service->resolve($this->contact('55'));
+
+        self::assertTrue($result->isSuccess());
+        self::assertSame('configured', $result->value()->source);
+        self::assertCount(1, $history);
+    }
+
+    public function testConfiguredLegacyContactIdRemainsAuthoritativeEvenWithAnotherCustomerNumber(): void
+    {
+        $history = [];
+        $client = $this->client([
+            new Response(200, [], '{"objects":[{"id":55,"customerNumber":"8"}]}'),
+        ], $history);
+        $persistCalls = 0;
+        $service = new ContactService(
+            $client,
+            static function () use (&$persistCalls): bool {
+                ++$persistCalls;
+
+                return true;
+            },
+            static fn (): int => 1,
+        );
+
+        $result = $service->resolve($this->contact('55'));
+
+        self::assertTrue($result->isSuccess());
+        self::assertSame('configured', $result->value()->source);
+        self::assertSame(0, $persistCalls);
+        self::assertCount(1, $history);
+        self::assertSame('GET', $history[0]['request']->getMethod());
+    }
+
     public function testMissingConfiguredContactBecomesRecoveryCaseInsteadOfCreatingDuplicate(): void
     {
         $history = [];
@@ -145,7 +189,7 @@ final class ContactServiceTest extends TestCase
     {
         $history = [];
         $client = $this->client([
-            new Response(200, [], '{"objects":[{"id":1},{"id":2}]}'),
+            new Response(200, [], '{"objects":[{"id":1,"customerNumber":"7"},{"id":2,"customerNumber":"7"}]}'),
         ], $history);
         $service = new ContactService($client, static fn (): bool => true, static fn (): int => 1);
 
@@ -155,6 +199,93 @@ final class ContactServiceTest extends TestCase
         self::assertSame('contact_conflict', $result->errorCode());
         self::assertSame(2, $result->context()['matchCount']);
         self::assertCount(1, $history);
+    }
+
+    public function testSearchCandidateWithoutCustomerNumberIsVerifiedByIdBeforeLinking(): void
+    {
+        $history = [];
+        $client = $this->client([
+            new Response(200, [], '{"objects":[{"id":55,"name":"Legacy GmbH"}]}'),
+            new Response(200, [], '{"objects":[{"id":55,"customerNumber":"7"}]}'),
+        ], $history);
+        $stored = [];
+        $service = new ContactService(
+            $client,
+            static function (int $clientId, string $contactId) use (&$stored): void {
+                $stored[$clientId] = $contactId;
+            },
+            static fn (): int => 1,
+        );
+
+        $result = $service->resolve($this->contact());
+
+        self::assertTrue($result->isSuccess());
+        self::assertSame('customer_number', $result->value()->source);
+        self::assertSame([7 => '55'], $stored);
+        self::assertCount(2, $history);
+        self::assertSame('/api/v1/Contact', $history[0]['request']->getUri()->getPath());
+        self::assertSame('/api/v1/Contact/55', $history[1]['request']->getUri()->getPath());
+    }
+
+    public function testUnverifiableCustomerNumberCandidateBlocksBeforeCreate(): void
+    {
+        $history = [];
+        $client = $this->client([
+            new Response(200, [], '{"objects":[{"id":55,"name":"Legacy GmbH"}]}'),
+            new Response(200, [], '{"objects":[{"id":55,"name":"Legacy GmbH"}]}'),
+        ], $history);
+        $persistCalls = 0;
+        $service = new ContactService(
+            $client,
+            static function () use (&$persistCalls): void {
+                ++$persistCalls;
+            },
+            static fn (): int => 1,
+        );
+
+        $result = $service->resolve($this->contact());
+
+        self::assertTrue($result->isFailure());
+        self::assertSame('contact_search_unverifiable', $result->errorCode());
+        self::assertSame(1, $result->context()['unverifiableCount']);
+        self::assertSame(0, $persistCalls);
+        self::assertCount(2, $history);
+        self::assertSame('GET', $history[1]['request']->getMethod());
+    }
+
+    public function testUnconfirmedCustomerNumberPolicySearchesButDoesNotCreate(): void
+    {
+        $history = [];
+        $client = $this->client([
+            new Response(200, [], '{"objects":[]}'),
+        ], $history);
+        $persistCalls = 0;
+        $checkpoints = [];
+        $service = new ContactService(
+            $client,
+            static function () use (&$persistCalls): bool {
+                ++$persistCalls;
+
+                return true;
+            },
+            static fn (): int => 1,
+        );
+
+        $result = $service->resolve(
+            $this->contact(),
+            static function (string $name) use (&$checkpoints): bool {
+                $checkpoints[] = $name;
+
+                return true;
+            },
+        );
+
+        self::assertTrue($result->isFailure());
+        self::assertSame('contact_creation_not_confirmed', $result->errorCode());
+        self::assertSame(0, $persistCalls);
+        self::assertSame([], $checkpoints);
+        self::assertCount(1, $history);
+        self::assertSame('GET', $history[0]['request']->getMethod());
     }
 
     public function testAContactLinkFailureStopsBeforeSupplementaryWrites(): void
@@ -171,6 +302,7 @@ final class ContactServiceTest extends TestCase
             '3',
             '47',
             '2',
+            true,
         );
 
         $result = $service->resolve($this->contact());
@@ -181,13 +313,141 @@ final class ContactServiceTest extends TestCase
         self::assertCount(2, $history);
     }
 
+    public function testSupplementaryAuthenticationFailureIsNotReducedToAWarning(): void
+    {
+        $history = [];
+        $client = $this->client([
+            new Response(200, [], '{"objects":[]}'),
+            new Response(201, [], '{"objects":{"id":42}}'),
+            new Response(403, [], '{"error":{"code":"FORBIDDEN"}}'),
+        ], $history);
+        $service = new ContactService(
+            $client,
+            static fn (): bool => true,
+            static fn (): int => 1,
+            '3',
+            '47',
+            '2',
+            true,
+        );
+
+        try {
+            $service->resolve($this->contact());
+            self::fail('Authentication failures must reach the tenant-wide alarm boundary.');
+        } catch (ApiException $error) {
+            self::assertSame(403, $error->httpStatus);
+        }
+
+        self::assertCount(3, $history);
+        self::assertSame('/api/v1/ContactAddress', $history[2]['request']->getUri()->getPath());
+    }
+
+    public function testAddressCategoryLookupAuthenticationFailureIsNotReducedToAWarning(): void
+    {
+        $history = [];
+        $client = $this->client([
+            new Response(200, [], '{"objects":[]}'),
+            new Response(201, [], '{"objects":{"id":42}}'),
+            new Response(401, [], '{"error":{"code":"UNAUTHORIZED"}}'),
+        ], $history);
+        $referenceData = new ReferenceData($client);
+        $service = new ContactService(
+            $client,
+            static fn (): bool => true,
+            fn (string $countryCode): ?string => $referenceData->countryId($countryCode),
+            '3',
+            fn (): ?string => $referenceData->contactAddressCategoryId(),
+            fn (): ?string => $referenceData->emailKeyId(),
+            true,
+        );
+
+        try {
+            $service->resolve($this->contact());
+            self::fail('Address-category authentication failures must reach the tenant-wide alarm boundary.');
+        } catch (ApiException $error) {
+            self::assertSame(401, $error->httpStatus);
+        }
+
+        self::assertCount(3, $history);
+        self::assertSame('/api/v1/Category', $history[2]['request']->getUri()->getPath());
+    }
+
+    public function testCountryLookupAuthenticationFailureIsNotReducedToAWarning(): void
+    {
+        $history = [];
+        $client = $this->client([
+            new Response(200, [], '{"objects":[]}'),
+            new Response(201, [], '{"objects":{"id":42}}'),
+            new Response(200, [], '{"objects":[{"id":47,"name":"Invoice"}]}'),
+            new Response(403, [], '{"error":{"code":"FORBIDDEN"}}'),
+        ], $history);
+        $referenceData = new ReferenceData($client);
+        $service = new ContactService(
+            $client,
+            static fn (): bool => true,
+            fn (string $countryCode): ?string => $referenceData->countryId($countryCode),
+            '3',
+            fn (): ?string => $referenceData->contactAddressCategoryId(),
+            fn (): ?string => $referenceData->emailKeyId(),
+            true,
+        );
+
+        try {
+            $service->resolve($this->contact());
+            self::fail('Country authentication failures must reach the tenant-wide alarm boundary.');
+        } catch (ApiException $error) {
+            self::assertSame(403, $error->httpStatus);
+        }
+
+        self::assertCount(4, $history);
+        self::assertSame('/api/v1/StaticCountry', $history[3]['request']->getUri()->getPath());
+    }
+
+    public function testEmailKeyLookupAuthenticationFailureIsNotReducedToAWarning(): void
+    {
+        $history = [];
+        $client = $this->client([
+            new Response(200, [], '{"objects":[]}'),
+            new Response(201, [], '{"objects":{"id":42}}'),
+            new Response(200, [], '{"objects":[{"id":47,"name":"Invoice"}]}'),
+            new Response(200, [], '{"objects":[{"id":1,"code":"DE"}]}'),
+            new Response(201, [], '{"objects":{"id":91}}'),
+            new Response(401, [], '{"error":{"code":"UNAUTHORIZED"}}'),
+        ], $history);
+        $referenceData = new ReferenceData($client);
+        $service = new ContactService(
+            $client,
+            static fn (): bool => true,
+            fn (string $countryCode): ?string => $referenceData->countryId($countryCode),
+            '3',
+            fn (): ?string => $referenceData->contactAddressCategoryId(),
+            fn (): ?string => $referenceData->emailKeyId(),
+            true,
+        );
+
+        try {
+            $service->resolve($this->contact());
+            self::fail('Email-key authentication failures must reach the tenant-wide alarm boundary.');
+        } catch (ApiException $error) {
+            self::assertSame(401, $error->httpStatus);
+        }
+
+        self::assertCount(6, $history);
+        self::assertSame('/api/v1/CommunicationWayKey', $history[5]['request']->getUri()->getPath());
+    }
+
     public function testFailedPreWriteCheckpointPreventsContactPost(): void
     {
         $history = [];
         $client = $this->client([
             new Response(200, [], '{"objects":[]}'),
         ], $history);
-        $service = new ContactService($client, static fn (): bool => true, static fn (): int => 1);
+        $service = new ContactService(
+            $client,
+            static fn (): bool => true,
+            static fn (): int => 1,
+            allowCustomerNumberContactCreate: true,
+        );
 
         $result = $service->resolve(
             $this->contact(),

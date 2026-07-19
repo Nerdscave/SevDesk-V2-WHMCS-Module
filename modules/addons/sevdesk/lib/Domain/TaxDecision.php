@@ -39,6 +39,58 @@ final class TaxDecision
         );
     }
 
+    /**
+     * Select Invoice-only OSS rule 19 without weakening Voucher validation.
+     *
+     * Normal sevdesk Invoices do not accept the Voucher position field
+     * accountDatev and are not validated through Receipt Guidance. The document
+     * resolver still enforces the configured capability profile before a write.
+     *
+     * @param list<string> $allowedTaxRates Actual WHMCS line rates, normalised as decimal strings.
+     */
+    public static function allowInvoiceRule19(
+        string $profile,
+        string $message,
+        array $allowedTaxRates,
+    ): self {
+        return self::allowInvoice($profile, '19', $message, $allowedTaxRates);
+    }
+
+    /**
+     * Select an Invoice tax rule without inventing a Voucher accountDatev.
+     *
+     * @param list<string> $allowedTaxRates Rates admitted by the selected rule's contract.
+     */
+    public static function allowInvoice(
+        string $profile,
+        string $taxRuleId,
+        string $message,
+        array $allowedTaxRates,
+    ): self {
+        if (preg_match('/^[1-9]\d*$/', $taxRuleId) !== 1) {
+            throw new \InvalidArgumentException('Invoice tax rule must be a positive numeric ID.');
+        }
+
+        $normalisedRates = [];
+        foreach ($allowedTaxRates as $rate) {
+            if (!is_string($rate)) {
+                throw new \InvalidArgumentException('Invoice tax rates must be decimal strings.');
+            }
+            $normalisedRates[] = Decimal::assert($rate, 'Invoice tax rate');
+        }
+
+        return new self(
+            true,
+            'allowed',
+            $message,
+            $profile,
+            null,
+            $taxRuleId,
+            false,
+            array_values(array_unique($normalisedRates)),
+        );
+    }
+
     public static function block(string $code, string $message, string $profile = 'none'): self
     {
         return new self(false, $code, $message, $profile, null, null, false, []);

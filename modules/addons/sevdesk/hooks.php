@@ -4,9 +4,14 @@ declare(strict_types=1);
 
 use WHMCS\Database\Capsule;
 use WHMCS\Module\Addon\SevDesk\Application;
+use WHMCS\Module\Addon\SevDesk\Config;
 use WHMCS\Module\Addon\SevDesk\Database\Migrator;
 use WHMCS\Module\Addon\SevDesk\Support\AdminAssets;
 use WHMCS\Module\Addon\SevDesk\Support\AdminInvoiceControls;
+use WHMCS\Module\Addon\SevDesk\Support\ClientDocumentPresenter;
+use WHMCS\Module\Addon\SevDesk\Support\DocumentDeliveryContext;
+use WHMCS\Module\Addon\SevDesk\Support\EmailAttachmentContext;
+use WHMCS\Module\Addon\SevDesk\Support\InvoiceEmailGuardContext;
 use WHMCS\Module\Addon\SevDesk\Support\QuickExportGuard;
 
 if (!defined('WHMCS')) {
@@ -22,8 +27,22 @@ require_once __DIR__ . '/lib/Autoloader.php';
  */
 function sevdesk_automatic_enqueue_enabled(Application $application): bool
 {
-    return $application->config->bool('module_active')
-        && $application->config->bool('sync_enabled');
+    if (
+        !$application->config->bool('module_active')
+        || !$application->config->bool('sync_enabled')
+        || $application->config->bool(Config::RUNTIME_REVIEW_SETTING)
+        || (string) $application->config->get(Config::RUNTIME_SIGNATURE_SETTING, '')
+            !== Config::RUNTIME_SIGNATURE
+    ) {
+        return false;
+    }
+
+    $mode = (string) $application->config->get('export_mode', 'voucher_only');
+    if ($mode !== 'voucher_only' && !$application->config->bool('invoice_canary_confirmed')) {
+        return false;
+    }
+
+    return true;
 }
 
 /** @param array<string, mixed> $vars */
@@ -34,13 +53,41 @@ function sevdesk_enqueue_invoice(array $vars, string $event): void
             return;
         }
         $application = Application::instance();
-        if (!sevdesk_automatic_enqueue_enabled($application)) {
+        // InvoicePaidPreEmail and InvoicePaid share one Application instance.
+        // Refresh here so an authentication alarm raised by a parallel worker
+        // cannot be hidden by settings cached during the earlier mail hook.
+        $application->config->refresh();
+        $automaticEnqueueEnabled = sevdesk_automatic_enqueue_enabled($application);
+        $authAlarmAuthorityPending = !$automaticEnqueueEnabled
+            && $event === 'InvoicePaid'
+            && $application->config->bool('module_active')
+            && !$application->config->bool('sync_enabled')
+            && !$application->config->bool(Config::RUNTIME_REVIEW_SETTING)
+            && (string) $application->config->get(Config::RUNTIME_SIGNATURE_SETTING, '')
+                === Config::RUNTIME_SIGNATURE
+            && $application->config->bool('invoice_canary_confirmed')
+            && (string) $application->config->get('export_mode', 'voucher_only') === 'invoice_only'
+            && (string) $application->config->get('document_authority', 'whmcs') === 'sevdesk'
+            && trim((string) $application->config->get('health_alarm', ''))
+                === 'api_authentication_failed';
+        if (!$automaticEnqueueEnabled && !$authAlarmAuthorityPending) {
             return;
         }
-        if ($event === 'InvoicePaid' && !$application->config->bool('import_only_paid', true)) {
+        $mode = (string) $application->config->get('export_mode', 'voucher_only');
+        $documentAuthority = (string) $application->config->get('document_authority', 'whmcs');
+        $ossProfile = (string) $application->config->get('oss_profile', 'blocked');
+        $euB2cMode = (string) $application->config->get('eu_b2c_mode', 'blocked');
+        $deliveryChannel = $documentAuthority === 'sevdesk'
+            ? (string) $application->config->get('invoice_delivery_channel', 'sevdesk')
+            : null;
+        $onlyPaid = $application->config->bool('import_only_paid', true);
+        if ($mode === 'invoice_only' && $event !== 'InvoicePaid') {
             return;
         }
-        if ($event === 'InvoiceCreated' && $application->config->bool('import_only_paid', true)) {
+        if ($mode === 'voucher_only' && (($event === 'InvoicePaid') === !$onlyPaid)) {
+            return;
+        }
+        if ($mode === 'invoice_for_oss' && $onlyPaid && $event !== 'InvoicePaid') {
             return;
         }
 
@@ -51,12 +98,64 @@ function sevdesk_enqueue_invoice(array $vars, string $event): void
 
         $application->jobs->create('automatic_export', [[
             'invoice_id' => $invoiceId,
-            'action' => 'export_voucher',
+            'action' => 'export_document',
             'dedupe_key' => 'export_voucher:' . $invoiceId,
+            'candidate' => [
+                'trigger' => $event,
+                'requestedExportMode' => $mode,
+                'requestedDocumentAuthority' => $documentAuthority,
+                'requestedOssProfile' => $ossProfile,
+                'requestedEuB2cMode' => $euB2cMode,
+                'requestedDeliveryChannel' => $deliveryChannel,
+                'delivery_requested' => $event === 'InvoicePaid'
+                    && $documentAuthority === 'sevdesk',
+            ],
         ]], ['trigger' => $event]);
     } catch (Throwable $error) {
         if (function_exists('logActivity')) {
             logActivity('sevdesk could not enqueue ' . $event . ': ' . get_class($error));
+        }
+    }
+}
+
+/**
+ * Marks the first paid-invoice email for local suppression before WHMCS builds
+ * it. The later InvoicePaid hook still owns job creation and delivery intent.
+ *
+ * @param array<string, mixed> $vars
+ */
+function sevdesk_prepare_paid_invoice_email_guard(array $vars): void
+{
+    try {
+        $invoiceId = (int) ($vars['invoiceid'] ?? 0);
+        if ($invoiceId < 1) {
+            return;
+        }
+
+        $application = Application::instance();
+        if (
+            !$application->config->bool('module_active')
+            || (string) $application->config->get(Config::RUNTIME_SIGNATURE_SETTING, '')
+                !== Config::RUNTIME_SIGNATURE
+            || (string) $application->config->get('export_mode', 'voucher_only') !== 'invoice_only'
+            || (string) $application->config->get('document_authority', 'whmcs') !== 'sevdesk'
+        ) {
+            return;
+        }
+
+        // Request-local and idempotent: no job, remote call or PDF operation is
+        // allowed before WHMCS has completed the payment-email phase. The
+        // authority guard deliberately survives review, authentication and
+        // sync pauses; those states must not silently restore a WHMCS final PDF.
+        InvoiceEmailGuardContext::register($invoiceId);
+        if ($application->mappings->findByInvoice($invoiceId) !== null) {
+            // Existing mappings keep their frozen/legacy document authority;
+            // a later global mode change must not reclassify their email.
+            InvoiceEmailGuardContext::discard($invoiceId);
+        }
+    } catch (Throwable $error) {
+        if (function_exists('logActivity')) {
+            logActivity('sevdesk could not prepare the paid Invoice email guard: ' . get_class($error));
         }
     }
 }
@@ -126,6 +225,156 @@ function sevdesk_enqueue_transaction_review(array $vars): void
     }
 }
 
+/**
+ * Exposes only local, immutable presentation state to the installed theme
+ * adapter. No sevdesk request may occur while a customer invoice is rendered.
+ *
+ * @param array<string, mixed> $vars
+ * @return array<string, mixed>
+ */
+function sevdesk_client_invoice_variables(array $vars): array
+{
+    try {
+        if (!Capsule::schema()->hasTable(Migrator::MAPPING_TABLE)) {
+            return [];
+        }
+
+        $application = Application::instance();
+        if (
+            !$application->config->bool('module_active')
+            || (string) $application->config->get(Config::RUNTIME_SIGNATURE_SETTING, '')
+                !== Config::RUNTIME_SIGNATURE
+        ) {
+            return [];
+        }
+
+        $invoiceId = (int) ($vars['invoiceid'] ?? $vars['invoiceId'] ?? $_GET['id'] ?? 0);
+        if ($invoiceId < 1) {
+            return [];
+        }
+
+        $invoice = Capsule::table('tblinvoices')
+            ->where('id', $invoiceId)
+            ->select(['id', 'invoicenum', 'status'])
+            ->first();
+        if ($invoice === null) {
+            return [];
+        }
+
+        $mapping = $application->mappings->findByInvoice($invoiceId);
+        $documentContext = $application->jobs->latestDocumentContextForInvoice(
+            $invoiceId,
+            $mapping !== null,
+        );
+        if (!DocumentDeliveryContext::usesSevdeskInvoiceAuthority($documentContext, $mapping)) {
+            return [];
+        }
+
+        $invoiceNumber = trim((string) ($invoice->invoicenum ?? ''));
+        if ($invoiceNumber === '') {
+            $invoiceNumber = (string) $invoiceId;
+        }
+        $webRoot = rtrim((string) ($vars['WEB_ROOT'] ?? ''), '/');
+        $downloadUrl = ($webRoot === '' ? '' : $webRoot . '/')
+            . 'index.php?m=sevdesk&a=download&id=' . rawurlencode((string) $invoiceId);
+
+        return [
+            'sevdeskDocument' => ClientDocumentPresenter::present(
+                (string) ($invoice->status ?? ''),
+                $invoiceNumber,
+                $mapping,
+                $documentContext['itemStatus'] ?? null,
+                $downloadUrl,
+            ),
+        ];
+    } catch (Throwable $error) {
+        if (function_exists('logActivity')) {
+            logActivity('sevdesk client invoice adapter failed safely: ' . get_class($error));
+        }
+
+        return [];
+    }
+}
+
+/**
+ * Adds the one-request PDF attachment prepared by the worker and suppresses
+ * every other Invoice template for the same sevdesk-owned document. This hook
+ * only reads WHMCS state and the in-memory attachment context.
+ *
+ * @param array<string, mixed> $vars
+ * @return array<string, mixed>
+ */
+function sevdesk_email_pre_send(array $vars): array
+{
+    $guardApplies = false;
+    try {
+        $invoiceId = (int) ($vars['relid'] ?? 0);
+        $template = trim((string) ($vars['messagename'] ?? ''));
+        if ($invoiceId < 1 || $template === '') {
+            return [];
+        }
+        $hasActiveAttachmentContext = EmailAttachmentContext::hasActiveContext($invoiceId, $template);
+        $hasPaidInvoiceGuard = InvoiceEmailGuardContext::appliesTo($invoiceId);
+        if ($hasActiveAttachmentContext || $hasPaidInvoiceGuard) {
+            $guardApplies = true;
+        }
+
+        $application = Application::instance();
+        if (
+            !$application->config->bool('module_active')
+            || (string) $application->config->get(Config::RUNTIME_SIGNATURE_SETTING, '')
+                !== Config::RUNTIME_SIGNATURE
+        ) {
+            return $guardApplies ? ['abortsend' => true] : [];
+        }
+
+        $isInvoiceTemplate = Capsule::table('tblemailtemplates')
+            ->whereRaw('LOWER(type) = ?', ['invoice'])
+            ->where('name', $template)
+            ->exists();
+        if (!$isInvoiceTemplate) {
+            return $hasActiveAttachmentContext ? ['abortsend' => true] : [];
+        }
+        $mapping = $application->mappings->findByInvoice($invoiceId);
+        $documentContext = $application->jobs->latestDocumentContextForInvoice(
+            $invoiceId,
+            $mapping !== null,
+        );
+        if (!DocumentDeliveryContext::usesSevdeskInvoiceAuthority($documentContext, $mapping)) {
+            return $guardApplies ? ['abortsend' => true] : [];
+        }
+
+        $invoiceStatus = (string) Capsule::table('tblinvoices')
+            ->where('id', $invoiceId)
+            ->value('status');
+        if ($mapping === null && strcasecmp(trim($invoiceStatus), 'Paid') !== 0) {
+            return $guardApplies ? ['abortsend' => true] : [];
+        }
+        $guardApplies = true;
+
+        $mergeFields = is_array($vars['mergefields'] ?? null) ? $vars['mergefields'] : [];
+        $attachmentToken = (string) ($mergeFields['sevdesk_attachment_token'] ?? '');
+
+        if (
+            $application->whmcs->isActiveCustomInvoiceTemplate($template)
+            && $hasActiveAttachmentContext
+        ) {
+            $attachment = EmailAttachmentContext::consume($attachmentToken, $invoiceId, $template);
+            if ($attachment !== null) {
+                return ['attachments' => [$attachment]];
+            }
+        }
+
+        return ['abortsend' => true];
+    } catch (Throwable $error) {
+        if (function_exists('logActivity')) {
+            logActivity('sevdesk Invoice email guard failed safely: ' . get_class($error));
+        }
+
+        return $guardApplies ? ['abortsend' => true] : [];
+    }
+}
+
 add_hook('AdminAreaHeadOutput', 1, static function (): string {
     if (($_GET['module'] ?? null) !== 'sevdesk') {
         return '';
@@ -144,10 +393,13 @@ add_hook('AdminAreaFooterOutput', 1, static function (): string {
 });
 
 add_hook('InvoiceCreated', 1, static fn (array $vars) => sevdesk_enqueue_invoice($vars, 'InvoiceCreated'));
+add_hook('InvoicePaidPreEmail', 1, static fn (array $vars) => sevdesk_prepare_paid_invoice_email_guard($vars));
 add_hook('InvoicePaid', 1, static fn (array $vars) => sevdesk_enqueue_invoice($vars, 'InvoicePaid'));
 add_hook('InvoiceRefunded', 1, static fn (array $vars) => sevdesk_enqueue_review($vars, 'invoice_refunded'));
 add_hook('InvoiceCancelled', 1, static fn (array $vars) => sevdesk_enqueue_review($vars, 'invoice_cancelled'));
 add_hook('AddTransaction', 1, static fn (array $vars) => sevdesk_enqueue_transaction_review($vars));
+add_hook('ClientAreaPageViewInvoice', 1, static fn (array $vars): array => sevdesk_client_invoice_variables($vars));
+add_hook('EmailPreSend', 1, static fn (array $vars): array => sevdesk_email_pre_send($vars));
 
 add_hook('AfterCronJob', 1, static function (): void {
     try {
@@ -155,7 +407,12 @@ add_hook('AfterCronJob', 1, static function (): void {
             return;
         }
         $application = Application::instance();
-        if (!$application->config->bool('module_active')) {
+        if (
+            !$application->config->bool('module_active')
+            || $application->config->bool(Config::RUNTIME_REVIEW_SETTING)
+            || (string) $application->config->get(Config::RUNTIME_SIGNATURE_SETTING, '')
+                !== Config::RUNTIME_SIGNATURE
+        ) {
             return;
         }
         $application->config->set('runner_last_seen', (new DateTimeImmutable())->format(DATE_ATOM));
@@ -174,7 +431,12 @@ add_hook('AdminInvoicesControlsOutput', 1, static function (array $vars): string
             return '';
         }
         $application = Application::instance();
-        if (!$application->config->bool('module_active')) {
+        if (
+            !$application->config->bool('module_active')
+            || $application->config->bool(Config::RUNTIME_REVIEW_SETTING)
+            || (string) $application->config->get(Config::RUNTIME_SIGNATURE_SETTING, '')
+                !== Config::RUNTIME_SIGNATURE
+        ) {
             return '';
         }
         $mapping = $application->mappings->findByInvoice($invoiceId);

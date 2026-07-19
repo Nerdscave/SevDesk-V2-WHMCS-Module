@@ -20,6 +20,7 @@ use WHMCS\Module\Addon\SevDesk\Domain\Decimal;
  *
  * @phpstan-type BookingConfirmation array{
  *     reference: string,
+ *     documentType: 'voucher'|'invoice',
  *     whmcsTransactionId: string,
  *     voucherId: string,
  *     transactionId: string,
@@ -41,6 +42,8 @@ use WHMCS\Module\Addon\SevDesk\Domain\Decimal;
  */
 final class BookingService
 {
+    private const TRANSACTION_SEARCH_LIMIT = 1000;
+
     public function __construct(private readonly SevdeskClient $client)
     {
     }
@@ -48,6 +51,7 @@ final class BookingService
     /**
      * @param array{
      *     kind: string,
+     *     documentType: string,
      *     whmcsTransactionId: string,
      *     voucherId: int|string,
      *     amount: int|float|string,
@@ -58,6 +62,11 @@ final class BookingService
      */
     public function preview(array $request): array
     {
+        $documentTypeFailure = self::documentTypeFailure($request['documentType'] ?? null);
+        if ($documentTypeFailure !== null) {
+            return $documentTypeFailure;
+        }
+
         try {
             $payment = $this->normalisePayment($request);
         } catch (\InvalidArgumentException $exception) {
@@ -73,17 +82,28 @@ final class BookingService
         }
 
         try {
-            $voucher = $this->readOne('/Voucher/' . rawurlencode($payment['voucherId']), 'voucher');
-            $voucherState = $this->voucherState($voucher, $payment);
-            if (!$voucherState['allowed']) {
-                return self::result('blocked', $voucherState['code'], $voucherState['message']);
+            $document = $this->readOne(
+                self::documentPath($payment['documentType'], $payment['voucherId']),
+                $payment['documentType'],
+            );
+            $documentState = $this->documentState($document, $payment);
+            if (!$documentState['allowed']) {
+                return self::result('blocked', $documentState['code'], $documentState['message']);
             }
 
             $accountCache = [];
-            $candidates = $this->matchingTransactions($payment, $accountCache);
+            $search = $this->matchingTransactions($payment, $accountCache);
         } catch (ApiException $exception) {
             return $this->apiFailure($exception, 'booking_preview_failed');
         }
+        if ($search['truncated']) {
+            return self::result(
+                'blocked',
+                'payment_candidate_search_truncated',
+                'The sevdesk transaction search reached its safe page limit; uniqueness cannot be proven.',
+            );
+        }
+        $candidates = $search['matches'];
 
         if (count($candidates) === 0) {
             return self::result(
@@ -103,6 +123,7 @@ final class BookingService
 
         $candidate = $candidates[0];
         $confirmation = [
+            'documentType' => $payment['documentType'],
             'whmcsTransactionId' => $payment['whmcsTransactionId'],
             'voucherId' => $payment['voucherId'],
             'transactionId' => $candidate['transactionId'],
@@ -111,8 +132,8 @@ final class BookingService
             'amountMinorUnits' => $payment['amountMinorUnits'],
             'currency' => $payment['currency'],
             'bookingDate' => $payment['bookingDate'],
-            'bookingType' => $voucherState['bookingType'],
-            'voucherPaidMinorUnits' => $voucherState['paidMinorUnits'],
+            'bookingType' => $documentState['bookingType'],
+            'voucherPaidMinorUnits' => $documentState['paidMinorUnits'],
         ];
         $confirmation['reference'] = self::confirmationReference($confirmation);
 
@@ -129,6 +150,7 @@ final class BookingService
      *
      * @param array{
      *     reference: string,
+     *     documentType: string,
      *     whmcsTransactionId: string,
      *     voucherId: int|string,
      *     transactionId: int|string,
@@ -156,13 +178,20 @@ final class BookingService
             );
         }
 
+        $documentTypeFailure = self::documentTypeFailure($confirmation['documentType'] ?? null);
+        if ($documentTypeFailure !== null) {
+            return $documentTypeFailure;
+        }
+
         try {
             $booking = $this->normaliseConfirmation($confirmation);
         } catch (\InvalidArgumentException $exception) {
             return self::result('blocked', 'invalid_confirmation', $exception->getMessage());
         }
 
-        $expectedReference = self::confirmationReference($booking);
+        $expectedReference = self::usesLegacyVoucherReference($confirmation)
+            ? self::legacyVoucherConfirmationReference($booking)
+            : self::confirmationReference($booking);
         if (!hash_equals($expectedReference, $booking['reference'])) {
             return self::result(
                 'blocked',
@@ -173,6 +202,7 @@ final class BookingService
 
         $payment = [
             'kind' => 'payment',
+            'documentType' => $booking['documentType'],
             'whmcsTransactionId' => $booking['whmcsTransactionId'],
             'voucherId' => $booking['voucherId'],
             'amount' => $booking['amount'],
@@ -184,20 +214,23 @@ final class BookingService
         try {
             // These reads are deliberately performed immediately before the
             // write. A stale preview is not authority to book changed objects.
-            $voucher = $this->readOne('/Voucher/' . rawurlencode($booking['voucherId']), 'voucher');
-            $voucherState = $this->voucherState($voucher, $payment);
-            if (!$voucherState['allowed'] || $voucherState['bookingType'] !== $booking['bookingType']) {
+            $document = $this->readOne(
+                self::documentPath($booking['documentType'], $booking['voucherId']),
+                $booking['documentType'],
+            );
+            $documentState = $this->documentState($document, $payment);
+            if (!$documentState['allowed'] || $documentState['bookingType'] !== $booking['bookingType']) {
                 return self::result(
                     'blocked',
-                    'voucher_changed_since_preview',
-                    'The voucher balance or state changed. Generate a new preview.',
+                    $booking['documentType'] . '_changed_since_preview',
+                    'The sevdesk document balance or state changed. Generate a new preview.',
                 );
             }
-            if ($voucherState['paidMinorUnits'] !== $booking['voucherPaidMinorUnits']) {
+            if ($documentState['paidMinorUnits'] !== $booking['voucherPaidMinorUnits']) {
                 return self::result(
                     'blocked',
-                    'voucher_payment_baseline_changed',
-                    'The voucher paid amount changed. Generate a new preview.',
+                    $booking['documentType'] . '_payment_baseline_changed',
+                    'The sevdesk document paid amount changed. Generate a new preview.',
                 );
             }
 
@@ -242,7 +275,15 @@ final class BookingService
 
             // Uniqueness is rechecked as well. A second matching transaction
             // imported after preview must stop the booking.
-            $candidates = $this->matchingTransactions($payment, $accountCache);
+            $search = $this->matchingTransactions($payment, $accountCache);
+            if ($search['truncated']) {
+                return self::result(
+                    'blocked',
+                    'payment_candidate_search_truncated',
+                    'The sevdesk transaction search reached its safe page limit; uniqueness cannot be proven.',
+                );
+            }
+            $candidates = $search['matches'];
             if (
                 count($candidates) !== 1
                 || $candidates[0]['transactionId'] !== $booking['transactionId']
@@ -263,8 +304,9 @@ final class BookingService
         $checkpoint = $checkpoint === null ? null : Closure::fromCallable($checkpoint);
         if (
             !$this->emitCheckpoint($checkpoint, 'booking_write_requested', [
-            'voucherId' => $booking['voucherId'],
-            'transactionId' => $booking['transactionId'],
+                'documentType' => $booking['documentType'],
+                'voucherId' => $booking['voucherId'],
+                'transactionId' => $booking['transactionId'],
             ])
         ) {
             return self::result(
@@ -276,7 +318,7 @@ final class BookingService
 
         try {
             $response = $this->client->put(
-                '/Voucher/' . rawurlencode($booking['voucherId']) . '/bookAmount',
+                self::documentPath($booking['documentType'], $booking['voucherId']) . '/bookAmount',
                 [
                     'amount' => Decimal::toFloat($booking['amount']),
                     'date' => self::apiDate($booking['bookingDate']),
@@ -298,7 +340,7 @@ final class BookingService
             return $this->apiFailure($exception, 'booking_write_failed');
         }
 
-        if (!self::validBookingResponse($response, $booking['voucherId'])) {
+        if (!self::validBookingResponse($response, $booking['documentType'], $booking['voucherId'])) {
             return self::result(
                 'ambiguous',
                 'booking_response_ambiguous',
@@ -309,8 +351,9 @@ final class BookingService
 
         if (
             !$this->emitCheckpoint($checkpoint, 'booking_completed', [
-            'voucherId' => $booking['voucherId'],
-            'transactionId' => $booking['transactionId'],
+                'documentType' => $booking['documentType'],
+                'voucherId' => $booking['voucherId'],
+                'transactionId' => $booking['transactionId'],
             ])
         ) {
             return self::result(
@@ -325,8 +368,9 @@ final class BookingService
         return self::result(
             'succeeded',
             'booking_completed',
-            'The sevdesk voucher was booked against the unique bank transaction.',
+            'The sevdesk document was booked against the unique bank transaction.',
             [
+                'documentType' => $booking['documentType'],
                 'voucherId' => $booking['voucherId'],
                 'transactionId' => $booking['transactionId'],
                 'bookingType' => $booking['bookingType'],
@@ -342,18 +386,29 @@ final class BookingService
      */
     public function reconcile(array $confirmation): array
     {
+        $documentTypeFailure = self::documentTypeFailure($confirmation['documentType'] ?? null);
+        if ($documentTypeFailure !== null) {
+            return $documentTypeFailure;
+        }
+
         try {
             $booking = $this->normaliseConfirmation($confirmation);
         } catch (\InvalidArgumentException $exception) {
             return self::result('blocked', 'invalid_confirmation', $exception->getMessage());
         }
 
-        if (!hash_equals(self::confirmationReference($booking), $booking['reference'])) {
+        $expectedReference = self::usesLegacyVoucherReference($confirmation)
+            ? self::legacyVoucherConfirmationReference($booking)
+            : self::confirmationReference($booking);
+        if (!hash_equals($expectedReference, $booking['reference'])) {
             return self::result('blocked', 'confirmation_changed', 'The stored booking confirmation changed.');
         }
 
         try {
-            $voucher = $this->readOne('/Voucher/' . rawurlencode($booking['voucherId']), 'voucher');
+            $document = $this->readOne(
+                self::documentPath($booking['documentType'], $booking['voucherId']),
+                $booking['documentType'],
+            );
             $transaction = $this->readOne(
                 '/CheckAccountTransaction/' . rawurlencode($booking['transactionId']),
                 'checkAccountTransaction',
@@ -363,23 +418,23 @@ final class BookingService
         }
 
         if (
-            self::numericId($voucher['id'] ?? null) !== $booking['voucherId']
-            || strtoupper((string) ($voucher['currency'] ?? '')) !== $booking['currency']
+            self::numericId($document['id'] ?? null) !== $booking['voucherId']
+            || strtoupper((string) ($document['currency'] ?? '')) !== $booking['currency']
             || !$this->transactionIdentityMatches($transaction, $booking)
         ) {
             return self::result(
                 'ambiguous',
                 'booking_reconciliation_identity_mismatch',
-                'Voucher or transaction identity changed; the booking must be checked manually.',
+                'Document or transaction identity changed; the booking must be checked manually.',
             );
         }
 
-        $paid = $voucher['paidAmount'] ?? null;
+        $paid = $document['paidAmount'] ?? null;
         if (!is_int($paid) && !is_float($paid) && !is_string($paid)) {
             return self::result(
                 'ambiguous',
                 'booking_reconciliation_amount_missing',
-                'sevdesk returned no verifiable paid amount for the voucher.',
+                'sevdesk returned no verifiable paid amount for the document.',
             );
         }
         try {
@@ -388,7 +443,7 @@ final class BookingService
             return self::result(
                 'ambiguous',
                 'booking_reconciliation_amount_invalid',
-                'sevdesk returned an invalid paid amount for the voucher.',
+                'sevdesk returned an invalid paid amount for the document.',
             );
         }
 
@@ -396,32 +451,89 @@ final class BookingService
         $expectedPaid = $booking['voucherPaidMinorUnits'] + $booking['amountMinorUnits'];
         if (in_array($transactionStatus, [200, 400], true) && $paidMinorUnits === $expectedPaid) {
             return self::result(
-                'succeeded',
-                'booking_reconciled',
-                'The linked transaction and voucher paid amount prove that the booking succeeded.',
-                ['voucherId' => $booking['voucherId'], 'transactionId' => $booking['transactionId']],
+                'ambiguous',
+                'booking_reconciliation_link_unprovable',
+                'The document amount and transaction status are compatible with the booking, but sevdesk '
+                    . 'does not expose their concrete relation through a read endpoint.',
+                [
+                    'documentType' => $booking['documentType'],
+                    'voucherId' => $booking['voucherId'],
+                    'transactionId' => $booking['transactionId'],
+                    'transactionStatus' => $transactionStatus,
+                    'paidMinorUnits' => $paidMinorUnits,
+                ],
             );
         }
         if ($transactionStatus === 100 && $paidMinorUnits === $booking['voucherPaidMinorUnits']) {
             return self::result(
                 'blocked',
                 'booking_not_applied',
-                'The transaction is still unlinked and the voucher paid amount is unchanged. Create a new preview before retrying.',
+                'The transaction is still unlinked and the document paid amount is unchanged. '
+                    . 'Create a new preview before retrying.',
             );
         }
 
         return self::result(
             'ambiguous',
             'booking_reconciliation_inconclusive',
-            'The current voucher and transaction state does not prove one unique outcome.',
+            'The current document and transaction state does not prove one unique outcome.',
             ['transactionStatus' => $transactionStatus, 'paidMinorUnits' => $paidMinorUnits],
         );
+    }
+
+    /**
+     * Upgrade exactly the Voucher-only booking-v1 snapshot written by release
+     * 2.0.0. The old signed reference proves the historical schema; a merely
+     * missing documentType is never enough to infer Voucher.
+     *
+     * @param array<string,mixed> $confirmation
+     * @return array<string,mixed>|null
+     */
+    public function upgradeLegacyVoucherConfirmation(array $confirmation): ?array
+    {
+        if (
+            (isset($confirmation['documentType']) && trim((string) $confirmation['documentType']) !== '')
+            || isset($confirmation['bookingSchema'])
+        ) {
+            return null;
+        }
+
+        $upgraded = $confirmation;
+        $upgraded['documentType'] = 'voucher';
+        try {
+            $booking = $this->normaliseConfirmation($upgraded);
+        } catch (\InvalidArgumentException) {
+            return null;
+        }
+        if (!hash_equals(self::legacyVoucherConfirmationReference($booking), $booking['reference'])) {
+            return null;
+        }
+
+        $upgraded['bookingSchema'] = 'booking-v1';
+
+        return $upgraded;
+    }
+
+    /** @param array<string,mixed> $confirmation */
+    public function confirmationIsAuthentic(array $confirmation): bool
+    {
+        try {
+            $booking = $this->normaliseConfirmation($confirmation);
+        } catch (\InvalidArgumentException) {
+            return false;
+        }
+        $expected = self::usesLegacyVoucherReference($confirmation)
+            ? self::legacyVoucherConfirmationReference($booking)
+            : self::confirmationReference($booking);
+
+        return hash_equals($expected, $booking['reference']);
     }
 
     /**
      * @param array<string, mixed> $request
      * @return array{
      *     kind: string,
+     *     documentType: 'voucher'|'invoice',
      *     whmcsTransactionId: string,
      *     voucherId: string,
      *     amount: string,
@@ -432,6 +544,11 @@ final class BookingService
      */
     private function normalisePayment(array $request): array
     {
+        $documentType = strtolower(trim((string) ($request['documentType'] ?? '')));
+        if (!in_array($documentType, ['voucher', 'invoice'], true)) {
+            throw new \InvalidArgumentException('A confirmed sevdesk document type is required.');
+        }
+
         $kind = strtolower(trim((string) ($request['kind'] ?? '')));
         if (!in_array($kind, ['payment', 'refund', 'chargeback'], true)) {
             throw new \InvalidArgumentException('The transaction kind must be payment, refund or chargeback.');
@@ -448,7 +565,7 @@ final class BookingService
 
         $voucherId = self::numericId($request['voucherId'] ?? null);
         if ($voucherId === null) {
-            throw new \InvalidArgumentException('A numeric sevdesk voucher ID is required.');
+            throw new \InvalidArgumentException('A numeric sevdesk document ID is required.');
         }
 
         $amountValue = $request['amount'] ?? null;
@@ -470,6 +587,7 @@ final class BookingService
 
         return [
             'kind' => $kind,
+            'documentType' => $documentType,
             'whmcsTransactionId' => $whmcsTransactionId,
             'voucherId' => $voucherId,
             'amount' => $amount,
@@ -483,6 +601,7 @@ final class BookingService
      * @param array<string, mixed> $confirmation
      * @return array{
      *     reference: string,
+     *     documentType: 'voucher'|'invoice',
      *     whmcsTransactionId: string,
      *     voucherId: string,
      *     transactionId: string,
@@ -499,6 +618,7 @@ final class BookingService
     {
         $payment = $this->normalisePayment([
             'kind' => 'payment',
+            'documentType' => $confirmation['documentType'] ?? null,
             'whmcsTransactionId' => $confirmation['whmcsTransactionId'] ?? null,
             'voucherId' => $confirmation['voucherId'] ?? null,
             'amount' => $confirmation['amount'] ?? null,
@@ -523,11 +643,12 @@ final class BookingService
         }
         $voucherPaidMinorUnits = $confirmation['voucherPaidMinorUnits'] ?? null;
         if (!is_int($voucherPaidMinorUnits) || $voucherPaidMinorUnits < 0) {
-            throw new \InvalidArgumentException('The preview contains no valid voucher payment baseline.');
+            throw new \InvalidArgumentException('The preview contains no valid document payment baseline.');
         }
 
         return [
             'reference' => $reference,
+            'documentType' => $payment['documentType'],
             'whmcsTransactionId' => $payment['whmcsTransactionId'],
             'voucherId' => $payment['voucherId'],
             'transactionId' => $transactionId,
@@ -542,50 +663,67 @@ final class BookingService
     }
 
     /**
-     * @param array<string, mixed> $voucher
-     * @param array{voucherId: string, amountMinorUnits: int, currency: string} $payment
+     * @param array<string, mixed> $document
+     * @param array{
+     *     documentType: 'voucher'|'invoice',
+     *     voucherId: string,
+     *     amountMinorUnits: int,
+     *     currency: string
+     * } $payment
      * @return array{allowed: bool, code: string, message: string, bookingType: 'FULL_PAYMENT'|'N',paidMinorUnits:int}
      */
-    private function voucherState(array $voucher, array $payment): array
+    private function documentState(array $document, array $payment): array
     {
-        if (self::numericId($voucher['id'] ?? null) !== $payment['voucherId']) {
+        $type = $payment['documentType'];
+        if (self::numericId($document['id'] ?? null) !== $payment['voucherId']) {
             return [
                 'allowed' => false,
-                'code' => 'voucher_id_mismatch',
-                'message' => 'sevdesk returned a different voucher than requested.',
+                'code' => $type . '_id_mismatch',
+                'message' => 'sevdesk returned a different document than requested.',
                 'bookingType' => 'N',
                 'paidMinorUnits' => 0,
             ];
         }
-        if (!in_array((string) ($voucher['status'] ?? ''), ['100', '750'], true)) {
+        $bookableStatuses = $type === 'invoice' ? ['200', '750'] : ['100', '750'];
+        $status = (string) ($document['status'] ?? '');
+        if ($status === '1000') {
             return [
                 'allowed' => false,
-                'code' => 'voucher_not_open',
-                'message' => 'Only an open or partially paid voucher can be booked.',
+                'code' => $type . '_already_paid',
+                'message' => 'The sevdesk document is already fully paid.',
                 'bookingType' => 'N',
                 'paidMinorUnits' => 0,
             ];
         }
-        if (strtoupper((string) ($voucher['currency'] ?? '')) !== $payment['currency']) {
+        if (!in_array($status, $bookableStatuses, true)) {
             return [
                 'allowed' => false,
-                'code' => 'voucher_currency_mismatch',
-                'message' => 'The voucher and WHMCS payment use different currencies.',
+                'code' => $type . '_not_open',
+                'message' => 'Only an open or partially paid sevdesk document can be booked.',
+                'bookingType' => 'N',
+                'paidMinorUnits' => 0,
+            ];
+        }
+        if (strtoupper((string) ($document['currency'] ?? '')) !== $payment['currency']) {
+            return [
+                'allowed' => false,
+                'code' => $type . '_currency_mismatch',
+                'message' => 'The sevdesk document and WHMCS payment use different currencies.',
                 'bookingType' => 'N',
                 'paidMinorUnits' => 0,
             ];
         }
 
-        $gross = $voucher['sumGross'] ?? null;
-        $paid = $voucher['paidAmount'] ?? '0';
+        $gross = $document['sumGross'] ?? null;
+        $paid = $document['paidAmount'] ?? '0';
         if (
             (!is_int($gross) && !is_float($gross) && !is_string($gross))
             || (!is_int($paid) && !is_float($paid) && !is_string($paid))
         ) {
             return [
                 'allowed' => false,
-                'code' => 'invalid_voucher_amounts',
-                'message' => 'sevdesk returned no verifiable voucher balance.',
+                'code' => 'invalid_' . $type . '_amounts',
+                'message' => 'sevdesk returned no verifiable document balance.',
                 'bookingType' => 'N',
                 'paidMinorUnits' => 0,
             ];
@@ -597,8 +735,8 @@ final class BookingService
         } catch (\InvalidArgumentException) {
             return [
                 'allowed' => false,
-                'code' => 'invalid_voucher_amounts',
-                'message' => 'sevdesk returned invalid voucher amounts.',
+                'code' => 'invalid_' . $type . '_amounts',
+                'message' => 'sevdesk returned invalid document amounts.',
                 'bookingType' => 'N',
                 'paidMinorUnits' => 0,
             ];
@@ -615,7 +753,7 @@ final class BookingService
             return [
                 'allowed' => false,
                 'code' => 'payment_exceeds_open_amount',
-                'message' => 'The payment does not fit the voucher\'s remaining open amount.',
+                'message' => 'The payment does not fit the document\'s remaining open amount.',
                 'bookingType' => 'N',
                 'paidMinorUnits' => $paidMinor,
             ];
@@ -623,8 +761,8 @@ final class BookingService
 
         return [
             'allowed' => true,
-            'code' => 'voucher_bookable',
-            'message' => 'The voucher is open and the payment fits its balance.',
+            'code' => $type . '_bookable',
+            'message' => 'The sevdesk document is open and the payment fits its balance.',
             'bookingType' => $payment['amountMinorUnits'] === $remaining ? 'FULL_PAYMENT' : 'N',
             'paidMinorUnits' => $paidMinor,
         ];
@@ -637,7 +775,7 @@ final class BookingService
      *     currency: string
      * } $payment
      * @param array<string, array<string, mixed>> $accountCache
-     * @return list<array{transactionId: string, checkAccountId: string}>
+     * @return array{matches:list<array{transactionId: string, checkAccountId: string}>,truncated:bool}
      */
     private function matchingTransactions(array $payment, array &$accountCache): array
     {
@@ -645,11 +783,17 @@ final class BookingService
             'isBooked' => 'false',
             'paymtPurpose' => $payment['whmcsTransactionId'],
             'onlyCredit' => 'true',
-            'limit' => 101,
+            'limit' => self::TRANSACTION_SEARCH_LIMIT,
+            'offset' => 0,
         ]);
 
+        $records = self::records($response, 'checkAccountTransaction');
+        if (count($records) >= self::TRANSACTION_SEARCH_LIMIT) {
+            return ['matches' => [], 'truncated' => true];
+        }
+
         $matches = [];
-        foreach (self::records($response, 'checkAccountTransaction') as $transaction) {
+        foreach ($records as $transaction) {
             if (!$this->transactionMatches($transaction, $payment)) {
                 continue;
             }
@@ -682,7 +826,7 @@ final class BookingService
             ];
         }
 
-        return $matches;
+        return ['matches' => $matches, 'truncated' => false];
     }
 
     /**
@@ -715,7 +859,10 @@ final class BookingService
         }
 
         $purpose = $transaction['paymtPurpose'] ?? null;
-        if (!is_string($purpose) || !str_contains($purpose, $payment['whmcsTransactionId'])) {
+        if (
+            !is_string($purpose)
+            || !self::purposeContainsExactReference($purpose, $payment['whmcsTransactionId'])
+        ) {
             return false;
         }
 
@@ -729,6 +876,21 @@ final class BookingService
         } catch (\InvalidArgumentException) {
             return false;
         }
+    }
+
+    private static function purposeContainsExactReference(string $purpose, string $reference): bool
+    {
+        $purpose = trim($purpose);
+        $reference = trim($reference);
+        if ($purpose === '' || $reference === '') {
+            return false;
+        }
+
+        // Bank purposes may add prose, but the immutable gateway reference must remain one complete token.
+        return preg_match(
+            '/(?:^|\s)' . preg_quote($reference, '/') . '(?=\s|$)/u',
+            $purpose,
+        ) === 1;
     }
 
     /** @param array<string, mixed> $account */
@@ -783,6 +945,24 @@ final class BookingService
     private static function confirmationReference(array $confirmation): string
     {
         return hash('sha256', implode('|', [
+            'booking-v2',
+            $confirmation['documentType'],
+            $confirmation['whmcsTransactionId'],
+            $confirmation['voucherId'],
+            $confirmation['transactionId'],
+            $confirmation['checkAccountId'],
+            (string) $confirmation['amountMinorUnits'],
+            $confirmation['currency'],
+            $confirmation['bookingDate'],
+            $confirmation['bookingType'],
+            (string) $confirmation['voucherPaidMinorUnits'],
+        ]));
+    }
+
+    /** @param array<string,mixed> $confirmation */
+    private static function legacyVoucherConfirmationReference(array $confirmation): string
+    {
+        return hash('sha256', implode('|', [
             'booking-v1',
             $confirmation['whmcsTransactionId'],
             $confirmation['voucherId'],
@@ -796,10 +976,21 @@ final class BookingService
         ]));
     }
 
-    /** @param array<array-key, mixed> $response */
-    private static function validBookingResponse(array $response, string $voucherId): bool
+    /** @param array<string,mixed> $confirmation */
+    private static function usesLegacyVoucherReference(array $confirmation): bool
     {
-        $records = self::records($response, 'voucherLog');
+        return ($confirmation['bookingSchema'] ?? null) === 'booking-v1'
+            && strtolower(trim((string) ($confirmation['documentType'] ?? ''))) === 'voucher';
+    }
+
+    /** @param array<array-key, mixed> $response */
+    private static function validBookingResponse(
+        array $response,
+        string $documentType,
+        string $documentId,
+    ): bool {
+        $nestedKey = $documentType === 'invoice' ? 'invoiceLog' : 'voucherLog';
+        $records = self::records($response, $nestedKey);
         if (count($records) !== 1) {
             return false;
         }
@@ -809,9 +1000,54 @@ final class BookingService
         }
 
         $objectName = (string) ($log['objectName'] ?? '');
-        $responseVoucherId = self::numericId($log['voucher']['id'] ?? null);
+        if ($documentType === 'invoice') {
+            // The published schema currently calls this relation `creditNote`,
+            // while sevdesk installations may return the semantically correct
+            // `invoice` key. Both must still identify the exact Invoice.
+            $relation = is_array($log['invoice'] ?? null)
+                ? $log['invoice']
+                : ($log['creditNote'] ?? null);
+        } else {
+            $relation = $log['voucher'] ?? null;
+        }
+        $responseDocumentId = is_array($relation)
+            ? self::numericId($relation['id'] ?? null)
+            : null;
 
-        return $objectName === 'VoucherLog' && $responseVoucherId === $voucherId;
+        $expectedObjectName = $documentType === 'invoice' ? 'InvoiceLog' : 'VoucherLog';
+
+        return $objectName === $expectedObjectName && $responseDocumentId === $documentId;
+    }
+
+    private static function documentPath(string $documentType, string $documentId): string
+    {
+        $resource = $documentType === 'invoice' ? 'Invoice' : 'Voucher';
+
+        return '/' . $resource . '/' . rawurlencode($documentId);
+    }
+
+    /** @return BookingResult|null */
+    private static function documentTypeFailure(mixed $documentType): ?array
+    {
+        if ($documentType === null || (is_string($documentType) && trim($documentType) === '')) {
+            return self::result(
+                'blocked',
+                'booking_document_type_missing',
+                'The legacy sevdesk mapping has no confirmed document type.',
+            );
+        }
+        if (
+            !is_string($documentType)
+            || !in_array(strtolower(trim($documentType)), ['voucher', 'invoice'], true)
+        ) {
+            return self::result(
+                'blocked',
+                'booking_document_type_invalid',
+                'The sevdesk mapping uses an unsupported document type.',
+            );
+        }
+
+        return null;
     }
 
     private static function normaliseDate(string $date): string
@@ -875,14 +1111,18 @@ final class BookingService
     private function apiFailure(ApiException $exception, string $code): array
     {
         $ambiguous = $exception->outcomeUnknown;
+        $context = $exception->context();
+        if (!$ambiguous && $code === 'booking_write_failed') {
+            $context['definiteWriteRejected'] = true;
+        }
 
         return self::result(
             $ambiguous ? 'ambiguous' : 'failed',
             $ambiguous ? $code . '_ambiguous' : $code,
             $ambiguous
-                ? 'The booking write may have succeeded. Reconcile voucher and transaction before retrying.'
+                ? 'The booking write may have succeeded. Reconcile document and transaction before retrying.'
                 : 'The sevdesk booking request could not be completed.',
-            $exception->context(),
+            $context,
         );
     }
 

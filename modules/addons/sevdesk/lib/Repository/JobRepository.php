@@ -10,20 +10,126 @@ use Illuminate\Database\QueryException;
 use WHMCS\Database\Capsule;
 use WHMCS\Module\Addon\SevDesk\Database\Migrator;
 use WHMCS\Module\Addon\SevDesk\Jobs\JobOutcome;
+use WHMCS\Module\Addon\SevDesk\Service\DocumentTargetResolver;
 
 final class JobRepository
 {
-    private const RISKY_CHECKPOINTS = [
+    /** A crashed worker cannot prove whether the remote write ran. */
+    private const UNKNOWN_WRITE_CHECKPOINTS = [
         'contact_write_requested',
         'voucher_write_requested',
-        'voucher_created',
+        'invoice_write_requested',
+        'invoice_open_write_requested',
+        'invoice_delivery_write_requested',
+        'whmcs_email_write_requested',
         'booking_write_requested',
-        'booking_completed',
         'correction_write_requested',
-        'correction_created',
         'correction_voucher_write_requested',
-        'correction_voucher_created',
     ];
+
+    /** The side effect is durable and verified; a later step may resume safely. */
+    private const VERIFIED_SIDE_EFFECT_CHECKPOINTS = [
+        'voucher_created',
+        'mapping_persisted',
+        'invoice_created',
+        'invoice_opened',
+        'invoice_delivered',
+        'whmcs_email_handed_off',
+        'booking_completed',
+        'correction_created',
+        'correction_voucher_created',
+        'correction_mapping_persisted',
+    ];
+
+    private const DEDUPE_SKIPPED_MESSAGE = 'Die Rechnung ist bereits in einem anderen aktiven Job eingeplant.';
+
+    /**
+     * Return the newest validated document decision for one WHMCS invoice.
+     *
+     * Before the worker freezes a target, automatic hooks persist a requested
+     * snapshot. Once a mapping exists, callers must request a frozen context so
+     * a later skipped export attempt cannot reinterpret an existing document.
+     *
+     * @return null|array{
+     *     itemId:int,
+     *     itemStatus:string,
+     *     checkpoint:string,
+     *     source:'frozen'|'requested',
+     *     allowed:?bool,
+     *     documentType:?string,
+     *     documentAuthority:string,
+     *     exportMode:string,
+     *     ossProfile:string,
+     *     euB2cMode:string,
+     *     deliveryChannel:?string,
+     *     taxRuleId:?string,
+     *     deliveryState:?string,
+     *     sevUserId:?string,
+     *     unityId:?string
+     * }
+     */
+    public function latestDocumentContextForInvoice(int $invoiceId, bool $frozenOnly = false): ?array
+    {
+        return $this->documentContextsForInvoices([$invoiceId], $frozenOnly)[$invoiceId] ?? null;
+    }
+
+    /**
+     * Batch variant of latestDocumentContextForInvoice(). A malformed newest
+     * decision blocks fallback only for its own invoice; dedupe-losing rows are
+     * ignored, and frozenOnly may skip valid requested rows to find their owner.
+     *
+     * @param list<int> $invoiceIds
+     * @return array<int,array{
+     *     itemId:int,itemStatus:string,checkpoint:string,source:'frozen'|'requested',
+     *     allowed:?bool,documentType:?string,documentAuthority:string,exportMode:string,
+     *     ossProfile:string,euB2cMode:string,deliveryChannel:?string,taxRuleId:?string,
+     *     deliveryState:?string,sevUserId:?string,unityId:?string
+     * }>
+     */
+    public function documentContextsForInvoices(array $invoiceIds, bool $frozenOnly = false): array
+    {
+        $invoiceIds = array_values(array_unique(array_filter(
+            array_map('intval', $invoiceIds),
+            static fn (int $invoiceId): bool => $invoiceId > 0,
+        )));
+        if ($invoiceIds === [] || !Capsule::schema()->hasTable(Migrator::ITEMS_TABLE)) {
+            return [];
+        }
+
+        $contexts = [];
+        $resolved = [];
+        $items = Capsule::table(Migrator::ITEMS_TABLE)
+            ->whereIn('invoice_id', $invoiceIds)
+            ->where('action', 'export_document')
+            ->orderBy('invoice_id')
+            ->orderByDesc('id')
+            ->get(['id', 'invoice_id', 'status', 'checkpoint', 'candidate_json', 'message']);
+
+        foreach ($items as $item) {
+            $invoiceId = (int) ($item->invoice_id ?? 0);
+            if ($invoiceId < 1 || isset($resolved[$invoiceId])) {
+                continue;
+            }
+            if (self::isDedupeSkippedItem($item)) {
+                continue;
+            }
+
+            $context = self::documentContextFromItem($item);
+            if ($context === null) {
+                // Do not expose an older authority after malformed newer state.
+                $resolved[$invoiceId] = true;
+                continue;
+            }
+            if ($frozenOnly && $context['source'] === 'requested') {
+                continue;
+            }
+
+            $contexts[$invoiceId] = $context;
+            $resolved[$invoiceId] = true;
+        }
+
+        return $contexts;
+    }
 
     /**
      * @param list<array{invoice_id?:int,action?:string,dedupe_key?:string,transaction_reference?:string,candidate?:array<string,mixed>}> $items
@@ -68,11 +174,18 @@ final class JobRepository
                     if (!$this->isDuplicateKey($error)) {
                         throw $error;
                     }
+                    $this->markPaidTriggerOnActiveExport(
+                        $dedupeKey,
+                        $invoiceId,
+                        $action,
+                        is_array($item['candidate'] ?? null) ? $item['candidate'] : null,
+                        $now,
+                    );
                     // An active item already owns this accounting action. Keep a
                     // visible terminal row in this job without stealing its lock.
                     $row['status'] = 'skipped';
                     $row['dedupe_key'] = null;
-                    $row['message'] = 'Die Rechnung ist bereits in einem anderen aktiven Job eingeplant.';
+                    $row['message'] = self::DEDUPE_SKIPPED_MESSAGE;
                     $row['finished_at'] = $now;
                     Capsule::table(Migrator::ITEMS_TABLE)->insert($row);
                 }
@@ -84,52 +197,102 @@ final class JobRepository
         });
     }
 
-    public function claimNext(int $leaseSeconds = 300): ?object
+    /**
+     * @param null|callable():bool $claimAllowed Called inside the claim
+     *     transaction before job/item locks are taken. Implementations may lock
+     *     durable runtime settings; the global lock order is settings -> job ->
+     *     item, matching setup, cancellation and lease recovery.
+     */
+    public function claimNext(int $leaseSeconds = 300, ?callable $claimAllowed = null): ?object
     {
-        $this->recoverExpiredLeases();
-        $now = $this->now();
+        $this->recoverExpiredLeasesForSafety();
 
         for ($attempt = 0; $attempt < 5; ++$attempt) {
-            $candidate = Capsule::table(Migrator::ITEMS_TABLE . ' as item')
-                ->join(Migrator::JOBS_TABLE . ' as job', 'item.job_id', '=', 'job.id')
-                ->whereIn('item.status', ['pending', 'retry_wait'])
-                ->where('item.available_at', '<=', $now)
-                ->whereNull('job.cancel_requested_at')
-                ->whereNotIn('job.status', ['paused', 'cancelled'])
-                ->orderBy('item.available_at')
-                ->orderBy('item.id')
-                ->select('item.*')
-                ->first();
+            $claimed = Capsule::connection()->transaction(function () use (
+                $leaseSeconds,
+                $claimAllowed,
+            ): object|bool|null {
+                if ($claimAllowed !== null && !$claimAllowed()) {
+                    return null;
+                }
 
-            if ($candidate === null) {
-                return null;
-            }
+                $now = $this->now();
+                $candidate = Capsule::table(Migrator::ITEMS_TABLE . ' as item')
+                    ->join(Migrator::JOBS_TABLE . ' as job', 'item.job_id', '=', 'job.id')
+                    ->whereIn('item.status', ['pending', 'retry_wait'])
+                    ->where('item.available_at', '<=', $now)
+                    ->whereNull('job.cancel_requested_at')
+                    ->whereNotIn('job.status', ['paused', 'cancelled'])
+                    ->orderBy('item.available_at')
+                    ->orderBy('item.id')
+                    ->select('item.*')
+                    ->first();
 
-            $token = bin2hex(random_bytes(16));
-            $leasedUntil = (new DateTimeImmutable())->add(new DateInterval('PT' . $leaseSeconds . 'S'))->format('Y-m-d H:i:s');
-            $updated = Capsule::table(Migrator::ITEMS_TABLE)
-                ->where('id', $candidate->id)
-                ->whereIn('status', ['pending', 'retry_wait'])
-                ->update([
-                    'status' => 'running',
-                    'lease_token' => $token,
-                    'leased_until' => $leasedUntil,
-                    'attempts' => Capsule::raw('attempts + 1'),
-                    'started_at' => $candidate->started_at ?? $now,
-                    'updated_at' => $now,
-                ]);
+                if ($candidate === null) {
+                    return null;
+                }
 
-            if ($updated === 1) {
-                Capsule::table(Migrator::JOBS_TABLE)
+                $job = Capsule::table(Migrator::JOBS_TABLE)
                     ->where('id', $candidate->job_id)
+                    ->lockForUpdate()
+                    ->first();
+                if (
+                    $job === null
+                    || $job->cancel_requested_at !== null
+                    || in_array((string) $job->status, ['paused', 'cancelled'], true)
+                ) {
+                    return false;
+                }
+
+                $current = Capsule::table(Migrator::ITEMS_TABLE)
+                    ->where('id', $candidate->id)
+                    ->lockForUpdate()
+                    ->first();
+                if (
+                    $current === null
+                    || !in_array((string) $current->status, ['pending', 'retry_wait'], true)
+                    || (string) $current->available_at > $now
+                ) {
+                    return false;
+                }
+
+                $token = bin2hex(random_bytes(16));
+                $leasedUntil = (new DateTimeImmutable())
+                    ->add(new DateInterval('PT' . $leaseSeconds . 'S'))
+                    ->format('Y-m-d H:i:s');
+                $updated = Capsule::table(Migrator::ITEMS_TABLE)
+                    ->where('id', $current->id)
+                    ->whereIn('status', ['pending', 'retry_wait'])
+                    ->update([
+                        'status' => 'running',
+                        'lease_token' => $token,
+                        'leased_until' => $leasedUntil,
+                        'attempts' => Capsule::raw('attempts + 1'),
+                        'started_at' => $current->started_at ?? $now,
+                        'updated_at' => $now,
+                    ]);
+
+                if ($updated !== 1) {
+                    return false;
+                }
+
+                Capsule::table(Migrator::JOBS_TABLE)
+                    ->where('id', $job->id)
                     ->whereNull('started_at')
                     ->update(['started_at' => $now]);
-                Capsule::table(Migrator::JOBS_TABLE)->where('id', $candidate->job_id)->update([
+                Capsule::table(Migrator::JOBS_TABLE)->where('id', $job->id)->update([
                     'status' => 'running',
                     'updated_at' => $now,
                 ]);
 
-                return Capsule::table(Migrator::ITEMS_TABLE)->where('id', $candidate->id)->first();
+                return Capsule::table(Migrator::ITEMS_TABLE)->where('id', $current->id)->first();
+            });
+
+            if ($claimed === null) {
+                return null;
+            }
+            if (is_object($claimed)) {
+                return $claimed;
             }
         }
 
@@ -193,7 +356,20 @@ final class JobRepository
             $availableAt,
             $terminal,
             $now,
+            $jobId,
         ): void {
+            // Use the same job-then-item lock order as cancel() and retry(). A
+            // cancellation racing with finish() must either cancel a safe retry
+            // or retain a risky side effect for manual reconciliation; it must
+            // never leave an unclaimable retry_wait item behind.
+            $job = Capsule::table(Migrator::JOBS_TABLE)
+                ->where('id', $jobId)
+                ->lockForUpdate()
+                ->first();
+            if ($job === null) {
+                return;
+            }
+
             // Checkpoints update candidate_json and remote IDs while the handler
             // still holds its original claim snapshot. Lock and merge against the
             // authoritative row so finish() cannot erase newer recovery context.
@@ -206,28 +382,69 @@ final class JobRepository
                 return;
             }
 
+            $candidateJson = $this->mergeCandidateJson(
+                $current->candidate_json ?? null,
+                $outcome->candidate,
+            );
+            $cancelRequested = $job->cancel_requested_at !== null;
+            $resumePaidExport = !$cancelRequested
+                && $this->shouldResumeAfterPaidTrigger($current, $outcome, $candidateJson);
+            if ($resumePaidExport) {
+                $candidate = self::decodeCandidate($candidateJson);
+                $candidate['paidTriggerObserved'] = false;
+                $candidate['paidTriggerConsumedAt'] = $now;
+                $candidateJson = $this->encode($candidate);
+            }
+
+            $storedStatus = $resumePaidExport ? 'retry_wait' : $outcome->status;
+            $storedCheckpoint = $resumePaidExport
+                ? 'invoice_payment_pending'
+                : $outcome->checkpoint;
+            $storedAvailableAt = $resumePaidExport
+                ? (new DateTimeImmutable())->add(new DateInterval('PT60S'))->format('Y-m-d H:i:s')
+                : $availableAt;
+            $storedTerminal = $resumePaidExport ? false : $terminal;
+            $storedErrorCode = $resumePaidExport ? 'invoice_payment_event_followup' : $outcome->errorCode;
+            $storedMessage = $resumePaidExport
+                ? 'Das bezahlte WHMCS-Ereignis wurde während der Verarbeitung erkannt; der Invoice-Pfad wird erneut geprüft.'
+                : mb_substr($outcome->message, 0, 4000);
+
+            if ($cancelRequested && $storedStatus === 'retry_wait') {
+                $riskyCheckpoint = self::isRiskyCheckpoint($storedCheckpoint);
+                $storedStatus = $riskyCheckpoint ? 'ambiguous' : 'cancelled';
+                $storedAvailableAt = $now;
+                $storedTerminal = true;
+                $storedErrorCode = $riskyCheckpoint
+                    ? ($outcome->errorCode ?? 'cancelled_after_side_effect')
+                    : 'cancelled_by_admin';
+                $storedMessage = $riskyCheckpoint
+                    ? 'Jobabbruch nach möglichem oder bestätigtem Remote-Effekt; der lokale Abschluss muss geprüft werden.'
+                    : 'Job wurde durch einen Administrator abgebrochen; der sichere Wiederholungsversuch wurde verworfen.';
+            }
+            $retainReviewDedupe = !$cancelRequested
+                && (string) ($current->action ?? '') === 'review_notice'
+                && $storedStatus === 'permanent_failed'
+                && $storedErrorCode === 'manual_review_required';
+
             Capsule::table(Migrator::ITEMS_TABLE)
                 ->where('id', $current->id)
                 ->where('lease_token', $item->lease_token)
                 ->update([
-                    'status' => $outcome->status,
-                    'checkpoint' => $outcome->checkpoint,
-                    'available_at' => $availableAt,
+                    'status' => $storedStatus,
+                    'checkpoint' => $storedCheckpoint,
+                    'available_at' => $storedAvailableAt,
                     'lease_token' => null,
                     'leased_until' => null,
-                    'dedupe_key' => in_array($outcome->status, ['retry_wait', 'ambiguous'], true)
+                    'dedupe_key' => in_array($storedStatus, ['retry_wait', 'ambiguous'], true) || $retainReviewDedupe
                         ? $current->dedupe_key
                         : null,
                     'sevdesk_id' => $outcome->sevdeskId ?? $current->sevdesk_id,
-                    'candidate_json' => $this->mergeCandidateJson(
-                        $current->candidate_json ?? null,
-                        $outcome->candidate,
-                    ),
+                    'candidate_json' => $candidateJson,
                     'http_status' => $outcome->httpStatus,
                     'exception_uuid' => $outcome->exceptionUuid,
-                    'error_code' => $outcome->errorCode,
-                    'message' => mb_substr($outcome->message, 0, 4000),
-                    'finished_at' => $terminal ? $now : null,
+                    'error_code' => $storedErrorCode,
+                    'message' => $storedMessage,
+                    'finished_at' => $storedTerminal ? $now : null,
                     'updated_at' => $now,
                 ]);
         });
@@ -284,7 +501,14 @@ final class JobRepository
     public function retry(int $itemId): bool
     {
         $item = Capsule::table(Migrator::ITEMS_TABLE)->where('id', $itemId)->first();
-        if ($item === null || (string) $item->status !== 'permanent_failed') {
+        if (
+            $item === null
+            || (string) $item->status !== 'permanent_failed'
+            || in_array((string) ($item->error_code ?? ''), [
+                'booking_not_applied',
+                'manual_review_required',
+            ], true)
+        ) {
             return false;
         }
 
@@ -302,6 +526,10 @@ final class JobRepository
                     $current === null
                     || (int) $current->job_id !== (int) $item->job_id
                     || (string) $current->status !== 'permanent_failed'
+                    || in_array((string) ($current->error_code ?? ''), [
+                        'booking_not_applied',
+                        'manual_review_required',
+                    ], true)
                 ) {
                     return 0;
                 }
@@ -309,12 +537,23 @@ final class JobRepository
                 $businessReference = trim((string) ($current->transaction_reference ?? ''));
                 $dedupe = trim((string) ($current->dedupe_key ?? ''));
                 if ($dedupe === '') {
-                    $actionPrefix = (string) $current->action . ':';
-                    $dedupe = $businessReference !== '' && str_starts_with($businessReference, $actionPrefix)
-                        ? $businessReference
-                        : $actionPrefix . ($businessReference !== ''
+                    $exportAction = in_array((string) $current->action, [
+                        'export_document',
+                        'export_voucher',
+                        'reconcile_voucher',
+                    ], true);
+                    if ($exportAction && $current->invoice_id !== null) {
+                        // This historical key intentionally protects the shared
+                        // WHMCS invoice identity across Voucher and Invoice writes.
+                        $dedupe = 'export_voucher:' . $current->invoice_id;
+                    } else {
+                        $actionPrefix = (string) $current->action . ':';
+                        $dedupe = $businessReference !== '' && str_starts_with($businessReference, $actionPrefix)
                             ? $businessReference
-                            : ($current->invoice_id ?? $current->id));
+                            : $actionPrefix . ($businessReference !== ''
+                                ? $businessReference
+                                : ($current->invoice_id ?? $current->id));
+                    }
                 }
 
                 return Capsule::table(Migrator::ITEMS_TABLE)
@@ -404,6 +643,95 @@ final class JobRepository
         return true;
     }
 
+    /**
+     * Requeue an indeterminate WHMCS SendEmail hand-off only after the admin has
+     * accepted the duplicate-delivery risk. The handler consumes this one-shot
+     * flag before the next hand-off, so every later retry needs a new consent.
+     */
+    public function confirmEmailRetry(int $itemId): bool
+    {
+        $item = Capsule::table(Migrator::ITEMS_TABLE)->where('id', $itemId)->first();
+        if (
+            $item === null
+            || (string) $item->status !== 'ambiguous'
+            || (string) $item->action !== 'export_document'
+            || (string) $item->checkpoint !== 'whmcs_email_write_requested'
+            || $item->invoice_id === null
+        ) {
+            return false;
+        }
+
+        try {
+            $updated = Capsule::connection()->transaction(function () use ($itemId, $item): int {
+                if (!$this->lockRunnableJob((int) $item->job_id)) {
+                    return 0;
+                }
+
+                $current = Capsule::table(Migrator::ITEMS_TABLE)
+                    ->where('id', $itemId)
+                    ->lockForUpdate()
+                    ->first();
+                if (
+                    $current === null
+                    || (string) $current->status !== 'ambiguous'
+                    || (string) $current->action !== 'export_document'
+                    || (string) $current->checkpoint !== 'whmcs_email_write_requested'
+                    || $current->invoice_id === null
+                ) {
+                    return 0;
+                }
+
+                $candidate = [];
+                try {
+                    $decoded = json_decode((string) ($current->candidate_json ?? ''), true, 32, JSON_THROW_ON_ERROR);
+                    $candidate = is_array($decoded) ? $decoded : [];
+                } catch (\JsonException) {
+                    return 0;
+                }
+                if (
+                    (string) ($candidate['targetDocumentType'] ?? '') !== 'invoice'
+                    || (string) ($candidate['targetDocumentAuthority'] ?? '') !== 'sevdesk'
+                    || (string) ($candidate['targetDeliveryChannel'] ?? '') !== 'whmcs_template'
+                ) {
+                    return 0;
+                }
+
+                $candidate['emailRetryConfirmed'] = true;
+                $candidate['emailRetryConfirmedAt'] = $this->now();
+                $dedupe = trim((string) ($current->dedupe_key ?? ''));
+                if ($dedupe === '') {
+                    $dedupe = 'export_voucher:' . $current->invoice_id;
+                }
+
+                return Capsule::table(Migrator::ITEMS_TABLE)
+                    ->where('id', $itemId)
+                    ->where('status', 'ambiguous')
+                    ->update([
+                        'status' => 'pending',
+                        'dedupe_key' => $dedupe,
+                        'candidate_json' => $this->encode($candidate),
+                        'available_at' => $this->now(),
+                        'finished_at' => null,
+                        'message' => null,
+                        'updated_at' => $this->now(),
+                    ]);
+            });
+        } catch (QueryException $error) {
+            if (!$this->isDuplicateKey($error)) {
+                throw $error;
+            }
+
+            return false;
+        }
+        if ($updated !== 1) {
+            return false;
+        }
+
+        $this->refreshJob((int) $item->job_id);
+
+        return true;
+    }
+
     public function findItem(int $itemId): ?object
     {
         return Capsule::table(Migrator::ITEMS_TABLE)->where('id', $itemId)->first();
@@ -450,8 +778,15 @@ final class JobRepository
     {
         $query = Capsule::table(Migrator::ITEMS_TABLE . ' as item')
             ->leftJoin('tblinvoices as invoice', 'item.invoice_id', '=', 'invoice.id')
+            ->leftJoin(Migrator::MAPPING_TABLE . ' as mapping', 'item.invoice_id', '=', 'mapping.invoice_id')
             ->where('item.job_id', $jobId)
-            ->select(['item.*', 'invoice.invoicenum', 'invoice.date', 'invoice.total', 'invoice.status as invoice_status'])
+            ->select([
+                'item.*', 'invoice.invoicenum', 'invoice.date', 'invoice.total',
+                'invoice.status as invoice_status',
+                'mapping.document_type as mapping_document_type',
+                'mapping.document_number as mapping_document_number',
+                'mapping.document_ready_at', 'mapping.delivered_at',
+            ])
             ->orderBy('item.id');
         if ($status !== null && $status !== '') {
             $query->where('item.status', $status);
@@ -467,6 +802,7 @@ final class JobRepository
         $perPage = max(10, min(250, $perPage));
         $query = Capsule::table(Migrator::ITEMS_TABLE . ' as item')
             ->leftJoin('tblinvoices as invoice', 'item.invoice_id', '=', 'invoice.id')
+            ->leftJoin(Migrator::MAPPING_TABLE . ' as mapping', 'item.invoice_id', '=', 'mapping.invoice_id')
             ->where('item.job_id', $jobId);
         if ($status !== null && $status !== '') {
             $query->where('item.status', $status);
@@ -475,6 +811,9 @@ final class JobRepository
         $items = $query->select([
             'item.*', 'invoice.invoicenum', 'invoice.date', 'invoice.total',
             'invoice.status as invoice_status',
+            'mapping.document_type as mapping_document_type',
+            'mapping.document_number as mapping_document_number',
+            'mapping.document_ready_at', 'mapping.delivered_at',
         ])->orderBy('item.id')
             ->offset(($page - 1) * $perPage)
             ->limit($perPage)
@@ -529,45 +868,115 @@ final class JobRepository
 
     public static function isRiskyCheckpoint(string $checkpoint): bool
     {
-        return in_array($checkpoint, self::RISKY_CHECKPOINTS, true);
+        return self::isWriteOutcomeUnknownCheckpoint($checkpoint)
+            || self::isVerifiedSideEffectCheckpoint($checkpoint);
     }
 
-    private function recoverExpiredLeases(): void
+    public static function isWriteOutcomeUnknownCheckpoint(string $checkpoint): bool
     {
-        $expired = Capsule::table(Migrator::ITEMS_TABLE)
+        return in_array($checkpoint, self::UNKNOWN_WRITE_CHECKPOINTS, true);
+    }
+
+    public static function isVerifiedSideEffectCheckpoint(string $checkpoint): bool
+    {
+        return in_array($checkpoint, self::VERIFIED_SIDE_EFFECT_CHECKPOINTS, true);
+    }
+
+    /**
+     * Resolve only expired local leases; no handler or remote service is
+     * invoked. This remains available while a replaced installation is in
+     * quarantine so a crashed old worker cannot deadlock the inventory review.
+     */
+    public function recoverExpiredLeasesForSafety(?int $jobId = null): int
+    {
+        $cutoff = $this->now();
+        $query = Capsule::table(Migrator::ITEMS_TABLE)
             ->where('status', 'running')
             ->whereNotNull('leased_until')
-            ->where('leased_until', '<', $this->now())
-            ->get();
-        foreach ($expired as $item) {
-            $job = Capsule::table(Migrator::JOBS_TABLE)->where('id', $item->job_id)->first();
-            $risky = self::isRiskyCheckpoint((string) $item->checkpoint);
-            if ($job !== null && $job->cancel_requested_at !== null && !$risky) {
-                Capsule::table(Migrator::ITEMS_TABLE)->where('id', $item->id)->update([
-                    'status' => 'cancelled',
-                    'dedupe_key' => null,
-                    'lease_token' => null,
-                    'leased_until' => null,
-                    'message' => 'Jobabbruch nach abgelaufener Worker-Lease abgeschlossen.',
-                    'finished_at' => $this->now(),
-                    'updated_at' => $this->now(),
-                ]);
-                $this->refreshJob((int) $item->job_id);
+            ->where('leased_until', '<', $cutoff);
+        if ($jobId !== null) {
+            $query->where('job_id', $jobId);
+        }
+        $expired = $query->select(['id', 'job_id', 'lease_token', 'leased_until'])->get();
+        $recovered = 0;
+        $refreshJobIds = [];
+        foreach ($expired as $snapshot) {
+            $didRecover = Capsule::connection()->transaction(function () use ($snapshot, $cutoff): bool {
+                // Keep the same job -> item order as finish(), cancel() and the
+                // transactional claim. The initial scan is only a hint; both
+                // the cancellation state and exact lease are re-read under lock.
+                $job = Capsule::table(Migrator::JOBS_TABLE)
+                    ->where('id', $snapshot->job_id)
+                    ->lockForUpdate()
+                    ->first();
+                $current = Capsule::table(Migrator::ITEMS_TABLE)
+                    ->where('id', $snapshot->id)
+                    ->lockForUpdate()
+                    ->first();
+                if (
+                    $current === null
+                    || (string) $current->status !== 'running'
+                    || (string) ($current->lease_token ?? '') !== (string) ($snapshot->lease_token ?? '')
+                    || (string) ($current->leased_until ?? '') !== (string) ($snapshot->leased_until ?? '')
+                    || trim((string) ($current->leased_until ?? '')) === ''
+                    || (string) $current->leased_until >= $cutoff
+                ) {
+                    return false;
+                }
+
+                $writeOutcomeUnknown = self::isWriteOutcomeUnknownCheckpoint((string) $current->checkpoint);
+                $verifiedSideEffect = self::isVerifiedSideEffectCheckpoint((string) $current->checkpoint);
+                $cancelRequested = $job !== null
+                    && ($job->cancel_requested_at !== null || (string) $job->status === 'cancelled');
+                $jobMissing = $job === null;
+                $sideEffectNeedsReview = $writeOutcomeUnknown || $verifiedSideEffect;
+
+                $status = match (true) {
+                    $jobMissing => 'ambiguous',
+                    $cancelRequested && $sideEffectNeedsReview => 'ambiguous',
+                    $cancelRequested => 'cancelled',
+                    $writeOutcomeUnknown => 'ambiguous',
+                    default => 'retry_wait',
+                };
+                $terminal = in_array($status, ['ambiguous', 'cancelled'], true);
+                $message = match (true) {
+                    $jobMissing => 'Worker-Lease gehört zu keinem vorhandenen Job; lokale Klärung erforderlich.',
+                    $cancelRequested && $sideEffectNeedsReview =>
+                        'Jobabbruch nach möglichem oder bestätigtem Remote-Effekt; lokaler Abschluss muss geprüft werden.',
+                    $cancelRequested => 'Jobabbruch nach abgelaufener Worker-Lease abgeschlossen.',
+                    $writeOutcomeUnknown =>
+                        'Worker-Abbruch nach möglichem Remote-Schreibvorgang; Reconciliation erforderlich.',
+                    default => 'Worker-Lease abgelaufen; Verarbeitung wird sicher wiederaufgenommen.',
+                };
+
+                return Capsule::table(Migrator::ITEMS_TABLE)
+                    ->where('id', $current->id)
+                    ->where('status', 'running')
+                    ->where('lease_token', $snapshot->lease_token)
+                    ->where('leased_until', $snapshot->leased_until)
+                    ->update([
+                        'status' => $status,
+                        'available_at' => $cutoff,
+                        'dedupe_key' => $status === 'cancelled' ? null : $current->dedupe_key,
+                        'lease_token' => null,
+                        'leased_until' => null,
+                        'message' => $message,
+                        'finished_at' => $terminal ? $cutoff : null,
+                        'updated_at' => $cutoff,
+                    ]) === 1;
+            });
+            if (!$didRecover) {
                 continue;
             }
-            Capsule::table(Migrator::ITEMS_TABLE)->where('id', $item->id)->update([
-                'status' => $risky ? 'ambiguous' : 'retry_wait',
-                'available_at' => $this->now(),
-                'lease_token' => null,
-                'leased_until' => null,
-                'message' => $risky
-                    ? 'Worker-Abbruch nach möglichem Remote-Schreibvorgang; Reconciliation erforderlich.'
-                    : 'Worker-Lease abgelaufen; Verarbeitung wird sicher wiederaufgenommen.',
-                'finished_at' => $risky ? $this->now() : null,
-                'updated_at' => $this->now(),
-            ]);
-            $this->refreshJob((int) $item->job_id);
+
+            ++$recovered;
+            $refreshJobIds[(int) $snapshot->job_id] = true;
         }
+        foreach (array_keys($refreshJobIds) as $refreshJobId) {
+            $this->refreshJob($refreshJobId);
+        }
+
+        return $recovered;
     }
 
     private function lockRunnableJob(int $jobId): bool
@@ -589,6 +998,7 @@ final class JobRepository
         if (
             !in_array($currentAction, [
                 'export_voucher',
+                'export_document',
                 'reconcile_voucher',
                 'correction_voucher',
                 'book_payment',
@@ -598,16 +1008,26 @@ final class JobRepository
         }
 
         $checkpoint = (string) ($item->checkpoint ?? '');
+        if ($checkpoint === 'whmcs_email_write_requested') {
+            // Unlike sevdesk objects, a WHMCS mail-provider hand-off has no
+            // read-only reconciliation endpoint. It needs the dedicated,
+            // warning-gated confirmEmailRetry() path above.
+            return null;
+        }
         if ($currentAction === 'correction_voucher') {
             $action = 'correction_voucher';
             $dedupe = (string) ($item->transaction_reference ?: 'correction:' . $item->id);
         } elseif ($currentAction === 'book_payment') {
             $action = 'book_payment';
             $dedupe = (string) ($item->transaction_reference ?: 'book_payment:' . $item->id);
-        } elseif (in_array($checkpoint, ['contact_write_requested', 'contact_linked'], true)) {
+        } elseif (
+            $currentAction === 'export_document'
+            || in_array($checkpoint, ['contact_write_requested', 'contact_linked'], true)
+        ) {
             // Contact recovery must run the normal contact resolver. It searches
-            // by WHMCS customer number before any new contact can be created.
-            $action = 'export_voucher';
+            // by WHMCS customer number before any new contact can be created. New
+            // document jobs also own their Invoice read-only reconciliation.
+            $action = $currentAction === 'export_document' ? 'export_document' : 'export_voucher';
             $dedupe = 'export_voucher:' . $item->invoice_id;
         } else {
             $action = 'reconcile_voucher';
@@ -665,6 +1085,276 @@ final class JobRepository
         return $job;
     }
 
+    /**
+     * @return null|array{
+     *     itemId:int,
+     *     itemStatus:string,
+     *     checkpoint:string,
+     *     source:'frozen'|'requested',
+     *     allowed:?bool,
+     *     documentType:?string,
+     *     documentAuthority:string,
+     *     exportMode:string,
+     *     ossProfile:string,
+     *     euB2cMode:string,
+     *     deliveryChannel:?string,
+     *     taxRuleId:?string,
+     *     deliveryState:?string,
+     *     sevUserId:?string,
+     *     unityId:?string
+     * }
+     */
+    public static function documentContextFromItem(object $item, bool $frozenOnly = false): ?array
+    {
+        if (self::isDedupeSkippedItem($item)) {
+            return null;
+        }
+
+        $itemId = (int) ($item->id ?? 0);
+        $status = trim((string) ($item->status ?? ''));
+        $checkpoint = trim((string) ($item->checkpoint ?? ''));
+        if (
+            $itemId < 1
+            || $checkpoint === ''
+            || !in_array($status, [
+                'pending', 'running', 'retry_wait', 'succeeded', 'skipped',
+                'permanent_failed', 'ambiguous', 'cancelled',
+            ], true)
+        ) {
+            return null;
+        }
+
+        try {
+            $decoded = json_decode((string) ($item->candidate_json ?? ''), true, 32, JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            return null;
+        }
+        if (!is_array($decoded)) {
+            return null;
+        }
+
+        $frozenKeys = [
+            'targetAllowed', 'targetDocumentType', 'targetDocumentAuthority',
+            'targetExportMode', 'targetOssProfile', 'targetEuB2cMode',
+        ];
+        $hasFrozenContext = array_intersect($frozenKeys, array_keys($decoded)) !== [];
+
+        if ($hasFrozenContext) {
+            $allowed = $decoded['targetAllowed'] ?? null;
+            $documentType = $decoded['targetDocumentType'] ?? null;
+            $authority = self::contextString($decoded, 'targetDocumentAuthority');
+            $mode = self::contextString($decoded, 'targetExportMode');
+            $ossProfile = self::contextString($decoded, 'targetOssProfile');
+            $euB2cMode = self::contextString($decoded, 'targetEuB2cMode');
+            $deliveryChannel = self::contextDeliveryChannel($decoded, 'targetDeliveryChannel');
+            $taxRuleId = self::contextOptionalNumericId($decoded, 'targetTaxRuleId');
+            $deliveryState = self::contextDeliveryState($decoded);
+            $sevUserId = self::contextOptionalNumericId($decoded, 'targetSevUserId');
+            $unityId = self::contextOptionalNumericId($decoded, 'targetUnityId');
+            if (
+                !is_bool($allowed)
+                || ($documentType !== null && !is_string($documentType))
+                || (array_key_exists('targetTaxRuleId', $decoded) && $taxRuleId === null && $decoded['targetTaxRuleId'] !== null)
+                || (array_key_exists('targetSevUserId', $decoded) && $sevUserId === null && $decoded['targetSevUserId'] !== null)
+                || (array_key_exists('targetUnityId', $decoded) && $unityId === null && $decoded['targetUnityId'] !== null)
+                || (array_key_exists('deliveryState', $decoded) && $deliveryState === null)
+                || !self::validDocumentContext(
+                    $allowed,
+                    is_string($documentType) ? trim($documentType) : null,
+                    $authority,
+                    $mode,
+                    $ossProfile,
+                    $euB2cMode,
+                    $deliveryChannel,
+                )
+            ) {
+                return null;
+            }
+
+            return [
+                'itemId' => $itemId,
+                'itemStatus' => $status,
+                'checkpoint' => $checkpoint,
+                'source' => 'frozen',
+                'allowed' => $allowed,
+                'documentType' => is_string($documentType) ? trim($documentType) : null,
+                'documentAuthority' => $authority,
+                'exportMode' => $mode,
+                'ossProfile' => $ossProfile,
+                'euB2cMode' => $euB2cMode,
+                'deliveryChannel' => $deliveryChannel,
+                'taxRuleId' => $taxRuleId,
+                'deliveryState' => $deliveryState,
+                'sevUserId' => $sevUserId,
+                'unityId' => $unityId,
+            ];
+        }
+
+        if ($frozenOnly) {
+            return null;
+        }
+
+        $authority = self::contextString($decoded, 'requestedDocumentAuthority');
+        $mode = self::contextString($decoded, 'requestedExportMode');
+        $ossProfile = self::contextString($decoded, 'requestedOssProfile');
+        $euB2cMode = self::contextString($decoded, 'requestedEuB2cMode');
+        $deliveryChannel = self::contextDeliveryChannel($decoded, 'requestedDeliveryChannel');
+        $documentType = match ($mode) {
+            'voucher_only' => 'voucher',
+            'invoice_only' => 'invoice',
+            default => null,
+        };
+        if (
+            !self::validRequestedContext(
+                $documentType,
+                $authority,
+                $mode,
+                $ossProfile,
+                $euB2cMode,
+                $deliveryChannel,
+            )
+        ) {
+            return null;
+        }
+
+        return [
+            'itemId' => $itemId,
+            'itemStatus' => $status,
+            'checkpoint' => $checkpoint,
+            'source' => 'requested',
+            'allowed' => null,
+            'documentType' => $documentType,
+            'documentAuthority' => $authority,
+            'exportMode' => $mode,
+            'ossProfile' => $ossProfile,
+            'euB2cMode' => $euB2cMode,
+            'deliveryChannel' => $deliveryChannel,
+            'taxRuleId' => null,
+            'deliveryState' => null,
+            'sevUserId' => null,
+            'unityId' => null,
+        ];
+    }
+
+    private static function isDedupeSkippedItem(object $item): bool
+    {
+        return (string) ($item->status ?? '') === 'skipped'
+            && (string) ($item->checkpoint ?? '') === 'queued'
+            && (string) ($item->message ?? '') === self::DEDUPE_SKIPPED_MESSAGE;
+    }
+
+    /** @param array<mixed> $candidate */
+    private static function contextString(array $candidate, string $key): string
+    {
+        return is_string($candidate[$key] ?? null) ? trim($candidate[$key]) : '';
+    }
+
+    /** @param array<mixed> $candidate */
+    private static function contextDeliveryChannel(array $candidate, string $key): ?string
+    {
+        $value = $candidate[$key] ?? null;
+
+        return is_string($value) ? trim($value) : null;
+    }
+
+    /** @param array<mixed> $candidate */
+    private static function contextOptionalNumericId(array $candidate, string $key): ?string
+    {
+        $value = $candidate[$key] ?? null;
+        if ($value === null) {
+            return null;
+        }
+        if (!is_int($value) && !is_string($value)) {
+            return null;
+        }
+        $value = trim((string) $value);
+
+        return preg_match('/^[1-9]\d*$/', $value) === 1 ? $value : null;
+    }
+
+    /** @param array<mixed> $candidate */
+    private static function contextDeliveryState(array $candidate): ?string
+    {
+        if (!array_key_exists('deliveryState', $candidate)) {
+            return null;
+        }
+        $value = is_string($candidate['deliveryState']) ? trim($candidate['deliveryState']) : '';
+
+        return in_array($value, ['not_requested', 'ready_not_delivered', 'delivered', 'handed_off'], true)
+            ? $value
+            : null;
+    }
+
+    private static function validRequestedContext(
+        ?string $documentType,
+        string $authority,
+        string $mode,
+        string $ossProfile,
+        string $euB2cMode,
+        ?string $deliveryChannel,
+    ): bool {
+        if ($mode === DocumentTargetResolver::MODE_INVOICE_FOR_OSS) {
+            $documentType = null;
+        }
+
+        return self::validContextValues($authority, $mode, $ossProfile, $euB2cMode, $deliveryChannel)
+            && match ($mode) {
+                DocumentTargetResolver::MODE_VOUCHER_ONLY =>
+                    $documentType === 'voucher' && $authority === DocumentTargetResolver::AUTHORITY_WHMCS,
+                DocumentTargetResolver::MODE_INVOICE_FOR_OSS =>
+                    $documentType === null && $authority === DocumentTargetResolver::AUTHORITY_WHMCS,
+                DocumentTargetResolver::MODE_INVOICE_ONLY => $documentType === 'invoice',
+                default => false,
+            };
+    }
+
+    private static function validDocumentContext(
+        bool $allowed,
+        ?string $documentType,
+        string $authority,
+        string $mode,
+        string $ossProfile,
+        string $euB2cMode,
+        ?string $deliveryChannel,
+    ): bool {
+        if (!self::validContextValues($authority, $mode, $ossProfile, $euB2cMode, $deliveryChannel)) {
+            return false;
+        }
+        if (!$allowed) {
+            return $documentType === null;
+        }
+        if (!in_array($documentType, ['voucher', 'invoice'], true)) {
+            return false;
+        }
+
+        if ($documentType === 'voucher') {
+            return $authority === DocumentTargetResolver::AUTHORITY_WHMCS
+                && $mode !== DocumentTargetResolver::MODE_INVOICE_ONLY;
+        }
+
+        return in_array(
+            $mode,
+            [DocumentTargetResolver::MODE_INVOICE_FOR_OSS, DocumentTargetResolver::MODE_INVOICE_ONLY],
+            true,
+        );
+    }
+
+    private static function validContextValues(
+        string $authority,
+        string $mode,
+        string $ossProfile,
+        string $euB2cMode,
+        ?string $deliveryChannel,
+    ): bool {
+        return DocumentTargetResolver::contextValuesAreValid(
+            $mode,
+            $authority,
+            $ossProfile,
+            $euB2cMode,
+            $deliveryChannel,
+        );
+    }
+
     /** @param array<mixed> $value */
     private function encode(array $value): string
     {
@@ -689,6 +1379,95 @@ final class JobRepository
         }
 
         return $this->encode(array_replace($current, $newValues));
+    }
+
+    /**
+     * A paid hook that loses the cross-type dedupe race leaves a monotonic
+     * signal on the active hybrid-mode owner. The owner still decides the
+     * document type; this never copies or changes a frozen target.
+     *
+     * @param array<string,mixed>|null $incomingCandidate
+     */
+    private function markPaidTriggerOnActiveExport(
+        ?string $dedupeKey,
+        ?int $invoiceId,
+        string $action,
+        ?array $incomingCandidate,
+        string $now,
+    ): void {
+        if (
+            $dedupeKey === null
+            || $dedupeKey === ''
+            || $invoiceId === null
+            || $invoiceId < 1
+            || $action !== 'export_document'
+            || ($incomingCandidate['trigger'] ?? null) !== 'InvoicePaid'
+            || ($incomingCandidate['requestedExportMode'] ?? null) !== 'invoice_for_oss'
+        ) {
+            return;
+        }
+
+        $owner = Capsule::table(Migrator::ITEMS_TABLE)
+            ->where('dedupe_key', $dedupeKey)
+            ->where('invoice_id', $invoiceId)
+            ->where('action', 'export_document')
+            ->lockForUpdate()
+            ->first();
+        if ($owner === null) {
+            return;
+        }
+
+        $candidate = self::decodeCandidate($owner->candidate_json ?? null);
+        $ownerMode = $candidate['targetExportMode'] ?? $candidate['requestedExportMode'] ?? null;
+        if ($ownerMode !== 'invoice_for_oss') {
+            return;
+        }
+        $candidate['paidTriggerObserved'] = true;
+        $candidate['paidTriggerObservedAt'] = $now;
+
+        Capsule::table(Migrator::ITEMS_TABLE)
+            ->where('id', $owner->id)
+            ->where('dedupe_key', $dedupeKey)
+            ->update([
+                'candidate_json' => $this->encode($candidate),
+                'updated_at' => $now,
+            ]);
+    }
+
+    private function shouldResumeAfterPaidTrigger(
+        object $current,
+        JobOutcome $outcome,
+        ?string $candidateJson,
+    ): bool {
+        if (
+            $outcome->status !== 'skipped'
+            || (string) ($current->action ?? '') !== 'export_document'
+            || (string) ($current->checkpoint ?? '') !== 'invoice_payment_pending'
+            || trim((string) ($current->dedupe_key ?? '')) === ''
+        ) {
+            return false;
+        }
+
+        $candidate = self::decodeCandidate($candidateJson);
+
+        return ($candidate['requestedExportMode'] ?? null) === 'invoice_for_oss'
+            && ($candidate['invoicePaymentPending'] ?? null) === true
+            && ($candidate['paidTriggerObserved'] ?? null) === true;
+    }
+
+    /** @return array<string,mixed> */
+    private static function decodeCandidate(mixed $candidateJson): array
+    {
+        if (!is_string($candidateJson) || $candidateJson === '') {
+            return [];
+        }
+        try {
+            $candidate = json_decode($candidateJson, true, 64, JSON_THROW_ON_ERROR);
+
+            return is_array($candidate) ? $candidate : [];
+        } catch (\JsonException) {
+            return [];
+        }
     }
 
     private function now(): string

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace WHMCS\Module\Addon\SevDesk\Jobs;
 
 use JsonException;
+use Throwable;
 use WHMCS\Database\Capsule;
 use WHMCS\Module\Addon\SevDesk\Config;
 use WHMCS\Module\Addon\SevDesk\Domain\Decimal;
@@ -29,20 +30,81 @@ final class BookingJobHandler
         try {
             $candidate = json_decode((string) ($item->candidate_json ?? ''), true, 32, JSON_THROW_ON_ERROR);
         } catch (JsonException) {
-            return JobOutcome::permanentFailure(
+            return self::invalidCandidateOutcome(
+                $item,
                 'Die gespeicherte Buchungsvorschau ist ungültig.',
-                errorCode: 'invalid_booking_candidate',
+                'invalid_booking_candidate',
             );
         }
         if (!is_array($candidate)) {
-            return JobOutcome::permanentFailure(
+            return self::invalidCandidateOutcome(
+                $item,
                 'Die gespeicherte Buchungsvorschau fehlt.',
-                errorCode: 'missing_booking_candidate',
+                'missing_booking_candidate',
             );
         }
 
-        if (in_array((string) ($item->checkpoint ?? ''), ['booking_write_requested', 'booking_completed'], true)) {
+        $legacyVoucher = false;
+        if (self::normalisedDocumentType($candidate['documentType'] ?? null) === null) {
+            $upgraded = $this->bookings->upgradeLegacyVoucherConfirmation($candidate);
+            if ($upgraded === null) {
+                $checkpointName = (string) ($item->checkpoint ?? '');
+
+                return JobRepository::isRiskyCheckpoint($checkpointName)
+                    ? JobOutcome::ambiguous(
+                        'Der riskante Legacy-Buchungsjob besitzt keinen beweiskräftigen booking-v1-Snapshot. '
+                            . 'Er darf ausschließlich manuell geprüft werden.',
+                        $checkpointName,
+                        isset($candidate['voucherId']) ? (string) $candidate['voucherId'] : null,
+                        errorCode: 'legacy_booking_candidate_unverifiable',
+                    )
+                    : JobOutcome::permanentFailure(
+                        'Die alte Buchungsvorschau kann nicht sicher als booking-v1-Voucher bestätigt werden. '
+                            . 'Bitte eine neue Vorschau erzeugen.',
+                        errorCode: 'legacy_booking_candidate_unverifiable',
+                    );
+            }
+            $candidate = $upgraded;
+            $legacyVoucher = true;
+        } elseif (($candidate['bookingSchema'] ?? null) === 'booking-v1') {
+            $legacyVoucher = true;
+        }
+
+        $currentCheckpoint = (string) ($item->checkpoint ?? '');
+        if ($currentCheckpoint === 'booking_write_requested') {
+            $mappingFailure = $this->validateCurrentMapping($candidate, $item, $legacyVoucher);
+            if ($mappingFailure !== null) {
+                return JobOutcome::ambiguous(
+                    $mappingFailure->message,
+                    $currentCheckpoint,
+                    isset($candidate['voucherId']) ? (string) $candidate['voucherId'] : null,
+                    $mappingFailure->httpStatus,
+                    $mappingFailure->exceptionUuid,
+                    $mappingFailure->errorCode,
+                );
+            }
+
             return $this->reconcile($candidate, $item);
+        }
+        if ($currentCheckpoint === 'booking_completed') {
+            if (!$this->bookings->confirmationIsAuthentic($candidate)) {
+                return JobOutcome::ambiguous(
+                    'Der dauerhaft bestätigte Buchungscheckpoint passt nicht mehr zum gespeicherten Snapshot.',
+                    'booking_completed',
+                    isset($candidate['voucherId']) ? (string) $candidate['voucherId'] : null,
+                    errorCode: 'booking_completed_context_invalid',
+                );
+            }
+
+            return JobOutcome::succeeded(
+                'Die bereits verifizierte sevdesk-Buchung wurde lokal abgeschlossen.',
+                isset($candidate['voucherId']) ? (string) $candidate['voucherId'] : null,
+                [
+                    'resultCode' => 'booking_completed',
+                    'documentType' => (string) ($candidate['documentType'] ?? ''),
+                    'transactionId' => (string) ($candidate['transactionId'] ?? ''),
+                ],
+            );
         }
 
         $localFailure = $this->validateWhmcsPayment($candidate, $item);
@@ -50,12 +112,22 @@ final class BookingJobHandler
             return $localFailure;
         }
 
-        $mappingFailure = $this->validateCurrentMapping($candidate, $item);
+        $mappingFailure = $this->validateCurrentMapping($candidate, $item, $legacyVoucher);
         if ($mappingFailure !== null) {
             return $mappingFailure;
         }
 
-        $persistCheckpoint = static function (string $name, array $context = []) use ($checkpoint, $item): bool {
+        $persistCheckpoint = static function (
+            string $name,
+            array $context = [],
+        ) use (
+            $checkpoint,
+            $item,
+            $legacyVoucher,
+        ): bool {
+            if ($legacyVoucher) {
+                $context['bookingSchema'] = 'booking-v1';
+            }
             $stored = $checkpoint($name, $context);
             if ($stored) {
                 $item->checkpoint = $name;
@@ -69,10 +141,12 @@ final class BookingJobHandler
         $message = (string) ($result['message'] ?? 'Die Zahlung konnte nicht gebucht werden.');
         $context = is_array($result['context'] ?? null) ? $result['context'] : [];
         $voucherId = isset($candidate['voucherId']) ? (string) $candidate['voucherId'] : null;
+        $documentType = self::normalisedDocumentType($candidate['documentType'] ?? null);
 
         if ($status === 'succeeded') {
             return JobOutcome::succeeded('Die eindeutige sevdesk-Banktransaktion wurde gebucht.', $voucherId, [
                 'resultCode' => $code,
+                'documentType' => $documentType ?? '',
                 'transactionId' => (string) ($candidate['transactionId'] ?? ''),
             ]);
         }
@@ -89,10 +163,12 @@ final class BookingJobHandler
         }
 
         $httpStatus = self::intOrNull($context['httpStatus'] ?? null);
+        $definiteWriteRejected = self::truthy($context['definiteWriteRejected'] ?? false);
+        $resumeCheckpoint = $definiteWriteRejected
+            ? 'queued'
+            : (string) ($item->checkpoint ?? 'queued');
         if (in_array($httpStatus, [401, 403], true)) {
-            $this->config->set('sync_enabled', '');
-            $this->config->set('health_alarm', 'api_authentication_failed');
-            $this->jobs->pause((int) $item->job_id);
+            $this->tripAuthenticationAlarm((int) $item->job_id);
 
             return JobOutcome::retry(
                 'sevdesk hat die Authentifizierung abgelehnt; der Job wurde pausiert.',
@@ -100,6 +176,7 @@ final class BookingJobHandler
                 $httpStatus,
                 self::stringOrNull($context['exceptionUuid'] ?? null),
                 'api_authentication_failed',
+                $resumeCheckpoint,
             );
         }
         if ($httpStatus === 429 && (int) ($item->attempts ?? 1) < 10) {
@@ -109,6 +186,7 @@ final class BookingJobHandler
                 429,
                 self::stringOrNull($context['exceptionUuid'] ?? null),
                 $code,
+                $resumeCheckpoint,
             );
         }
         $safeRetry = $httpStatus === 408
@@ -123,10 +201,17 @@ final class BookingJobHandler
                 $httpStatus,
                 self::stringOrNull($context['exceptionUuid'] ?? null),
                 $code,
+                $resumeCheckpoint,
             );
         }
 
-        return JobOutcome::permanentFailure($message, $httpStatus, self::stringOrNull($context['exceptionUuid'] ?? null), $code);
+        return JobOutcome::permanentFailure(
+            $message,
+            $httpStatus,
+            self::stringOrNull($context['exceptionUuid'] ?? null),
+            $code,
+            $resumeCheckpoint,
+        );
     }
 
     /** @param array<string,mixed> $candidate */
@@ -139,12 +224,6 @@ final class BookingJobHandler
         $context = is_array($result['context'] ?? null) ? $result['context'] : [];
         $voucherId = isset($candidate['voucherId']) ? (string) $candidate['voucherId'] : null;
 
-        if ($status === 'succeeded') {
-            return JobOutcome::succeeded('Die frühere Buchung wurde anhand des Remote-Zustands eindeutig bestätigt.', $voucherId, [
-                'resultCode' => $code,
-                'transactionId' => (string) ($candidate['transactionId'] ?? ''),
-            ]);
-        }
         if ($status === 'blocked' && $code === 'booking_not_applied') {
             return JobOutcome::permanentFailure(
                 'Der frühere Aufruf wurde nachweislich nicht angewendet. Vor einem neuen Versuch ist eine neue Vorschau erforderlich.',
@@ -154,9 +233,7 @@ final class BookingJobHandler
 
         $httpStatus = self::intOrNull($context['httpStatus'] ?? null);
         if (in_array($httpStatus, [401, 403], true)) {
-            $this->config->set('sync_enabled', '');
-            $this->config->set('health_alarm', 'api_authentication_failed');
-            $this->jobs->pause((int) $item->job_id);
+            $this->tripAuthenticationAlarm((int) $item->job_id);
         }
 
         return JobOutcome::ambiguous(
@@ -239,14 +316,27 @@ final class BookingJobHandler
     }
 
     /** @param array<string,mixed> $candidate */
-    private function validateCurrentMapping(array $candidate, object $item): ?JobOutcome
-    {
+    private function validateCurrentMapping(
+        array $candidate,
+        object $item,
+        bool $legacyVoucher = false,
+    ): ?JobOutcome {
         $invoiceId = (int) ($candidate['whmcsInvoiceId'] ?? 0);
         $voucherId = trim((string) ($candidate['voucherId'] ?? ''));
+        $candidateType = self::normalisedDocumentType($candidate['documentType'] ?? null);
         if ($invoiceId < 1 || $invoiceId !== (int) ($item->invoice_id ?? 0) || $voucherId === '') {
             return JobOutcome::permanentFailure(
                 'Die gespeicherte WHMCS-zu-sevdesk-Zuordnung ist unvollständig.',
                 errorCode: 'booking_mapping_reference_missing',
+            );
+        }
+        if ($candidateType === null) {
+            return JobOutcome::permanentFailure(
+                'Die Buchungsvorschau enthält keinen bestätigten sevdesk-Dokumenttyp.',
+                errorCode: self::documentTypeErrorCode(
+                    $candidate['documentType'] ?? null,
+                    'booking_candidate_document_type',
+                ),
             );
         }
 
@@ -266,7 +356,49 @@ final class BookingJobHandler
             );
         }
 
+        $mappingType = self::normalisedDocumentType($mapping->document_type ?? null);
+        if ($mappingType === null) {
+            if ($legacyVoucher && $candidateType === MappingRepository::DOCUMENT_TYPE_VOUCHER) {
+                // booking-v1 could only have been produced after a successful
+                // Voucher preview. Keep the mapping untyped, but allow this one
+                // already-confirmed legacy job to complete on the Voucher path.
+                return null;
+            }
+
+            return JobOutcome::permanentFailure(
+                'Die sevdesk-Zuordnung besitzt keinen bestätigten Dokumenttyp. Bitte zuerst im Recovery klären.',
+                errorCode: self::documentTypeErrorCode(
+                    $mapping->document_type ?? null,
+                    'booking_mapping_document_type',
+                ),
+            );
+        }
+        if ($mappingType !== $candidateType) {
+            return JobOutcome::permanentFailure(
+                'Der Dokumenttyp der sevdesk-Zuordnung hat sich seit der Vorschau geändert. '
+                    . 'Bitte eine neue Vorschau erzeugen.',
+                errorCode: 'booking_mapping_document_type_changed',
+            );
+        }
+
         return null;
+    }
+
+    private static function normalisedDocumentType(mixed $value): ?string
+    {
+        if (!is_string($value)) {
+            return null;
+        }
+        $value = strtolower(trim($value));
+
+        return in_array($value, ['voucher', 'invoice'], true) ? $value : null;
+    }
+
+    private static function documentTypeErrorCode(mixed $value, string $prefix): string
+    {
+        return $value === null || (is_string($value) && trim($value) === '')
+            ? $prefix . '_missing'
+            : $prefix . '_invalid';
     }
 
     private static function intOrNull(mixed $value): ?int
@@ -282,5 +414,53 @@ final class BookingJobHandler
     private static function truthy(mixed $value): bool
     {
         return $value === true || $value === 1 || $value === '1' || $value === 'true';
+    }
+
+    private static function invalidCandidateOutcome(object $item, string $message, string $errorCode): JobOutcome
+    {
+        $checkpoint = (string) ($item->checkpoint ?? '');
+        if (JobRepository::isRiskyCheckpoint($checkpoint)) {
+            return JobOutcome::ambiguous(
+                $message . ' Ein bereits begonnener Buchungs-Write bleibt deshalb manuell zu klären.',
+                $checkpoint,
+                self::stringOrNull($item->sevdesk_id ?? null),
+                errorCode: $errorCode,
+            );
+        }
+
+        return JobOutcome::permanentFailure($message, errorCode: $errorCode);
+    }
+
+    private function tripAuthenticationAlarm(int $jobId): void
+    {
+        $safety = $this->config->tripAuthenticationSafetyGates();
+        self::logAuthenticationSafetyFailure($safety);
+        if ($jobId < 1) {
+            return;
+        }
+        try {
+            $this->jobs->pause($jobId);
+        } catch (Throwable $error) {
+            if (function_exists('logActivity')) {
+                logActivity('sevdesk booking alarm could not pause the current job: ' . get_class($error));
+            }
+        }
+    }
+
+    /** @param array{alarm:bool,reviewFallback:bool,syncDisabled:bool} $safety */
+    private static function logAuthenticationSafetyFailure(array $safety): void
+    {
+        if (!function_exists('logActivity')) {
+            return;
+        }
+        if (!$safety['alarm']) {
+            logActivity('sevdesk booking authentication alarm used runtime-review fallback.');
+        }
+        if (!$safety['alarm'] && !$safety['reviewFallback']) {
+            logActivity('sevdesk booking authentication claim gates could not be persisted.');
+        }
+        if (!$safety['syncDisabled']) {
+            logActivity('sevdesk booking authentication alarm could not disable enqueueing.');
+        }
     }
 }

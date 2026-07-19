@@ -1,8 +1,8 @@
 {
   "name": "nerdscave/whmcs-sevdesk",
-  "description": "Resumable WHMCS to sevdesk voucher export module",
+  "description": "Resumable WHMCS to sevdesk voucher and invoice document export module",
   "type": "project",
-  "license": "proprietary",
+  "license": "GPL-3.0-or-later",
   "require": {
     "php": ">=8.3",
     "ext-curl": "*",

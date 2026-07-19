@@ -39,6 +39,8 @@ final class BookingServiceTest extends TestCase
         self::assertSame('false', $query['isBooked']);
         self::assertSame('true', $query['onlyCredit']);
         self::assertSame('TX-42', $query['paymtPurpose']);
+        self::assertSame('1000', $query['limit']);
+        self::assertSame('0', $query['offset']);
 
         $checkpoints = [];
         $result = $service->confirm(
@@ -72,6 +74,87 @@ final class BookingServiceTest extends TestCase
         self::assertSame(9, $payload['checkAccount']['id']);
     }
 
+    public function testInvoicePreviewAndConfirmationUseInvoiceEndpointsAndLog(): void
+    {
+        $history = [];
+        $service = new BookingService($this->client([
+            $this->invoiceResponse(),
+            $this->transactionListResponse(),
+            $this->accountResponse(),
+            $this->invoiceResponse(),
+            $this->transactionResponse(),
+            $this->accountResponse(),
+            $this->transactionListResponse(),
+            new Response(200, [], '{"id":"91","objectName":"InvoiceLog","invoice":{"id":"88"}}'),
+        ], $history));
+
+        $preview = $service->preview($this->payment(documentType: 'invoice'));
+
+        self::assertSame('ready', $preview['status']);
+        self::assertSame('invoice', $preview['confirmation']['documentType']);
+        self::assertSame('/api/v1/Invoice/88', $history[0]['request']->getUri()->getPath());
+
+        $result = $service->confirm($preview['confirmation'], true);
+
+        self::assertSame('succeeded', $result['status']);
+        self::assertSame('/api/v1/Invoice/88', $history[3]['request']->getUri()->getPath());
+        self::assertSame('/api/v1/Invoice/88/bookAmount', $history[7]['request']->getUri()->getPath());
+    }
+
+    public function testLegacyOrUnsupportedDocumentTypeBlocksBeforeAnyApiRead(): void
+    {
+        foreach ([null, '', 'credit_note'] as $documentType) {
+            $history = [];
+            $service = new BookingService($this->client([], $history));
+            $payment = $this->payment();
+            $payment['documentType'] = $documentType;
+
+            $result = $service->preview($payment);
+
+            self::assertSame('blocked', $result['status']);
+            self::assertSame(
+                $documentType === null || $documentType === ''
+                    ? 'booking_document_type_missing'
+                    : 'booking_document_type_invalid',
+                $result['code'],
+            );
+            self::assertCount(0, $history);
+        }
+    }
+
+    public function testOnlyAnAuthenticBookingV1SnapshotCanUpgradeToLegacyVoucher(): void
+    {
+        $history = [];
+        $service = new BookingService($this->client([], $history));
+        $legacy = [
+            'whmcsTransactionId' => 'TX-42',
+            'voucherId' => '88',
+            'transactionId' => '73',
+            'checkAccountId' => '9',
+            'amount' => '119.00',
+            'amountMinorUnits' => 11900,
+            'currency' => 'EUR',
+            'bookingDate' => '2026-07-10',
+            'bookingType' => 'FULL_PAYMENT',
+            'voucherPaidMinorUnits' => 0,
+        ];
+        $legacy['reference'] = hash('sha256', implode('|', [
+            'booking-v1', 'TX-42', '88', '73', '9', '11900', 'EUR',
+            '2026-07-10', 'FULL_PAYMENT', '0',
+        ]));
+
+        $upgraded = $service->upgradeLegacyVoucherConfirmation($legacy);
+
+        self::assertNotNull($upgraded);
+        self::assertSame('voucher', $upgraded['documentType']);
+        self::assertSame('booking-v1', $upgraded['bookingSchema']);
+        self::assertTrue($service->confirmationIsAuthentic($upgraded));
+
+        $legacy['amount'] = '118.00';
+        $legacy['amountMinorUnits'] = 11800;
+        self::assertNull($service->upgradeLegacyVoucherConfirmation($legacy));
+    }
+
     public function testPreviewUsesPartialBookingTypeForAmountBelowRemainingBalance(): void
     {
         $history = [];
@@ -86,6 +169,23 @@ final class BookingServiceTest extends TestCase
         self::assertSame('ready', $preview['status']);
         self::assertSame('N', $preview['confirmation']['bookingType']);
         self::assertCount(3, $history);
+    }
+
+    public function testFullyPaidDocumentHasADistinctNonActionablePreviewCode(): void
+    {
+        foreach (['voucher', 'invoice'] as $documentType) {
+            $history = [];
+            $document = $documentType === 'invoice'
+                ? $this->invoiceResponse('119.00', '119.00', '1000')
+                : $this->voucherResponse('119.00', '119.00', '1000');
+            $service = new BookingService($this->client([$document], $history));
+
+            $preview = $service->preview($this->payment(documentType: $documentType));
+
+            self::assertSame('blocked', $preview['status']);
+            self::assertSame($documentType . '_already_paid', $preview['code']);
+            self::assertCount(1, $history);
+        }
     }
 
     public function testChangedPaidAmountBaselineBlocksPartialPaymentBeforeWrite(): void
@@ -131,6 +231,77 @@ final class BookingServiceTest extends TestCase
         self::assertSame('multiple_payment_candidates', $preview['code']);
         self::assertSame(2, $preview['context']['matchCount']);
         self::assertCount(3, $history);
+    }
+
+    public function testTransactionReferenceMustMatchACompletePurposeToken(): void
+    {
+        $history = [];
+        $transactions = json_encode([
+            'objects' => [
+                $this->transaction('73', purpose: 'WHMCS payment TX-420'),
+            ],
+        ], JSON_THROW_ON_ERROR);
+        $service = new BookingService($this->client([
+            $this->voucherResponse(),
+            new Response(200, [], $transactions),
+        ], $history));
+
+        $preview = $service->preview($this->payment());
+
+        self::assertSame('blocked', $preview['status']);
+        self::assertSame('no_payment_candidate', $preview['code']);
+        self::assertCount(2, $history, 'TX-42 must not match the longer reference TX-420.');
+    }
+
+    public function testFullTransactionSearchPageBlocksBeforeAccountReads(): void
+    {
+        $history = [];
+        $service = new BookingService($this->client([
+            $this->voucherResponse(),
+            $this->fullTransactionListResponse(),
+        ], $history));
+
+        $preview = $service->preview($this->payment());
+
+        self::assertSame('blocked', $preview['status']);
+        self::assertSame('payment_candidate_search_truncated', $preview['code']);
+        self::assertCount(2, $history, 'A full search page must block before resolving transaction accounts.');
+        parse_str($history[1]['request']->getUri()->getQuery(), $query);
+        self::assertSame('1000', $query['limit']);
+        self::assertSame('0', $query['offset']);
+    }
+
+    public function testFullTransactionSearchPageAlsoBlocksConfirmationBeforeCheckpointAndWrite(): void
+    {
+        $history = [];
+        $service = new BookingService($this->client([
+            $this->voucherResponse(),
+            $this->transactionListResponse(),
+            $this->accountResponse(),
+            $this->voucherResponse(),
+            $this->transactionResponse(),
+            $this->accountResponse(),
+            $this->fullTransactionListResponse(),
+        ], $history));
+        $preview = $service->preview($this->payment());
+        $checkpoints = [];
+
+        $result = $service->confirm(
+            $preview['confirmation'],
+            true,
+            static function (string $name) use (&$checkpoints): void {
+                $checkpoints[] = $name;
+            },
+        );
+
+        self::assertSame('blocked', $result['status']);
+        self::assertSame('payment_candidate_search_truncated', $result['code']);
+        self::assertSame([], $checkpoints);
+        self::assertCount(7, $history);
+        self::assertSame(0, count(array_filter(
+            $history,
+            static fn (array $entry): bool => $entry['request']->getMethod() === 'PUT',
+        )));
     }
 
     public function testAccountCurrencyMismatchProducesNoCandidate(): void
@@ -198,6 +369,25 @@ final class BookingServiceTest extends TestCase
         self::assertCount(3, $history);
     }
 
+    public function testChangedDocumentTypeInvalidatesConfirmationBeforeFreshReads(): void
+    {
+        $history = [];
+        $service = new BookingService($this->client([
+            $this->voucherResponse(),
+            $this->transactionListResponse(),
+            $this->accountResponse(),
+        ], $history));
+        $preview = $service->preview($this->payment());
+        $confirmation = $preview['confirmation'];
+        $confirmation['documentType'] = 'invoice';
+
+        $result = $service->confirm($confirmation, true);
+
+        self::assertSame('blocked', $result['status']);
+        self::assertSame('confirmation_changed', $result['code']);
+        self::assertCount(3, $history);
+    }
+
     public function testUnknownPutOutcomeIsAmbiguousAndNeverRetriedInsideService(): void
     {
         $history = [];
@@ -245,7 +435,7 @@ final class BookingServiceTest extends TestCase
         self::assertSame('booking_response_ambiguous', $result['code']);
     }
 
-    public function testReconciliationProvesACompletedBookingWithoutAnotherWrite(): void
+    public function testReconciliationCannotProveTheConcreteTransactionDocumentLink(): void
     {
         $history = [];
         $service = new BookingService($this->client([
@@ -259,8 +449,8 @@ final class BookingServiceTest extends TestCase
 
         $result = $service->reconcile($preview['confirmation']);
 
-        self::assertSame('succeeded', $result['status']);
-        self::assertSame('booking_reconciled', $result['code']);
+        self::assertSame('ambiguous', $result['status']);
+        self::assertSame('booking_reconciliation_link_unprovable', $result['code']);
         self::assertCount(5, $history);
         self::assertSame(0, count(array_filter(
             $history,
@@ -301,6 +491,7 @@ final class BookingServiceTest extends TestCase
     /**
      * @return array{
      *     kind: string,
+     *     documentType: string,
      *     whmcsTransactionId: string,
      *     voucherId: string,
      *     amount: string,
@@ -308,10 +499,14 @@ final class BookingServiceTest extends TestCase
      *     bookingDate: string
      * }
      */
-    private function payment(string $amount = '119.00', string $kind = 'payment'): array
-    {
+    private function payment(
+        string $amount = '119.00',
+        string $kind = 'payment',
+        string $documentType = 'voucher',
+    ): array {
         return [
             'kind' => $kind,
+            'documentType' => $documentType,
             'whmcsTransactionId' => 'TX-42',
             'voucherId' => '88',
             'amount' => $amount,
@@ -337,10 +532,39 @@ final class BookingServiceTest extends TestCase
         ], JSON_THROW_ON_ERROR));
     }
 
+    private function invoiceResponse(
+        string $sumGross = '119.00',
+        string $paidAmount = '0.00',
+        string $status = '200',
+    ): Response {
+        return new Response(200, [], json_encode([
+            'objects' => [[
+                'id' => '88',
+                'objectName' => 'Invoice',
+                'status' => $status,
+                'currency' => 'EUR',
+                'sumGross' => $sumGross,
+                'paidAmount' => $paidAmount,
+            ]],
+        ], JSON_THROW_ON_ERROR));
+    }
+
     private function transactionListResponse(string $amount = '119.00'): Response
     {
         return new Response(200, [], json_encode([
             'objects' => [$this->transaction('73', $amount)],
+        ], JSON_THROW_ON_ERROR));
+    }
+
+    private function fullTransactionListResponse(): Response
+    {
+        $transactions = [];
+        for ($id = 1; $id <= 1000; ++$id) {
+            $transactions[] = $this->transaction((string) $id);
+        }
+
+        return new Response(200, [], json_encode([
+            'objects' => $transactions,
         ], JSON_THROW_ON_ERROR));
     }
 
@@ -352,13 +576,17 @@ final class BookingServiceTest extends TestCase
     }
 
     /** @return array<string, mixed> */
-    private function transaction(string $id, string $amount = '119.00', string $status = '100'): array
-    {
+    private function transaction(
+        string $id,
+        string $amount = '119.00',
+        string $status = '100',
+        string $purpose = 'WHMCS payment TX-42',
+    ): array {
         return [
             'id' => $id,
             'objectName' => 'CheckAccountTransaction',
             'status' => $status,
-            'paymtPurpose' => 'WHMCS payment TX-42',
+            'paymtPurpose' => $purpose,
             'amount' => $amount,
             'checkAccount' => ['id' => '9', 'objectName' => 'CheckAccount'],
         ];

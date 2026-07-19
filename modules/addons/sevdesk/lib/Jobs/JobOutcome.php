@@ -36,8 +36,16 @@ final readonly class JobOutcome
         ?int $httpStatus = null,
         ?string $exceptionUuid = null,
         ?string $errorCode = null,
+        string $checkpoint = 'finished',
     ): self {
-        return new self('permanent_failed', $message, httpStatus: $httpStatus, exceptionUuid: $exceptionUuid, errorCode: $errorCode);
+        return new self(
+            'permanent_failed',
+            $message,
+            httpStatus: $httpStatus,
+            exceptionUuid: $exceptionUuid,
+            errorCode: $errorCode,
+            checkpoint: $checkpoint,
+        );
     }
 
     /** @param array<string, scalar|null>|null $candidate */

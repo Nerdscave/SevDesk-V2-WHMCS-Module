@@ -4,10 +4,13 @@ declare(strict_types=1);
 
 namespace WHMCS\Module\Addon\SevDesk\Tests\Integration;
 
+use DateTimeImmutable;
+use InvalidArgumentException;
 use RuntimeException;
 use WHMCS\Database\Capsule;
 use WHMCS\Module\Addon\SevDesk\Config;
 use WHMCS\Module\Addon\SevDesk\Database\Migrator;
+use WHMCS\Module\Addon\SevDesk\Repository\JobRepository;
 use WHMCS\Module\Addon\SevDesk\Repository\MappingRepository;
 use WHMCS\Module\Addon\SevDesk\Tests\Integration\Support\MariaDbTestCase;
 
@@ -21,6 +24,11 @@ final class MigrationTest extends MariaDbTestCase
         self::assertTrue(Capsule::schema()->hasTable(Migrator::MAPPING_TABLE));
         self::assertTrue(Capsule::schema()->hasTable(Migrator::JOBS_TABLE));
         self::assertTrue(Capsule::schema()->hasTable(Migrator::ITEMS_TABLE));
+        foreach (
+            ['document_type', 'document_number', 'document_ready_at', 'delivered_at', 'pdf_sha256'] as $column
+        ) {
+            self::assertTrue(Capsule::schema()->hasColumn(Migrator::MAPPING_TABLE, $column));
+        }
         self::assertSame(
             ['mod_sevdesk_invoice_id_unique', 'mod_sevdesk_sevdesk_id_unique'],
             $this->mappingUniqueIndexNames(),
@@ -32,6 +40,67 @@ final class MigrationTest extends MariaDbTestCase
             'mapping_remote_unique' => true,
             'item_dedupe_unique' => true,
         ], Migrator::schemaReport());
+        Migrator::assertRuntimeSchema();
+        self::assertSame('voucher_only', (new Config())->get('export_mode'));
+    }
+
+    public function testWorkerRuntimeRejectsUnsignedSchemaBeforeMigrationAndDisablesSync(): void
+    {
+        Migrator::up();
+        $config = new Config();
+        $config->set('sync_enabled', 'on');
+        Capsule::schema()->table(Migrator::MAPPING_TABLE, static function ($table): void {
+            $table->dropColumn('document_type');
+        });
+
+        try {
+            Migrator::prepareWorkerRuntime($config);
+            self::fail('An unsigned worker runtime must stop before repairing the schema.');
+        } catch (RuntimeException $error) {
+            self::assertSame(
+                'The sevdesk replacement requires an admin-side upgrade review.',
+                $error->getMessage(),
+            );
+        }
+
+        self::assertFalse(Capsule::schema()->hasColumn(Migrator::MAPPING_TABLE, 'document_type'));
+        $stored = (new Config())->stored();
+        self::assertSame('', $stored['sync_enabled']);
+        self::assertSame('', $stored[Config::RUNTIME_SIGNATURE_SETTING]);
+        self::assertSame('on', $stored[Config::RUNTIME_REVIEW_SETTING]);
+    }
+
+    public function testWorkerRuntimeAcceptsOnlySignedCompleteSchema(): void
+    {
+        Migrator::up();
+        $config = new Config();
+        $config->set('sync_enabled', 'on');
+        $config->set(Config::RUNTIME_SIGNATURE_SETTING, Config::RUNTIME_SIGNATURE);
+
+        Migrator::prepareWorkerRuntime($config);
+
+        self::assertSame('on', (new Config())->stored()['sync_enabled']);
+        Migrator::assertRuntimeSchema();
+    }
+
+    public function testWorkerRuntimeDoesNotProcessAQuarantinedSignedSchema(): void
+    {
+        Migrator::up();
+        $config = new Config();
+        $config->set('sync_enabled', 'on');
+        $config->set(Config::RUNTIME_SIGNATURE_SETTING, Config::RUNTIME_SIGNATURE);
+        $config->set(Config::RUNTIME_REVIEW_SETTING, 'on');
+
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('inventory review');
+        try {
+            Migrator::prepareWorkerRuntime($config);
+        } finally {
+            $stored = (new Config())->stored();
+            self::assertSame(Config::RUNTIME_SIGNATURE, $stored[Config::RUNTIME_SIGNATURE_SETTING]);
+            self::assertSame('on', $stored[Config::RUNTIME_REVIEW_SETTING]);
+            self::assertSame('on', $stored['sync_enabled']);
+        }
     }
 
     public function testLegacyMappingInventorySurvivesMigrationUnchanged(): void
@@ -63,6 +132,11 @@ final class MigrationTest extends MariaDbTestCase
 
         self::assertSame(12, Capsule::table(Migrator::MAPPING_TABLE)->count());
         self::assertSame($before, $this->mappingChecksum());
+        self::assertSame(12, Capsule::table(Migrator::MAPPING_TABLE)->whereNull('document_type')->count());
+        self::assertSame(12, Capsule::table(Migrator::MAPPING_TABLE)->whereNull('document_number')->count());
+        self::assertSame(12, Capsule::table(Migrator::MAPPING_TABLE)->whereNull('document_ready_at')->count());
+        self::assertSame(12, Capsule::table(Migrator::MAPPING_TABLE)->whereNull('delivered_at')->count());
+        self::assertSame(12, Capsule::table(Migrator::MAPPING_TABLE)->whereNull('pdf_sha256')->count());
         self::assertSame(
             ['complete' => 5, 'ambiguous' => 3, 'orphans' => 4],
             (new MappingRepository())->counts(),
@@ -107,6 +181,43 @@ final class MigrationTest extends MariaDbTestCase
         $config->set('eu_b2b_goods_confirmed', true);
 
         self::assertTrue($config->taxProfiles()['eu_b2b']['confirmed']);
+    }
+
+    public function testInvoiceDefaultsAreSafeAndExistingOrUnknownSettingsSurvive(): void
+    {
+        Capsule::table('tbladdonmodules')->insert([
+            [
+                'module' => 'sevdesk',
+                'setting' => 'export_mode',
+                'value' => 'invoice_only',
+            ],
+            [
+                'module' => 'sevdesk',
+                'setting' => 'future_unknown_setting',
+                'value' => 'preserve-me',
+            ],
+        ]);
+
+        Migrator::up();
+        Migrator::up();
+        $config = new Config();
+
+        self::assertSame('invoice_only', $config->get('export_mode'));
+        self::assertSame('whmcs', $config->get('document_authority'));
+        self::assertSame('blocked', $config->get('oss_profile'));
+        self::assertFalse($config->bool('invoice_canary_confirmed'));
+        self::assertSame('', $config->get('invoice_sev_user_id'));
+        self::assertSame('', $config->get('invoice_unity_id'));
+        self::assertSame('sevdesk', $config->get('invoice_delivery_channel'));
+        self::assertSame('', $config->get('whmcs_invoice_email_template'));
+        self::assertSame('Ihre Rechnung {invoice_number}', $config->get('sevdesk_email_subject'));
+        self::assertSame(
+            "Guten Tag,\n\nim Anhang finden Sie Ihre Rechnung {invoice_number}.",
+            $config->get('sevdesk_email_body'),
+        );
+        self::assertFalse($config->bool('theme_adapter_confirmed'));
+        self::assertFalse($config->bool('customer_number_contact_creation_confirmed'));
+        self::assertSame('preserve-me', $config->stored()['future_unknown_setting']);
     }
 
     public function testDuplicateLegacyMappingsAbortWithoutDeletingRows(): void
@@ -165,6 +276,247 @@ final class MigrationTest extends MariaDbTestCase
             '700902',
             Capsule::table(Migrator::MAPPING_TABLE)->where('invoice_id', 902)->value('sevdesk_id'),
         );
+        self::assertNull(
+            Capsule::table(Migrator::MAPPING_TABLE)->where('invoice_id', 902)->value('document_type'),
+        );
+    }
+
+    public function testTypedMappingLinkAndMetadataEnrichmentAreMonotonicAndIdempotent(): void
+    {
+        Migrator::up();
+        $mappings = new MappingRepository();
+        $readyAt = new DateTimeImmutable('2030-02-03 04:05:06');
+        $deliveredAt = new DateTimeImmutable('2030-02-03 04:06:07');
+        $hash = hash('sha256', 'synthetic-pdf');
+
+        $mappings->linkDocument(903, '700903', MappingRepository::DOCUMENT_TYPE_INVOICE, ' INV-903 ');
+        $mappings->linkDocument(903, '700903', MappingRepository::DOCUMENT_TYPE_INVOICE, 'INV-903');
+        $mappings->enrichDocumentMetadata(
+            903,
+            '700903',
+            MappingRepository::DOCUMENT_TYPE_INVOICE,
+            'INV-903',
+            $readyAt,
+            $deliveredAt,
+            strtoupper($hash),
+        );
+        $mappings->enrichDocumentMetadata(
+            903,
+            '700903',
+            MappingRepository::DOCUMENT_TYPE_INVOICE,
+            'INV-903',
+            new DateTimeImmutable('2030-02-04 00:00:00'),
+            new DateTimeImmutable('2030-02-04 00:00:01'),
+            $hash,
+        );
+
+        $mapping = $mappings->findCompleteByInvoiceAndType(903, MappingRepository::DOCUMENT_TYPE_INVOICE);
+        self::assertNotNull($mapping);
+        self::assertSame('700903', (string) $mapping->sevdesk_id);
+        self::assertSame('invoice', (string) $mapping->document_type);
+        self::assertSame('INV-903', (string) $mapping->document_number);
+        self::assertSame('2030-02-03 04:05:06', (string) $mapping->document_ready_at);
+        self::assertSame('2030-02-03 04:06:07', (string) $mapping->delivered_at);
+        self::assertSame($hash, (string) $mapping->pdf_sha256);
+        self::assertNull(
+            $mappings->findCompleteByInvoiceAndType(903, MappingRepository::DOCUMENT_TYPE_VOUCHER),
+        );
+    }
+
+    public function testMetadataCanSafelyTypeAnExistingCompleteLegacyMapping(): void
+    {
+        Migrator::up();
+        Capsule::table(Migrator::MAPPING_TABLE)->insert([
+            'invoice_id' => 904,
+            'sevdesk_id' => '700904',
+        ]);
+
+        (new MappingRepository())->enrichDocumentMetadata(
+            904,
+            '700904',
+            MappingRepository::DOCUMENT_TYPE_VOUCHER,
+            'VOU-904',
+            new DateTimeImmutable('2030-03-04 05:06:07'),
+        );
+
+        $mapping = Capsule::table(Migrator::MAPPING_TABLE)->where('invoice_id', 904)->first();
+        self::assertSame('voucher', (string) $mapping->document_type);
+        self::assertSame('VOU-904', (string) $mapping->document_number);
+        self::assertSame('2030-03-04 05:06:07', (string) $mapping->document_ready_at);
+    }
+
+    public function testAssignmentPageUsesFrozenJobContextForAuthorityRuleAndDelivery(): void
+    {
+        Migrator::up();
+        Capsule::table('tblinvoices')->insert([
+            'id' => 907,
+            'userid' => 20,
+            'invoicenum' => 'INV-907',
+            'date' => '2030-02-03',
+            'status' => 'Paid',
+        ]);
+        $mappings = new MappingRepository();
+        $mappings->linkDocument(907, '700907', MappingRepository::DOCUMENT_TYPE_INVOICE, 'INV-907');
+        (new JobRepository())->create('single_export', [[
+            'invoice_id' => 907,
+            'action' => 'export_document',
+            'dedupe_key' => 'export_voucher:907',
+            'candidate' => [
+                'targetAllowed' => true,
+                'targetDocumentType' => 'invoice',
+                'targetDocumentAuthority' => 'sevdesk',
+                'targetExportMode' => 'invoice_only',
+                'targetOssProfile' => 'rule19_digital_services_confirmed',
+                'targetEuB2cMode' => 'blocked',
+                'targetDeliveryChannel' => 'sevdesk',
+                'targetTaxRuleId' => '19',
+                'deliveryState' => 'ready_not_delivered',
+            ],
+        ]]);
+
+        $page = $mappings->paginate(1, 10);
+        self::assertCount(1, $page['items']);
+        self::assertSame('sevdesk', $page['items'][0]->document_authority);
+        self::assertSame('19', $page['items'][0]->tax_rule);
+        self::assertSame('ready_not_delivered', $page['items'][0]->delivery_state);
+    }
+
+    public function testAssignmentPageFailsClosedForMalformedNewestFrozenContext(): void
+    {
+        Migrator::up();
+        Capsule::table('tblinvoices')->insert([
+            'id' => 908,
+            'userid' => 20,
+            'invoicenum' => 'INV-908',
+            'date' => '2030-02-03',
+            'status' => 'Paid',
+        ]);
+        $mappings = new MappingRepository();
+        $mappings->linkDocument(908, '700908', MappingRepository::DOCUMENT_TYPE_INVOICE, 'INV-908');
+        $jobs = new JobRepository();
+        $jobId = $jobs->create('single_export', [[
+            'invoice_id' => 908,
+            'action' => 'export_document',
+            'dedupe_key' => 'export_voucher:908',
+            'candidate' => [
+                'targetAllowed' => true,
+                'targetDocumentType' => 'invoice',
+                'targetDocumentAuthority' => 'sevdesk',
+                'targetExportMode' => 'invoice_only',
+                'targetOssProfile' => 'blocked',
+                'targetEuB2cMode' => 'blocked',
+                'targetDeliveryChannel' => 'whmcs_template',
+                'targetTaxRuleId' => '1',
+                'deliveryState' => 'ready_not_delivered',
+            ],
+        ]]);
+        $now = '2030-02-03 04:05:06';
+        Capsule::table(Migrator::ITEMS_TABLE)->insert([
+            'job_id' => $jobId,
+            'invoice_id' => 908,
+            'action' => 'export_document',
+            'status' => 'pending',
+            'dedupe_key' => null,
+            'checkpoint' => 'document_type_selected',
+            'attempts' => 0,
+            'available_at' => $now,
+            'candidate_json' => '{invalid',
+            'created_at' => $now,
+            'updated_at' => $now,
+        ]);
+
+        $page = $mappings->paginate(1, 10);
+
+        self::assertCount(1, $page['items']);
+        self::assertSame('', $page['items'][0]->document_authority);
+        self::assertSame('', $page['items'][0]->tax_rule);
+        self::assertSame('not_recorded', $page['items'][0]->delivery_state);
+    }
+
+    public function testTypedMappingNeverOverwritesConflictingTypeOrMetadata(): void
+    {
+        Migrator::up();
+        $mappings = new MappingRepository();
+        $mappings->linkDocument(905, '700905', MappingRepository::DOCUMENT_TYPE_VOUCHER, 'VOU-905');
+        $mappings->enrichDocumentMetadata(
+            905,
+            '700905',
+            MappingRepository::DOCUMENT_TYPE_VOUCHER,
+            pdfSha256: hash('sha256', 'first-pdf'),
+        );
+
+        try {
+            $mappings->linkDocument(905, '700905', MappingRepository::DOCUMENT_TYPE_INVOICE, 'INV-905');
+            self::fail('A conflicting complete document type must not be overwritten.');
+        } catch (RuntimeException $error) {
+            self::assertStringContainsString('different document type', $error->getMessage());
+        }
+
+        try {
+            $mappings->enrichDocumentMetadata(
+                905,
+                '700905',
+                MappingRepository::DOCUMENT_TYPE_VOUCHER,
+                pdfSha256: hash('sha256', 'different-pdf'),
+            );
+            self::fail('A conflicting PDF checksum must not be overwritten.');
+        } catch (RuntimeException $error) {
+            self::assertStringContainsString('different PDF checksum', $error->getMessage());
+        }
+
+        $mapping = Capsule::table(Migrator::MAPPING_TABLE)->where('invoice_id', 905)->first();
+        self::assertSame('voucher', (string) $mapping->document_type);
+        self::assertSame('VOU-905', (string) $mapping->document_number);
+        self::assertSame(hash('sha256', 'first-pdf'), (string) $mapping->pdf_sha256);
+    }
+
+    public function testTypedMappingRejectsInvalidTypesAndDeliveryBeforeReadiness(): void
+    {
+        Migrator::up();
+        $mappings = new MappingRepository();
+
+        try {
+            $mappings->linkDocument(906, '700906', 'credit_note');
+            self::fail('An unsupported document type must be rejected.');
+        } catch (InvalidArgumentException $error) {
+            self::assertStringContainsString('voucher or invoice', $error->getMessage());
+        }
+
+        $mappings->linkDocument(906, '700906', MappingRepository::DOCUMENT_TYPE_INVOICE, 'INV-906');
+        $this->expectException(RuntimeException::class);
+        $this->expectExceptionMessage('must be ready');
+        $mappings->enrichDocumentMetadata(
+            906,
+            '700906',
+            MappingRepository::DOCUMENT_TYPE_INVOICE,
+            deliveredAt: new DateTimeImmutable('2030-04-05 06:07:08'),
+        );
+    }
+
+    public function testBlankLegacyRemoteIdIsAnIncompleteRecoveryMapping(): void
+    {
+        $this->createLegacyMappingTable();
+        Capsule::table('tblinvoices')->insert([
+            'id' => 905,
+            'invoicenum' => 'SYN-905',
+            'date' => '2000-01-01',
+            'status' => 'Paid',
+            'total' => '12.34',
+        ]);
+        Capsule::table(Migrator::MAPPING_TABLE)->insert([
+            'invoice_id' => 905,
+            'sevdesk_id' => '   ',
+        ]);
+
+        Migrator::up();
+        $mappings = new MappingRepository();
+
+        self::assertNull($mappings->findCompleteByInvoice(905));
+        self::assertSame(['complete' => 0, 'ambiguous' => 1, 'orphans' => 0], $mappings->counts());
+        self::assertSame(1, $mappings->paginate(1, 20, status: 'incomplete')['total']);
+        self::assertSame(0, $mappings->paginate(1, 20, status: 'mapped')['total']);
+        self::assertSame(0, $mappings->paginate(1, 20, status: 'untyped')['total']);
+        self::assertNull($mappings->paginate(1, 20, status: 'incomplete')['items'][0]->sevdesk_id);
     }
 
     public function testMisnamedNonUniqueLegacyConstraintNeverPassesAsUnique(): void

@@ -59,6 +59,7 @@ final class CorrectionService
     /**
      * @param array{
      *     kind: string,
+     *     documentType: string,
      *     whmcsRefundTransactionId: string,
      *     invoiceId: int,
      *     invoiceNumber: string,
@@ -89,6 +90,23 @@ final class CorrectionService
                 'blocked',
                 'confirmation_required',
                 'A correction voucher requires explicit individual confirmation.',
+            );
+        }
+
+        $documentType = strtolower(trim((string) ($request['documentType'] ?? '')));
+        if ($documentType === 'invoice') {
+            return self::result(
+                'blocked',
+                'invoice_correction_not_supported',
+                'Invoice mappings cannot use the negative Voucher correction flow. '
+                    . 'A separate confirmed CreditNote flow is required.',
+            );
+        }
+        if ($documentType !== 'voucher') {
+            return self::result(
+                'blocked',
+                'correction_mapping_document_type_unknown',
+                'The original sevdesk mapping has no confirmed Voucher type. Resolve it before creating a correction.',
             );
         }
 
@@ -480,6 +498,7 @@ final class CorrectionService
      * @param array<string, mixed> $request
      * @return array{
      *     kind: string,
+     *     documentType: 'voucher',
      *     whmcsRefundTransactionId: string,
      *     invoiceId: int,
      *     invoiceNumber: string,
@@ -544,6 +563,7 @@ final class CorrectionService
 
         return [
             'kind' => $kind,
+            'documentType' => 'voucher',
             'whmcsRefundTransactionId' => $transactionId,
             'invoiceId' => $invoiceId,
             'invoiceNumber' => substr($invoiceNumber, 0, 160),
@@ -851,6 +871,10 @@ final class CorrectionService
     private function apiFailure(ApiException $exception, string $code, string $reference): array
     {
         $ambiguous = $exception->outcomeUnknown;
+        $context = $exception->context();
+        if (!$ambiguous && $code === 'correction_voucher_write_failed') {
+            $context['definiteWriteRejected'] = true;
+        }
 
         return self::result(
             $ambiguous ? 'ambiguous' : 'failed',
@@ -859,7 +883,7 @@ final class CorrectionService
                 ? 'The correction write outcome is unknown. Search by refund marker before any retry.'
                 : 'The sevdesk correction operation could not be completed.',
             dedupeReference: $reference,
-            context: $exception->context(),
+            context: $context,
         );
     }
 

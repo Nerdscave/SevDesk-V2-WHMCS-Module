@@ -34,7 +34,9 @@
                 <dt>Guthaben</dt><dd>{$preflight.credit_formatted|escape:'html':'UTF-8'}</dd>
                 <dt>Zahlbetrag</dt><dd>{$preflight.payable_formatted|escape:'html':'UTF-8'}</dd>
                 <dt>Steuerprofil</dt><dd>{$preflight.tax_profile|default:'—'|escape:'html':'UTF-8'}</dd>
-                <dt>TaxRule / Konto</dt><dd>{$preflight.tax_rule|default:'—'|escape:'html':'UTF-8'} / {$preflight.account_datev|default:'—'|escape:'html':'UTF-8'}</dd>
+                <dt>Dokumentziel</dt><dd>{$preflight.document_type|default:'—'|escape:'html':'UTF-8'} · Hoheit {$preflight.document_authority|default:'—'|escape:'html':'UTF-8'}</dd>
+                <dt>TaxRule / Konto</dt><dd>{$preflight.tax_rule|default:'—'|escape:'html':'UTF-8'} / {if $preflight.document_type === 'invoice'}nicht an Invoice übertragen{else}{$preflight.account_datev|default:'—'|escape:'html':'UTF-8'}{/if}</dd>
+                <dt>Zustellung</dt><dd>{$preflight.delivery_state|default:'—'|escape:'html':'UTF-8'}</dd>
             </dl>
             {if $preflight.exportable}
                 <form method="post" action="{$moduleLink|escape:'html':'UTF-8'}&amp;a=singleImport" data-loading-form>
@@ -43,7 +45,7 @@
                 </form>
             {else}
                 <p class="text-danger">{$preflight.reason|escape:'html':'UTF-8'}</p>
-                {if $preflight.reason_code === 'credit_applied_requires_review'}
+                {if $preflight.credit_voucher_confirmation_allowed}
                     <form method="post" action="{$moduleLink|escape:'html':'UTF-8'}&amp;a=singleImport" data-loading-form>
                         <input type="hidden" name="token" value="{$csrfToken|escape:'html':'UTF-8'}"><input type="hidden" name="invoiceid" value="{$preflight.id|escape:'html':'UTF-8'}">
                         <div class="checkbox">

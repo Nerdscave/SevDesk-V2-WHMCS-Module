@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace WHMCS\Module\Addon\SevDesk\Database;
 
 use RuntimeException;
+use Throwable;
 use WHMCS\Database\Capsule;
 use WHMCS\Module\Addon\SevDesk\Config;
 
@@ -23,11 +24,17 @@ final class Migrator
                 $table->increments('id');
                 $table->integer('invoice_id')->nullable();
                 $table->string('sevdesk_id', 255)->nullable();
+                $table->string('document_type', 16)->nullable();
+                $table->string('document_number', 191)->nullable();
+                $table->dateTime('document_ready_at')->nullable();
+                $table->dateTime('delivered_at')->nullable();
+                $table->string('pdf_sha256', 64)->nullable();
                 $table->unique('invoice_id', 'mod_sevdesk_invoice_id_unique');
                 $table->unique('sevdesk_id', 'mod_sevdesk_sevdesk_id_unique');
             });
         } else {
             self::ensureMappingIndexes();
+            self::ensureMappingColumns();
         }
 
         if (!$schema->hasTable(self::JOBS_TABLE)) {
@@ -81,6 +88,40 @@ final class Migrator
         (new Config())->ensureDefaults();
     }
 
+    private static function ensureMappingColumns(): void
+    {
+        $schema = Capsule::schema();
+        $missing = [];
+        foreach (
+            ['document_type', 'document_number', 'document_ready_at', 'delivered_at', 'pdf_sha256'] as $column
+        ) {
+            if (!$schema->hasColumn(self::MAPPING_TABLE, $column)) {
+                $missing[] = $column;
+            }
+        }
+        if ($missing === []) {
+            return;
+        }
+
+        $schema->table(self::MAPPING_TABLE, static function ($table) use ($missing): void {
+            if (in_array('document_type', $missing, true)) {
+                $table->string('document_type', 16)->nullable();
+            }
+            if (in_array('document_number', $missing, true)) {
+                $table->string('document_number', 191)->nullable();
+            }
+            if (in_array('document_ready_at', $missing, true)) {
+                $table->dateTime('document_ready_at')->nullable();
+            }
+            if (in_array('delivered_at', $missing, true)) {
+                $table->dateTime('delivered_at')->nullable();
+            }
+            if (in_array('pdf_sha256', $missing, true)) {
+                $table->string('pdf_sha256', 64)->nullable();
+            }
+        });
+    }
+
     private static function ensureMappingIndexes(): void
     {
         $indexes = Capsule::select('SHOW INDEX FROM `' . self::MAPPING_TABLE . '`');
@@ -129,7 +170,10 @@ final class Migrator
     {
         $schema = Capsule::schema();
         $required = [
-            self::MAPPING_TABLE => ['id', 'invoice_id', 'sevdesk_id'],
+            self::MAPPING_TABLE => [
+                'id', 'invoice_id', 'sevdesk_id', 'document_type', 'document_number',
+                'document_ready_at', 'delivered_at', 'pdf_sha256',
+            ],
             self::JOBS_TABLE => [
                 'id', 'type', 'status', 'filters_json', 'requested_by_admin_id',
                 'total_items', 'created_at', 'started_at', 'finished_at',
@@ -173,6 +217,59 @@ final class Migrator
             'mapping_remote_unique' => self::hasUniqueSingleColumnIndex($mappingIndexes, 'sevdesk_id'),
             'item_dedupe_unique' => self::hasUniqueSingleColumnIndex($itemIndexes, 'dedupe_key'),
         ];
+    }
+
+    /** Refuse runtime writes unless every required local idempotency guard exists. */
+    public static function assertRuntimeSchema(): void
+    {
+        if (!self::runtimeSchemaReady()) {
+            throw new RuntimeException('The sevdesk rewrite schema is incomplete or incompatible.');
+        }
+    }
+
+    public static function runtimeSchemaReady(): bool
+    {
+        $report = self::schemaReport();
+
+        return $report['tables']
+            && $report['missing_columns'] === []
+            && $report['mapping_invoice_unique']
+            && $report['mapping_remote_unique']
+            && $report['item_dedupe_unique'];
+    }
+
+    /** Validate the CLI runtime before any worker-side DDL or remote-capable code. */
+    public static function prepareWorkerRuntime(Config $config): void
+    {
+        try {
+            $stored = $config->stored();
+            if (
+                ($stored[Config::RUNTIME_SIGNATURE_SETTING] ?? '')
+                    !== Config::RUNTIME_SIGNATURE
+            ) {
+                throw new RuntimeException('The sevdesk replacement requires an admin-side upgrade review.');
+            }
+            if (!self::runtimeSchemaReady()) {
+                throw new RuntimeException('The sevdesk rewrite schema is incomplete or incompatible.');
+            }
+        } catch (Throwable $error) {
+            $config->quarantineRuntime();
+
+            throw $error;
+        }
+
+        if ($config->bool(Config::RUNTIME_REVIEW_SETTING)) {
+            throw new RuntimeException('The sevdesk replacement requires an admin-side inventory review.');
+        }
+
+        try {
+            self::up();
+            self::assertRuntimeSchema();
+        } catch (Throwable $error) {
+            $config->quarantineRuntime();
+
+            throw $error;
+        }
     }
 
     /** @param list<object> $indexes */
