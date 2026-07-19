@@ -83,5 +83,7 @@ if [[ -n "${unexpected}" ]]; then
     exit 1
 fi
 
-tar -C "${target}" -czf "${root}/dist/sevdesk-${version}.tar.gz" LICENSE modules
+# COPYFILE_DISABLE prevents AppleDouble entries on macOS. USTAR is supported
+# by bsdtar and GNU tar and cannot serialize platform-specific PAX xattrs.
+COPYFILE_DISABLE=1 tar --format=ustar -C "${target}" -czf "${root}/dist/sevdesk-${version}.tar.gz" LICENSE modules
 printf '%s\n' "${root}/dist/sevdesk-${version}.tar.gz"
