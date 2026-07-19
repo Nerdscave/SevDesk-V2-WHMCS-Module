@@ -4,16 +4,16 @@
 
 Ziel ist ein PHP-8.3-fähiges Drop-in-Replacement, das den vorhandenen Mappingbestand schützt und auch große Nachläufe in wiederaufnehmbaren Jobs verarbeitet. Die OSS-/Invoice-Erweiterung ist für Modulrelease 2.1.0 vorgesehen; Booking und Korrektur-Voucher bleiben Bestandteil von 2.0.0 und aufwärts.
 
-Die Voucher-Basisphasen sowie die Codepfade für wählbare Voucher-/Invoice-Ziele, typisierte Mappings, Invoice-Recovery, Invoice-Booking und sevDesk-Dokumenthoheit sind im Repository umgesetzt. Der Plan bildet die Grundlage für die Abnahme. Umgesetzt heißt nicht, dass die Invoice-Funktion bereits für Produktivdaten freigegeben ist.
+Die Voucher-Basisphasen sowie die Codepfade für wählbare Voucher-/Invoice-Ziele, typisierte Mappings, Invoice-Recovery, Invoice-Booking und sevDesk-Dokumenthoheit sind im Repository umgesetzt. `2.1.0-rc.2` ergänzt die abgesicherte Bestandsübernahme und einen eng begrenzten, sevDesk-nativen ZUGFeRD-Pfad. Der Plan bildet die Grundlage für die Abnahme. Umgesetzt heißt nicht, dass die Invoice- oder E-Rechnungsfunktion bereits für Produktivdaten freigegeben ist.
 
 Mehrere Prüfungen brauchen eine echte Zielumgebung und stehen noch aus:
 
 - MariaDB-Testlauf;
 - Installation und Renderprüfung unter WHMCS 8.13.4 mit PHP 8.3;
 - lesender Vertragstest in einem sevDesk-Testmandanten;
-- Voucher-Canaries und der neue Invoice-API-Canary.
+- Voucher-Canaries, der Invoice-API-Canary und der davon getrennte ZUGFeRD-Canary.
 
-Der Invoice-Canary bleibt ein hartes Release-Gate. Bis dahin blockiert `invoice_canary_confirmed=off` alle Invoice-Modi. Das additive Upgrade behält `voucher_only` bei, stoppt den 2.0-Betrieb aber einmalig mit `sync_enabled=off` und `runtime_review_required=on`. Runner und Remote-fähige Adminaktionen werden erst nach der bestätigten Bestandsprüfung im Setup wieder freigegeben.
+Der Invoice-Canary bleibt ein hartes Release-Gate. Bis dahin blockiert `invoice_canary_confirmed=off` alle Invoice-Modi. ZUGFeRD hat mit `e_invoice_canary_confirmed` ein eigenes Gate. Das additive Upgrade behält `voucher_only` bei, stoppt den 2.0-Betrieb aber einmalig mit `sync_enabled=off` und `runtime_review_required=on`. Runner und Remote-fähige Adminaktionen werden erst nach der bestätigten Bestandsprüfung im Setup wieder freigegeben.
 
 ## Feste Produktentscheidungen
 
@@ -36,7 +36,8 @@ Der Invoice-Canary bleibt ein hartes Release-Gate. Bis dahin blockiert `invoice_
 - manuell bestätigter negativer Korrektur-Voucher in Release 2.0.0: `CorrectionService`, Jobtyp `refund_correction`, Aktion `correction_voucher`
 - keine automatische Refund-, Chargeback-, Gutschrift- oder Storno-Verarbeitung; Chargebacks bleiben blockiert
 - keine sevDesk→WHMCS-Rücksynchronisation und keine sevDesk-Webhooks
-- keine dauerhafte Invoice-PDF-Spiegelung, keine E-Rechnung und kein Invoice-`CreditNote`-Pfad
+- keine dauerhafte Invoice-PDF-/XML-Spiegelung und kein Invoice-`CreditNote`-Pfad
+- ZUGFeRD ausschließlich sevDesk-nativ für neue deutsche B2B-Rule-1-Invoices bei `invoice_only + sevdesk`; kein eigenes XML, kein B2G/XRechnung, keine OSS-E-Rechnung und kein historischer E-Rechnungs-Backfill
 
 ## Phase 0: Dokumentation und Sicherheitsgrundlagen
 
@@ -86,7 +87,7 @@ Der Invoice-Canary bleibt ein hartes Release-Gate. Bis dahin blockiert `invoice_
 - Existenz und tatsächliches Schema von `mod_sevdesk` prüfen.
 - Tabelle nur bei Neuinstallation legacy-kompatibel erstellen.
 - fehlende Unique-Indizes sicher ergänzen, ohne Daten vorab zu löschen.
-- `mod_sevdesk` additiv um `document_type`, `document_number`, `document_ready_at`, `delivered_at` und `pdf_sha256` ergänzen.
+- `mod_sevdesk` additiv um `document_type`, `document_number`, `document_ready_at`, `delivered_at`, `pdf_sha256`, `is_e_invoice` und `xml_sha256` ergänzen.
 - `mod_sevdesk_jobs` und `mod_sevdesk_job_items` aus `docs/architecture.md` idempotent anlegen.
 - funktionale Legacy-Settings lesen; Lizenzfelder ignorieren.
 - Diagnose für vollständige, `NULL`- und verwaiste Mappings bauen.
@@ -404,10 +405,13 @@ Der Buchungsassistent und die manuellen Korrektur-Voucher gehören zu Release 2.
 ### Aufgaben
 
 - Vor Beginn den aktuellen Live-Datenbestand inventarisieren.
-- vorhandene Mappings, `NULL`-Mappings, Orphans und ungemappte Invoices klassifizieren.
+- vorhandene Voucher-/Invoice-Mappings, untypisierte und `NULL`-Mappings, Orphans, alte Exportjobs, mögliche Remote-Dubletten und ungemappte Invoices klassifizieren.
 - vollständige Legacy-Mappings mit `document_type=NULL` read-only prüfen und erst nach Adminbestätigung typisieren.
 - `NULL`-Mappings einzeln remote abgleichen.
 - Dry-Run des offenen Zeitraums erstellen und manuelle Fälle abtrennen.
+- historische ungemappte Rechnungen vor Create anhand Nummer, Marker sowie Datum/Kontakt/Betrag rein lesend gegen Invoice und Voucher prüfen.
+- einen bestätigten Altbestand ausschließlich als mailfreien `historical_backfill` einreihen; der Moduswechsel selbst startet keinen Export und historische Jobs erzeugen keine E-Rechnung.
+- sichere alte Voucher-Vor-Write-Jobs nur über einen neuen `export_document`-Job im aktuellen Modus fortsetzen. Riskante Checkpoints bleiben auf ihrem ursprünglichen Dokumentpfad.
 - kleine Canary-Batches pro Steuerklasse exportieren und in sevDesk prüfen.
 - anschließend quartals- oder monatsweise Jobs starten.
 - nach jedem Abschnitt WHMCS, Mapping, sevDesk und Buchhaltungszahlen abstimmen.
@@ -496,9 +500,34 @@ Der Canary ist im aktuellen Stand extern ausstehend. Scheitert Marker, Rule 19 o
 - PDF- und Mailpfade akzeptieren nur die lokale WHMCS-Invoice-ID und den einmaligen internen Kontext.
 - „Versendet“ beim WHMCS-Kanal bedeutet nur Übergabe an den Mail-Provider.
 
-## Phase 12: Erweiterungen nach stabilem Invoice-Rollout
+## Phase 12: RC.2 – Native ZUGFeRD-Invoices
 
-Erst nach beiden Gates kommen Invoice-`CreditNote`, Rules 18/20, E-Rechnungen, Produktklassifikation, Fremdwährung, dauerhafte PDF-Spiegelung, automatische Refund-/Chargeback-Flows oder zusätzliche USt-ID-Dienste infrage. Jede Erweiterung braucht einen konkreten Geschäftsfall, einen API-Nachweis, eine eigene Recovery-Regel und Tests.
+### Aufgaben
+
+- geschützte Einstellungen `e_invoice_mode`, Kunden-Opt-in-Feld, PaymentMethod, Aktivierungsdatum und eigenen Canary bereitstellen;
+- ZUGFeRD nur für neue, bezahlte deutsche Organisationskunden mit Rule 1, `invoice_only`, sevDesk-Hoheit und gesetztem Admin-Tickbox-Feld auswählen;
+- Auswahl, Contact-, PaymentMethod-, Unity- und Country-ID sowie einen PII-freien Hash aus Empfängername und strukturierter Adresse einfrieren;
+- `propertyIsEInvoice=true`, strukturierte Adresse, `paymentMethod` und `takeDefaultAddress=false` an den bestehenden `InvoiceExporter` übergeben;
+- E-Rechnungsflag, Kontakt, Zahlungsmethode und Adresshash zurückprüfen, `getXml` sicher und wohlgeformt als CII lesen und den ersten verifizierten XML-Hash unveränderlich speichern;
+- vor Öffnung, PDF-Auslieferung und Versand erneut lesen. Ein abweichender XML-Hash bleibt `ambiguous` und ersetzt nie den Soll-Hash;
+- beim sevDesk-Versand `sendXml=false` verwenden. Kundenbereich und WHMCS-Mail liefern weiterhin nur das geprüfte ZUGFeRD-PDF, ohne PDF oder XML dauerhaft zu speichern;
+- fehlende Pflichtdaten und HTTP 422 nach ausdrücklicher Auswahl blockieren. Es gibt keinen Rückfall auf eine normale PDF-Invoice.
+
+### Tests und Gates
+
+- Auswahlmatrix mit Opt-in, Datum, Land, Organisation, Rule, Hoheit, Referenzen und fehlendem XMLReader;
+- Payload, Empfängername-/Adresshash, XML-Struktur, Größenlimit und Hashdrift;
+- Recovery nach Create, XML-/PDF-Abruf, Open und Versand;
+- mailfreie historische Backfills mit `is_e_invoice=false`;
+- separater Testmandanten-Canary für Create, Readback, `getXml`, ZUGFeRD-PDF, externe EN-16931-Prüfung, `sendBy`, `sendViaEmail(sendXml=false)`, WHMCS-Anhang und Kundendownload.
+
+### Exit-Kriterium
+
+Das Modul kann den Pfad technisch fail-closed ausführen. Produktiv freigegeben wird er erst nach Invoice-Canary, eigenem ZUGFeRD-Canary und der WHMCS-Liveprüfung von Proforma, Adapter, Paid-Mail und Kunden-PDF.
+
+## Phase 13: Erweiterungen nach stabilem Invoice-Rollout
+
+Erst nach diesen Gates kommen Invoice-`CreditNote`, Rules 18/20, B2G/XRechnung, Produktklassifikation, Fremdwährung, dauerhafte Dokumentspiegelung, automatische Refund-/Chargeback-Flows oder zusätzliche USt-ID-Dienste infrage. Jede Erweiterung braucht einen konkreten Geschäftsfall, einen API-Nachweis, eine eigene Recovery-Regel und Tests.
 
 ## Übergreifende Abnahmekriterien
 
@@ -517,6 +546,7 @@ Erst nach beiden Gates kommen Invoice-`CreditNote`, Rules 18/20, E-Rechnungen, P
 | Reconciliation | unbekannte Create-/Open-/Versand-/Booking-/Correction-Writes bleiben typbewusst `ambiguous`; kein blinder Retry |
 | Dokumenthoheit | sevDesk-Hoheit ist ohne Proforma, Adapter, Canary und bestätigten Versandweg nicht aktivierbar |
 | PDF/Mail | Eigentümer-, Signatur-, Größen- und Hashprüfung; keine dauerhafte PDF-Kopie und keine automatische Backfill-Mail |
+| E-Rechnung | nur neue Rule-1-Invoices hinter Kunden-Opt-in und eigenem Canary; wohlgeformtes CII-XML und stabile PDF/XML-Hashes; kein stiller Fallback |
 | Security | Logs und Jobdaten enthalten weder Token noch unnötige PII |
 | Betrieb | Recovery, Pause/Stop, Retry und Rollback sind dokumentiert und getestet |
 

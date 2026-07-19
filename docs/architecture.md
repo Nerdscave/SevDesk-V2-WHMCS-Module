@@ -8,7 +8,7 @@ Das System besteht weiterhin nur aus dem WHMCS-Addon, der vorhandenen WHMCS-Date
 
 ## Architekturentscheidung: wählbares Exportziel und Dokumenthoheit
 
-**Status:** technisch implementiert; die produktive Aktivierung bleibt bis zum externen Invoice-Canary gesperrt.
+**Status:** technisch implementiert; die produktive Aktivierung bleibt bis zum externen Invoice-Canary gesperrt. ZUGFeRD hat zusätzlich ein eigenes Gate.
 
 ### Kontext
 
@@ -46,7 +46,7 @@ Ein bestätigtes Rule-19-OSS-Profil und die frühere Freigabe `eu_b2c_mode=domes
 - Rules 18 und 20, gemischte oder unklare Leistungsarten und nicht freigegebene Steuerfälle bleiben blockiert.
 - Invoice-Ziele werden nur nach vollständiger WHMCS-Zahlung und mit finaler WHMCS-Rechnungsnummer erstellt.
 - Invoice-Positionen erhalten in v1 Menge 1 und kein frei konfiguriertes `accountDatev`.
-- Invoice-CreditNotes, E-Rechnungen und dauerhafte PDF-Spiegelung sind nicht Teil dieser Entscheidung.
+- Invoice-CreditNotes, B2G/XRechnung und dauerhafte PDF-Spiegelung sind nicht Teil dieser Entscheidung.
 
 ### Konsequenzen
 
@@ -70,6 +70,20 @@ Die lokale OpenAPI beschreibt Invoice-Erstellung, PDF, Öffnen, Versand und Buch
 - stabile finale PDF und ID-Eindeutigkeit zwischen Voucher und Invoice.
 
 Dieses Gate kann nicht durch Mocks oder die eingecheckte OpenAPI ersetzt werden. Im aktuellen Repository ist es extern ausstehend. `invoice_canary_confirmed` ist eine dokumentierte Betreiberbestätigung des ausgeführten Canarys, keine automatisierte Behauptung des Moduls.
+
+## Architekturentscheidung: sevDesk-natives ZUGFeRD
+
+**Status:** implementiert, aber bis zum separaten Testmandanten-Canary gesperrt.
+
+Das Modul erzeugt kein eigenes XML. Eine ZUGFeRD-Rechnung bleibt eine normale sevDesk-`Invoice`; das Payload setzt zusätzlich `propertyIsEInvoice=true`, eine bestätigte `PaymentMethod`, eine strukturierte Empfängeradresse und `takeDefaultAddress=false`.
+
+Die Auswahl ist bewusst eng. Sie setzt `invoice_only`, sevDesk-Hoheit, Rule 1, einen deutschen Organisationskunden, ein Admin-only-Tickbox-Opt-in, ein Aktivierungsdatum und den E-Invoice-Canary voraus. Der aktuelle Kontakt muss Käuferreferenz, genau eine passende Haupt-E-Mail, vollständige deutsche Anschrift und `governmentAgency=false` liefern. `SevUser`, `Unity`, `PaymentMethod` und Land werden im aktuellen Mandanten read-only geprüft. Die Pflichtdaten des Rechnungsausstellers lassen sich mit der versionierten API nicht vollständig lesen; ihr Nachweis gehört deshalb zum externen Canary. Eine definitive 422-Ablehnung bleibt ein permanenter Pflichtdatenfehler und führt nie zu einer normalen Invoice als Fallback.
+
+Nach Create und Finalisierung liest das Modul die Invoice und ihre Positionen erneut, prüft E-Invoice-Flag, Kontakt, PaymentMethod und einen kanonischen Adresshash und ruft `getXml` ab. Der XML-Hash wird vor dem nächsten Write eingefroren. Ändert sich das XML zwischen Create, `sendBy`, Versand oder Recovery, wird der Vorgang `ambiguous`. Das finale PDF folgt weiter dem vorhandenen Signatur-, Größen- und Hashvertrag.
+
+Der persistierte Jobsnapshot enthält nur IDs, E-Invoice-Flag und SHA-256-Werte. Name, Straße, E-Mail und XML bleiben Laufzeitdaten. `mod_sevdesk.is_e_invoice` und `xml_sha256` ergänzen das Mapping; PDF und XML werden nicht dauerhaft gespiegelt.
+
+Rule 19 bleibt eine normale Invoice. Rules 18/20, B2G/XRechnung, historische E-Rechnungs-Backfills und eine nachträgliche Umwandlung bestehender Dokumente sind ausgeschlossen.
 
 ## Systemgrenzen
 
@@ -99,7 +113,7 @@ Dieselbe lokale Vorbereitung läuft beim ersten Addon-Adminaufruf, falls WHMCS w
 
 Für bestehende Betreiber ist die im konfigurierten WHMCS-Kunden-Custom-Field gespeicherte Remote-ID die explizite Kontaktzuordnung. Existiert diese ID in sevDesk, wird sie unabhängig von optionalen historischen `customerNumber`-Werten wiederverwendet und nicht automatisch geändert. Ist sie remote nicht mehr vorhanden, wird weder nach einem Ersatz gesucht noch ein neuer Kontakt erzeugt. Nur ein leeres Feld erlaubt die exakte Suche nach der WHMCS-Kundennummer. Eine Neuanlage nach leerem Suchergebnis ist zusätzlich durch die persistierte Betreiberbestätigung `customer_number_contact_creation_confirmed` geschützt; ohne sie endet der Vorgang vor dem Pre-Write-Checkpoint und vor `POST /Contact` als `contact_creation_not_confirmed`. Fehlt einem Suchtreffer die `customerNumber`, liest das Modul dessen ID einzeln nach; lässt sich die Gleichheit auch dann nicht beweisen, blockiert `contact_search_unverifiable` den gesamten Kontaktpfad. Mehrere Treffer bleiben ebenfalls ein Konflikt.
 
-Diese Regel verhindert Duplikate und erhält manuell oder durch das Originalmodul gesetzte Links. Sie ist keine bidirektionale Stammdatensynchronisation: Name, Anschrift, E-Mail und Steuerdaten eines bereits verknüpften sevDesk-Kontakts werden durch diesen Exportpfad nicht aktualisiert.
+Diese Regel verhindert Duplikate und erhält manuell oder durch das Originalmodul gesetzte Links. Beim erstmaligen Verknüpfen sperrt das Modul Kunde und Custom-Field-Zeile in der WHMCS-Datenbank. Eine gleiche ID gilt als bereits erledigt, eine andere ID oder doppelte Feldzeilen blockieren. Nur ein leeres Feld darf befüllt werden. Sie ist keine bidirektionale Stammdatensynchronisation: Name, Anschrift, E-Mail und Steuerdaten eines bereits verknüpften sevDesk-Kontakts werden durch diesen Exportpfad nicht aktualisiert.
 
 Ist das Custom-Field leer, kann die exakte Kundennummernsuche nur Alt-Kontakte finden, deren sevDesk-`customerNumber` wirklich der internen WHMCS-Client-ID entspricht. Fehlende oder historisch anders vergebene Kundennummern sind vor der Freigabe manuell zu inventarisieren. Erst danach darf der Betreiber die Neuanlage mit diesem Kundennummernvertrag ausdrücklich freigeben.
 
@@ -107,6 +121,7 @@ Ist das Custom-Field leer, kann die exakte Kundennummernsuche nur Alt-Kontakte f
 
 - WHMCS-Addon-Einstiegspunkte für Konfiguration, Aktivierung, Upgrade, Admin- und Client-Ausgabe;
 - geschützte Setupseite für Exportmodus, Hoheit, OSS-Profil, SevUser, Unity und Versand;
+- Übergangsinventur sowie E-Invoice-Profil mit Admin-Opt-in, PaymentMethod, Aktivierungsdatum und eigenem Canary;
 - WHMCS-Hooks, die Arbeit einplanen oder einen eng begrenzten Mailanhang übergeben;
 - persistente Jobs mit kurzem Cron-Worker;
 - deterministische Steuerentscheidung und dokumentbewusster Zielresolver;
@@ -140,6 +155,8 @@ Ist das Custom-Field leer, kann die exakte Kundennummernsuche nur Alt-Kontakte f
 | `DocumentTargetResolver` | Modus, Hoheit, Tax Rule, Paid-Status und finale Nummer in genau ein Ziel übersetzen |
 | `VoucherExporter` | WHMCS-PDF hochladen, Voucher erstellen und exakt verifizieren |
 | `InvoiceExporter` | normale Invoice erstellen, Positionen verifizieren, öffnen und zustellen |
+| `EInvoiceEligibilityService` | ZUGFeRD-Auswahl, Kontakt-/Referenzprüfung und PII-freien Snapshot bestimmen |
+| `InvoiceXml` | natives XML laden, strukturell begrenzen und SHA-256 bilden |
 | Reconciliation | nach unbekannten Writes nur lesen und genau einen vollständigen Treffer akzeptieren |
 | `InvoicePdf` | finale PDF laden, Signatur/Größe prüfen und SHA-256 bilden |
 | Steuerentscheidung | Kundendaten und Invoice-Fakten in einen expliziten Steuerfall übersetzen |
@@ -215,6 +232,8 @@ Der bestehende Pfad bleibt fachlich unverändert:
 7. Invoice über `sendBy` ohne Kundenversand öffnen oder über den gewählten Versandpfad öffnen und zustellen.
 8. finale PDF laden, PDF-Signatur und Größenlimit prüfen und `document_ready_at`/`pdf_sha256` ergänzen; nach Zustellung zusätzlich `delivered_at` setzen.
 
+Bei einer ausgewählten ZUGFeRD-Invoice kommen vor dem Mapping der E-Invoice-Readback und `getXml` hinzu. Nach der Finalisierung muss derselbe XML-Hash erneut vorliegen. Der Versand über sevDesk setzt `sendXml=false`, weil das maßgebliche XML bereits im ZUGFeRD-PDF steckt.
+
 Das WHMCS-PDF wird nicht in eine offizielle sevDesk-Invoice umgewandelt. sevDesk erzeugt die Invoice-PDF selbst.
 
 ## Dokumenthoheit, Clientbereich und Versand
@@ -284,6 +303,8 @@ Bulk- und historische Imports setzen keine automatische Zustellung. Eine später
 | `document_ready_at` | finale kundenseitig verwendbare Invoice-PDF geprüft |
 | `delivered_at` | Versand-Write nachweisbar abgeschlossen beziehungsweise übergeben |
 | `pdf_sha256` | Hash der geprüften finalen Invoice-PDF, keine PDF-Kopie |
+| `is_e_invoice` | `1` für eine geprüfte native ZUGFeRD-Invoice, `0` für neue normale Dokumente, `NULL` bei historischem Bestand |
+| `xml_sha256` | Hash des geprüften nativen XML, keine XML-Kopie |
 
 Eine Legacy-Zeile mit `sevdesk_id = NULL` ist kein Erfolg und bleibt ein Recovery-Fall. Vollständige Alt-Mappings gelten nicht automatisch als Voucher. Die lesende Prüfung ruft dieselbe ID getrennt als Voucher und Invoice ab. Nur genau ein Treffer mit passender Objektart, Remote-ID und exakter WHMCS-Dokumentnummer darf einen Typ vorschlagen; eine Adminbestätigung ergänzt ihn anschließend.
 
@@ -300,6 +321,7 @@ Funktionale Legacy-Einstellungen bleiben erhalten. Hinzu kommen insbesondere:
 - `oss_profile`: `blocked`, `rule19_digital_services_confirmed`;
 - `invoice_canary_confirmed`;
 - `invoice_sev_user_id`, `invoice_unity_id`;
+- `e_invoice_mode`, `e_invoice_client_field_id`, `e_invoice_payment_method_id`, `e_invoice_active_from`, `e_invoice_canary_confirmed`;
 - `invoice_delivery_channel`;
 - `whmcs_invoice_email_template`;
 - `sevdesk_email_subject`, `sevdesk_email_body`;
@@ -314,7 +336,13 @@ Die vorhandenen Tabellen `mod_sevdesk_jobs` und `mod_sevdesk_job_items` bleiben 
 
 Der Dedupe-Key bleibt absichtlich `export_voucher:<invoiceId>` für beide neuen Zieltypen. Dadurch können ein alter Voucherjob und ein neuer Invoicejob nie parallel unterschiedliche Remote-Dokumente für dieselbe WHMCS-Invoice erzeugen.
 
-`candidate_json` enthält nur den unveränderlichen Entscheidungssnapshot sowie für Booking/Korrektur die bereits dokumentierten minimalen Bestätigungswerte. Es enthält keine vollständige Invoice, Kundenadresse, PDF oder API-Rohantwort.
+`candidate_json` enthält nur den unveränderlichen Entscheidungssnapshot sowie für Booking/Korrektur die bereits dokumentierten minimalen Bestätigungswerte. Für ZUGFeRD werden E-Invoice-Flag, Kontakt-, PaymentMethod-, Unity- und Länder-ID sowie Adress- und XML-Hash eingefroren. Es enthält keine vollständige Invoice, Kundenadresse, PDF, XML oder API-Rohantwort.
+
+Vor einer Änderung von Modus, Hoheit, OSS- oder E-Invoice-Profil zeigt das Setup eine rein lokale Übergangsinventur. Sie zählt typisierte und untypisierte Mappings, `NULL`- und verwaiste Zeilen, aktive, fehlgeschlagene und unklare Exportjobs sowie bezahlte ungemappte Rechnungen. Ein Fingerprint verhindert die Freigabe einer inzwischen veralteten Ansicht.
+
+Ein Moduswechsel startet keinen Nachlauf. Alte fehlgeschlagene Exportitems behalten ihren historischen Zielpfad. Sichere Zustände vor einem Dokument-Write können nach neuer Vorschau als eigenes mailfreies `export_document`-Item eingereiht werden; riskante Zustände bleiben Reconciliation-Fälle. Der Sammelexport markiert seinen Job als historischen Backfill, schaltet E-Invoice aus und prüft vor jedem Create Invoice-Nummer, Datum/Kontakt/Betrag sowie markerlose und markertragende Voucher-Kandidaten.
+
+Eine vollständige lokale Zuordnung lässt sich nur entfernen, wenn Voucher und Invoice unter der gespeicherten ID nachweislich mit 404 fehlen. Das Mapping wird danach unter Lock nochmals gegen Remote-ID und Dokumenttyp geprüft. Ein vorhandener oder nicht eindeutig prüfbarer Remote-Beleg bleibt geschützt.
 
 ### `mod_sevdesk_jobs`
 

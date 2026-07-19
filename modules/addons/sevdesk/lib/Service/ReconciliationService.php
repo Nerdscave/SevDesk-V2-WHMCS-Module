@@ -85,6 +85,7 @@ final class ReconciliationService
                 $remoteId,
                 MappingRepository::DOCUMENT_TYPE_VOUCHER,
                 $invoice->invoiceNumber,
+                false,
             );
         } catch (Throwable) {
             return ExportResult::ambiguous(

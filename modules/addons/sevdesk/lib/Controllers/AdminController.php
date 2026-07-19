@@ -9,6 +9,7 @@ use RuntimeException;
 use Throwable;
 use WHMCS\Database\Capsule;
 use WHMCS\Module\Addon\SevDesk\Application;
+use WHMCS\Module\Addon\SevDesk\Api\ApiException;
 use WHMCS\Module\Addon\SevDesk\Config;
 use WHMCS\Module\Addon\SevDesk\Database\Migrator;
 use WHMCS\Module\Addon\SevDesk\Domain\Decimal;
@@ -16,6 +17,7 @@ use WHMCS\Module\Addon\SevDesk\Domain\DocumentTargetDecision;
 use WHMCS\Module\Addon\SevDesk\Domain\InvoiceSnapshot;
 use WHMCS\Module\Addon\SevDesk\Domain\LineItem;
 use WHMCS\Module\Addon\SevDesk\Health\HealthService;
+use WHMCS\Module\Addon\SevDesk\Repository\JobRepository;
 use WHMCS\Module\Addon\SevDesk\Service\CorrectionService;
 use WHMCS\Module\Addon\SevDesk\Service\DocumentTargetResolver;
 use WHMCS\Module\Addon\SevDesk\Support\AdminInvoiceControls;
@@ -81,10 +83,18 @@ final class AdminController
         unset($settings['sevdesk_api_key']);
         $start = DateTimeImmutable::createFromFormat('!d-m-Y', (string) ($settings['import_after'] ?? ''));
         $settings['import_after_iso'] = $start instanceof DateTimeImmutable ? $start->format('Y-m-d') : (string) ($settings['import_after'] ?? '');
+        $eInvoiceStart = DateTimeImmutable::createFromFormat(
+            '!d-m-Y',
+            (string) ($settings['e_invoice_active_from'] ?? ''),
+        );
+        $settings['e_invoice_active_from_iso'] = $eInvoiceStart instanceof DateTimeImmutable
+            ? $eInvoiceStart->format('Y-m-d')
+            : '';
 
         $accountOptions = [];
         $sevUsers = [];
         $unities = [];
+        $paymentMethods = [];
         if ($storedToken !== '' && !$saveFailed) {
             try {
                 $accountOptions = $this->application->referenceData()->revenueAccounts();
@@ -96,6 +106,17 @@ final class AdminController
                     'Gespeicherte Referenzen bleiben erhalten, aber die sevdesk-Referenzdaten waren nicht vollständig erreichbar.',
                     'sevdesk nicht erreichbar',
                 );
+            }
+            try {
+                $paymentMethods = $this->application->referenceData()->paymentMethods();
+            } catch (Throwable) {
+                if (($settings['e_invoice_mode'] ?? 'off') !== 'off') {
+                    $this->view->flash(
+                        'warning',
+                        'Die gespeicherte Zahlungsmethode bleibt erhalten, konnte aber nicht read-only geprüft werden.',
+                        'E-Rechnungsreferenz nicht erreichbar',
+                    );
+                }
             }
         }
 
@@ -114,6 +135,8 @@ final class AdminController
         foreach (Capsule::table('tblcustomfields')->where('type', 'client')->orderBy('id')->get() as $field) {
             $customFields[] = ['id' => (int) $field->id, 'label' => (string) $field->fieldname];
         }
+        $eInvoiceClientFields = $this->application->whmcs->eInvoiceOptInFields();
+        $transitionInventory = $this->transitionInventory();
 
         $this->render('setup.tpl', 'setup', [
             'settings' => $settings,
@@ -121,9 +144,12 @@ final class AdminController
             'accountOptions' => $accountOptions,
             'sevUsers' => $sevUsers,
             'unities' => $unities,
+            'paymentMethods' => $paymentMethods,
+            'eInvoiceClientFields' => $eInvoiceClientFields,
             'emailTemplates' => $emailTemplates,
             'proformaEnabled' => $this->application->whmcs->proformaInvoicingEnabled(),
             'themeAdapterInstalled' => $this->application->whmcs->themeAdapterManifestInstalled(),
+            'transitionInventory' => $transitionInventory,
         ]);
     }
 
@@ -318,6 +344,13 @@ final class AdminController
                     )));
                     $allowed = [];
                     $requestedContext = $this->requestedExportContext();
+                    // A confirmed range export is a historical backfill. It is
+                    // always mail-free and never upgrades old invoices to
+                    // ZUGFeRD, even if that profile is enabled for new bills.
+                    $requestedContext['historicalBackfill'] = true;
+                    $requestedContext['delivery_requested'] = false;
+                    $requestedContext['requestedEInvoiceMode'] = 'off';
+                    $requestedContext['requestedEInvoiceCanaryConfirmed'] = false;
                     foreach ($invoices as $invoice) {
                         if ($invoice['exportable'] && in_array($invoice['id'], $selected, true)) {
                             $allowed[] = [
@@ -331,12 +364,29 @@ final class AdminController
                     if ($allowed === []) {
                         $this->view->flash('warning', 'Es wurden keine zulässigen Rechnungen ausgewählt.', 'Kein Job angelegt');
                     } else {
-                        $jobId = $this->application->jobs->create('bulk_export', $allowed, [
+                        $jobId = $this->application->jobs->create('historical_backfill', $allowed, [
                             'date_start' => $from->format('Y-m-d'),
                             'date_end' => $until->format('Y-m-d'),
+                            'mail_free' => true,
+                            'e_invoice' => false,
                         ], $this->adminId());
                         $job = $this->application->jobs->findJob($jobId);
-                        $this->view->flash('success', count($allowed) . ' Rechnungen wurden als fortsetzbarer Job eingereiht.', 'Job #' . $jobId . ' angelegt');
+                        $queuedCount = (int) Capsule::table(Migrator::ITEMS_TABLE)
+                            ->where('job_id', $jobId)
+                            ->where('status', 'pending')
+                            ->count();
+                        $ownerCount = (int) Capsule::table(Migrator::ITEMS_TABLE)
+                            ->where('job_id', $jobId)
+                            ->where('status', 'skipped')
+                            ->count();
+                        $this->view->flash(
+                            $ownerCount === 0 ? 'success' : 'warning',
+                            $queuedCount . ' Rechnungen wurden mailfrei als Altbestandsjob eingereiht.'
+                                . ($ownerCount > 0
+                                    ? ' ' . $ownerCount . ' Rechnungen hatten inzwischen bereits einen aktiven Exportjob und wurden nicht übernommen.'
+                                    : ''),
+                            'Job #' . $jobId . ' angelegt',
+                        );
                     }
                 }
             } catch (RuntimeException $error) {
@@ -492,11 +542,18 @@ final class AdminController
     public function assignmentManager(): void
     {
         $typeInspection = null;
+        $batchTypeInspections = [];
         if ($this->isPost()) {
             $this->csrf->assertPost();
             $mappingId = (int) ($_POST['mapping_id'] ?? 0);
             try {
-                if (isset($_POST['inspect_legacy_type'])) {
+                if (isset($_POST['inspect_legacy_types_batch'])) {
+                    $batchTypeInspections = $this->inspectLegacyMappingsBatch(
+                        $this->submittedLegacyBatchIds(),
+                    );
+                } elseif (isset($_POST['confirm_legacy_types_batch'])) {
+                    $this->confirmLegacyMappingsBatch();
+                } elseif (isset($_POST['inspect_legacy_type'])) {
                     $mapping = $this->legacyMappingContext($mappingId);
                     $inspection = $this->application->legacyMappingType()->inspect(
                         (int) $mapping->invoice_id,
@@ -514,12 +571,19 @@ final class AdminController
                         $this->handleLegacyMappingTypeFailure($inspection);
                     }
                 } elseif (isset($_POST['confirm_legacy_type'])) {
+                    $submittedDocumentType = $_POST['document_type'] ?? null;
+                    if (
+                        !is_string($submittedDocumentType)
+                        || !in_array($submittedDocumentType, ['voucher', 'invoice'], true)
+                    ) {
+                        throw new RuntimeException('Der bestätigte Belegtyp ist ungültig.');
+                    }
                     $mapping = $this->legacyMappingContext($mappingId);
                     $result = $this->application->legacyMappingType()->confirm(
                         (int) $mapping->invoice_id,
                         (string) $mapping->invoicenum,
                         (string) $mapping->sevdesk_id,
-                        (string) ($_POST['document_type'] ?? ''),
+                        $submittedDocumentType,
                     );
                     if (($result['status'] ?? '') === 'confirmed') {
                         if (function_exists('logActivity')) {
@@ -554,6 +618,17 @@ final class AdminController
         $status = trim((string) ($_GET['status'] ?? $_POST['filter_status'] ?? ''));
         $query = trim((string) ($_GET['q'] ?? $_POST['filter_q'] ?? ''));
         $result = $this->application->mappings->paginate($page, 100, $query, $status);
+        $legacyBatchIds = [];
+        foreach ($result['items'] as $mapping) {
+            if (
+                ($mapping->invoice_exists ?? false) !== false
+                && trim((string) ($mapping->sevdesk_id ?? '')) !== ''
+                && ($mapping->document_type ?? null) === null
+            ) {
+                $legacyBatchIds[] = (int) ($mapping->mapping_id ?? $mapping->id ?? 0);
+            }
+        }
+        $legacyBatchIds = array_values(array_filter($legacyBatchIds, static fn (int $id): bool => $id > 0));
         $base = $this->moduleLink . '&a=assignmentManager'
             . ($status !== '' ? '&status=' . rawurlencode($status) : '')
             . ($query !== '' ? '&q=' . rawurlencode($query) : '');
@@ -562,8 +637,172 @@ final class AdminController
             'filters' => ['status' => $status, 'q' => $query],
             'mappings' => $result['items'],
             'typeInspection' => $typeInspection,
+            'batchTypeInspections' => $batchTypeInspections,
+            'batchTypeEligibleCount' => count(array_filter(
+                $batchTypeInspections,
+                static fn (array $inspection): bool => ($inspection['batchEligible'] ?? false) === true,
+            )),
+            'legacyBatchIds' => implode(',', array_slice($legacyBatchIds, 0, 25)),
             'pagination' => $this->pagination($result['page'], $result['pages'], $base),
         ]);
+    }
+
+    /** @return list<int> */
+    private function submittedLegacyBatchIds(): array
+    {
+        $raw = trim((string) ($_POST['batch_mapping_ids'] ?? ''));
+        if ($raw === '') {
+            return [];
+        }
+        $ids = [];
+        foreach (explode(',', $raw) as $value) {
+            $id = (int) trim($value);
+            if ($id > 0) {
+                $ids[$id] = true;
+            }
+        }
+
+        return array_slice(array_map('intval', array_keys($ids)), 0, 25);
+    }
+
+    /**
+     * @param list<int> $mappingIds
+     * @return list<array<string,mixed>>
+     */
+    private function inspectLegacyMappingsBatch(array $mappingIds): array
+    {
+        if ($mappingIds === []) {
+            throw new RuntimeException('Für die Sammelprüfung wurden keine Legacy-Zuordnungen ausgewählt.');
+        }
+        $inspections = [];
+        foreach ($mappingIds as $mappingId) {
+            try {
+                $mapping = $this->legacyMappingContext($mappingId);
+                $result = $this->application->legacyMappingType()->inspect(
+                    (int) $mapping->invoice_id,
+                    (string) $mapping->invoicenum,
+                    (string) $mapping->sevdesk_id,
+                );
+                if (($result['code'] ?? '') === 'api_authentication_failed') {
+                    $this->handleLegacyMappingTypeFailure($result);
+                    break;
+                }
+                $markerEvidence = ($result['context']['markerEvidence'] ?? false) === true;
+                $inspections[] = [
+                    'mappingId' => $mappingId,
+                    'invoiceId' => (int) $mapping->invoice_id,
+                    'invoiceNumber' => (string) $mapping->invoicenum,
+                    'status' => (string) ($result['status'] ?? 'failed'),
+                    'code' => (string) ($result['code'] ?? 'legacy_mapping_type_check_failed'),
+                    'suggestedType' => (string) ($result['suggestedType'] ?? ''),
+                    'markerEvidence' => $markerEvidence,
+                    'batchEligible' => ($result['status'] ?? '') === 'suggested' && $markerEvidence,
+                    'message' => self::legacyBatchResultMessage($result, $markerEvidence),
+                ];
+            } catch (Throwable) {
+                $inspections[] = [
+                    'mappingId' => $mappingId,
+                    'invoiceId' => 0,
+                    'invoiceNumber' => '',
+                    'status' => 'failed',
+                    'code' => 'legacy_mapping_type_check_failed',
+                    'suggestedType' => '',
+                    'markerEvidence' => false,
+                    'batchEligible' => false,
+                    'message' => 'Die Zuordnung konnte nicht eindeutig read-only geprüft werden.',
+                ];
+            }
+        }
+
+        return $inspections;
+    }
+
+    private function confirmLegacyMappingsBatch(): void
+    {
+        $submitted = $_POST['batch_confirmations'] ?? null;
+        if (!is_array($submitted) || $submitted === []) {
+            throw new RuntimeException('Es wurden keine markerbestätigten Legacy-Typen ausgewählt.');
+        }
+        $confirmed = 0;
+        $blocked = 0;
+        foreach (array_slice($submitted, 0, 25, true) as $mappingKey => $submittedDocumentType) {
+            if (
+                (
+                    !is_int($mappingKey)
+                    && preg_match('/^[1-9]\d*$/', $mappingKey) !== 1
+                )
+                || !is_string($submittedDocumentType)
+                || !in_array($submittedDocumentType, ['voucher', 'invoice'], true)
+            ) {
+                $blocked++;
+                continue;
+            }
+            $mappingId = (int) $mappingKey;
+            $documentType = $submittedDocumentType;
+            try {
+                $mapping = $this->legacyMappingContext($mappingId);
+                $inspection = $this->application->legacyMappingType()->inspect(
+                    (int) $mapping->invoice_id,
+                    (string) $mapping->invoicenum,
+                    (string) $mapping->sevdesk_id,
+                );
+                if (($inspection['code'] ?? '') === 'api_authentication_failed') {
+                    $this->handleLegacyMappingTypeFailure($inspection);
+                    $blocked++;
+                    break;
+                }
+                if (
+                    ($inspection['status'] ?? '') !== 'suggested'
+                    || ($inspection['context']['markerEvidence'] ?? false) !== true
+                    || ($inspection['suggestedType'] ?? null) !== $documentType
+                ) {
+                    $blocked++;
+                    continue;
+                }
+                $result = $this->application->legacyMappingType()->confirm(
+                    (int) $mapping->invoice_id,
+                    (string) $mapping->invoicenum,
+                    (string) $mapping->sevdesk_id,
+                    $documentType,
+                );
+                if (($result['status'] ?? '') === 'confirmed') {
+                    $confirmed++;
+                    if (function_exists('logActivity')) {
+                        logActivity(
+                            'sevdesk: marker-backed legacy mapping type confirmed by admin '
+                                . $this->adminId() . '; invoice ' . (int) $mapping->invoice_id
+                                . '; mapping ' . $mappingId,
+                        );
+                    }
+                } else {
+                    $blocked++;
+                }
+            } catch (Throwable) {
+                $blocked++;
+            }
+        }
+
+        $this->view->flash(
+            $blocked === 0 ? 'success' : 'warning',
+            sprintf('%d Zuordnungen bestätigt, %d wegen geänderter oder unklarer Nachweise nicht übernommen.', $confirmed, $blocked),
+            'Legacy-Sammelbestätigung abgeschlossen',
+        );
+    }
+
+    /** @param array<string,mixed> $result */
+    private static function legacyBatchResultMessage(array $result, bool $markerEvidence): string
+    {
+        if (($result['status'] ?? '') === 'suggested') {
+            return $markerEvidence
+                ? 'Dokumentnummer und Rewrite-Marker stimmen eindeutig überein.'
+                : 'Die Dokumentnummer passt, aber der Rewrite-Marker fehlt. Dieser Beleg bleibt ein Einzelfall.';
+        }
+
+        return match ((string) ($result['code'] ?? '')) {
+            'legacy_mapping_type_collision' => 'Dieselbe ID ist typübergreifend belegt; keine Sammelbestätigung möglich.',
+            'legacy_mapping_type_no_match' => 'Kein Remote-Typ stimmt widerspruchsfrei überein.',
+            default => 'Die read-only Prüfung war nicht eindeutig oder nicht erreichbar.',
+        };
     }
 
     public function bookingAssistant(): void
@@ -758,7 +997,16 @@ final class AdminController
                 }
             } else {
                 $itemId = (int) ($_POST['item_id'] ?? 0);
-                if (isset($_POST['confirm_email_retry'])) {
+                if (isset($_POST['requeue_current_mode'])) {
+                    $newJobId = ($_POST['confirm_mail_free_requeue'] ?? '') === 'yes'
+                        ? $this->application->jobs->requeueExportDocument(
+                            $itemId,
+                            $this->requestedExportContext(),
+                            $this->adminId(),
+                        )
+                        : null;
+                    $ok = $newJobId !== null;
+                } elseif (isset($_POST['confirm_email_retry'])) {
                     $ok = ($_POST['confirm_duplicate_delivery_risk'] ?? '') === 'yes'
                         && $this->application->jobs->confirmEmailRetry($itemId);
                 } else {
@@ -768,9 +1016,11 @@ final class AdminController
                 }
                 $this->view->flash(
                     $ok ? 'success' : 'warning',
-                    $ok
+                    $ok && isset($newJobId)
+                        ? 'Ein neuer mailfreier Exportjob wurde im aktuell bestätigten Modus angelegt. Der alte Job bleibt als Nachweis erhalten.'
+                        : ($ok
                         ? 'Die Position wurde mit der erforderlichen Bestätigung erneut eingeplant.'
-                        : 'Die Position konnte nicht erneut eingeplant werden; prüfen Sie Status und Warnbestätigung.',
+                        : 'Die Position konnte nicht erneut eingeplant werden; prüfen Sie Status und Warnbestätigung.'),
                     $ok ? 'Aktion eingeplant' : 'Keine Änderung'
                 );
             }
@@ -785,7 +1035,10 @@ final class AdminController
                 && !in_array((string) ($item->error_code ?? ''), [
                     'booking_not_applied',
                     'manual_review_required',
+                    'stale_export_context_requeue_required',
                 ], true);
+            $item->can_requeue_current_mode = (string) $item->status === 'permanent_failed'
+                && (string) ($item->error_code ?? '') === 'stale_export_context_requeue_required';
             $item->can_confirm_email_retry = (string) $item->status === 'ambiguous'
                 && (string) $item->action === 'export_document'
                 && (string) $item->checkpoint === 'whmcs_email_write_requested';
@@ -793,9 +1046,11 @@ final class AdminController
                 && !$item->can_confirm_email_retry;
             $item->recommendation = $item->can_confirm_email_retry
                 ? 'Der frühere Provider-Übergang ist nicht lesend beweisbar. Ein erneuter Versand kann zu einer Doppelmail führen.'
+                : ($item->can_requeue_current_mode
+                    ? 'Der alte Belegpfad bleibt eingefroren. Nach Prüfung kann ein neuer, mailfreier Job im aktuellen Modus angelegt werden.'
                 : ($item->can_reconcile
                     ? 'Zuerst anhand des WHMCS-Markers in sevdesk abgleichen.'
-                    : 'Konfiguration oder Belegdaten korrigieren und danach erneut versuchen.');
+                    : 'Konfiguration oder Belegdaten korrigieren und danach erneut versuchen.'));
         }
         $counts = $this->application->jobs->statusCounts();
         $refundTransactions = [];
@@ -935,9 +1190,10 @@ final class AdminController
             return;
         }
 
-        $storedInvoiceId = (int) Capsule::table(Migrator::MAPPING_TABLE)
+        $storedMapping = Capsule::table(Migrator::MAPPING_TABLE)
             ->where('id', $mappingId)
-            ->value('invoice_id');
+            ->first(['invoice_id', 'sevdesk_id', 'document_type']);
+        $storedInvoiceId = (int) ($storedMapping->invoice_id ?? 0);
         if ($storedInvoiceId < 1) {
             $this->view->flash(
                 'danger',
@@ -975,7 +1231,48 @@ final class AdminController
             return;
         }
 
-        $removed = $this->application->mappings->unlinkById($mappingId);
+        $remoteId = trim((string) ($storedMapping->sevdesk_id ?? ''));
+        $documentType = ($storedMapping->document_type ?? null) === null
+            ? null
+            : trim((string) $storedMapping->document_type);
+        $remoteMissingConfirmed = false;
+        if ($remoteId !== '') {
+            if (preg_match('/^[1-9]\d*$/', $remoteId) !== 1) {
+                $this->view->flash(
+                    'danger',
+                    'Die gespeicherte sevdesk-ID ist nicht sicher prüfbar. Die Zuordnung bleibt erhalten.',
+                    'Entkopplung blockiert',
+                );
+                return;
+            }
+            try {
+                $remoteMissingConfirmed = $this->remoteDocumentDefinitelyMissing('Voucher', $remoteId)
+                    && $this->remoteDocumentDefinitelyMissing('Invoice', $remoteId);
+            } catch (Throwable) {
+                $this->view->flash(
+                    'danger',
+                    'Der Remote-Bestand konnte nicht eindeutig read-only geprüft werden. Die Zuordnung bleibt erhalten.',
+                    'Entkopplung blockiert',
+                );
+                return;
+            }
+            if (!$remoteMissingConfirmed) {
+                $this->view->flash(
+                    'danger',
+                    'Unter der gespeicherten ID ist weiterhin ein sevdesk-Beleg vorhanden oder der fehlende Bestand '
+                        . 'ist nicht eindeutig nachgewiesen. Die Zuordnung bleibt geschützt.',
+                    'Entkopplung blockiert',
+                );
+                return;
+            }
+        }
+
+        $removed = $this->application->mappings->unlinkById(
+            $mappingId,
+            $remoteMissingConfirmed,
+            $remoteId !== '' ? $remoteId : null,
+            $documentType,
+        );
         if (!$removed) {
             return;
         }
@@ -988,9 +1285,32 @@ final class AdminController
         }
         $this->view->flash(
             'warning',
-            'Nur die lokale Zuordnung wurde entfernt. Der sevdesk-Beleg blieb unverändert.',
+            $remoteId === ''
+                ? 'Die unvollständige lokale Reservierung wurde entfernt; eine Remote-ID war nicht gespeichert.'
+                : 'Die lokale Zuordnung wurde erst entfernt, nachdem Voucher und Invoice unter dieser ID nicht gefunden wurden.',
             'Zuordnung aufgehoben',
         );
+    }
+
+    /** Definitive absence is intentionally narrower than normal read recovery. */
+    private function remoteDocumentDefinitelyMissing(string $resource, string $remoteId): bool
+    {
+        try {
+            $this->application->client()->get('/' . $resource . '/' . rawurlencode($remoteId));
+
+            return false;
+        } catch (ApiException $error) {
+            if ($error->isAuthenticationFailure()) {
+                $this->application->config->tripAuthenticationSafetyGates();
+            }
+            // sevdesk documents 400 for a missing by-ID Voucher or Invoice;
+            // accept 404 as a compatible conventional response as well.
+            if (in_array($error->httpStatus, [400, 404], true)) {
+                return true;
+            }
+
+            throw $error;
+        }
     }
 
     /**
@@ -1005,6 +1325,15 @@ final class AdminController
             'document_authority',
             DocumentTargetResolver::AUTHORITY_WHMCS,
         );
+        $storedEInvoiceActiveFrom = (string) $this->application->config->get('e_invoice_active_from', '');
+        $eInvoiceActiveFrom = DateTimeImmutable::createFromFormat(
+            '!d-m-Y',
+            $storedEInvoiceActiveFrom,
+        );
+        $requestedEInvoiceActiveFrom = $eInvoiceActiveFrom instanceof DateTimeImmutable
+            && $eInvoiceActiveFrom->format('d-m-Y') === $storedEInvoiceActiveFrom
+                ? $eInvoiceActiveFrom->format('Y-m-d')
+                : '';
 
         return [
             'requestedExportMode' => (string) $this->application->config->get(
@@ -1020,8 +1349,143 @@ final class AdminController
             'requestedDeliveryChannel' => $authority === DocumentTargetResolver::AUTHORITY_SEVDESK
                 ? (string) $this->application->config->get('invoice_delivery_channel', 'sevdesk')
                 : null,
+            'requestedEInvoiceMode' => (string) $this->application->config->get('e_invoice_mode', 'off'),
+            'requestedEInvoiceClientFieldId' => $this->application->config->int('e_invoice_client_field_id'),
+            'requestedEInvoicePaymentMethodId' => trim((string) $this->application->config->get(
+                'e_invoice_payment_method_id',
+                '',
+            )),
+            'requestedEInvoiceActiveFrom' => $requestedEInvoiceActiveFrom,
+            'requestedEInvoiceCanaryConfirmed' => $this->application->config->bool(
+                'e_invoice_canary_confirmed',
+            ),
+            'requestedEInvoiceSevUserId' => trim((string) $this->application->config->get(
+                'invoice_sev_user_id',
+                '',
+            )),
+            'requestedEInvoiceUnityId' => trim((string) $this->application->config->get(
+                'invoice_unity_id',
+                '',
+            )),
             'delivery_requested' => false,
         ];
+    }
+
+    /**
+     * Build the local, read-only transition snapshot shown before document
+     * mode changes. It contains only counters and technical high-water marks,
+     * never invoice content or customer data.
+     *
+     * @return array<string,int|string>
+     */
+    private function transitionInventory(): array
+    {
+        $exportActions = ['export_document', 'export_voucher', 'reconcile_voucher'];
+        $complete = static fn ($query) => $query
+            ->whereNotNull('mapping.sevdesk_id')
+            ->whereRaw("TRIM(mapping.sevdesk_id) <> ''");
+
+        $typedVoucher = (int) $complete(Capsule::table(Migrator::MAPPING_TABLE . ' as mapping'))
+            ->where('mapping.document_type', 'voucher')
+            ->count();
+        $typedInvoice = (int) $complete(Capsule::table(Migrator::MAPPING_TABLE . ' as mapping'))
+            ->where('mapping.document_type', 'invoice')
+            ->count();
+        $untypedComplete = (int) $complete(Capsule::table(Migrator::MAPPING_TABLE . ' as mapping'))
+            ->whereNull('mapping.document_type')
+            ->count();
+        $nullRemote = (int) Capsule::table(Migrator::MAPPING_TABLE . ' as mapping')
+            ->where(static function ($query): void {
+                $query->whereNull('mapping.sevdesk_id')->orWhereRaw("TRIM(mapping.sevdesk_id) = ''");
+            })
+            ->count();
+        $orphans = (int) Capsule::table(Migrator::MAPPING_TABLE . ' as mapping')
+            ->leftJoin('tblinvoices as invoice', 'mapping.invoice_id', '=', 'invoice.id')
+            ->whereNull('invoice.id')
+            ->count();
+
+        $exportItems = static fn () => Capsule::table(Migrator::ITEMS_TABLE . ' as item')
+            ->whereIn('item.action', $exportActions);
+        $activeJobs = (int) $exportItems()
+            ->whereIn('item.status', ['pending', 'running', 'retry_wait'])
+            ->distinct()
+            ->count('item.job_id');
+        $ambiguousJobs = (int) $exportItems()
+            ->where('item.status', 'ambiguous')
+            ->distinct()
+            ->count('item.job_id');
+        $failedJobs = (int) $exportItems()
+            ->where('item.status', 'permanent_failed')
+            ->distinct()
+            ->count('item.job_id');
+        $possibleRemoteDuplicates = (int) $exportItems()
+            ->whereNotNull('item.invoice_id')
+            ->where(static function ($query): void {
+                $query->where('item.status', 'ambiguous')
+                    ->orWhere(static function ($failed): void {
+                        $failed->whereIn('item.status', ['permanent_failed', 'cancelled'])
+                            ->whereIn('item.checkpoint', JobRepository::riskyCheckpoints());
+                    });
+            })
+            ->distinct()
+            ->count('item.invoice_id');
+
+        $importAfter = DateTimeImmutable::createFromFormat(
+            '!d-m-Y',
+            (string) $this->application->config->get('import_after', '01-01-1999'),
+        );
+        $paidUnmappedQuery = Capsule::table('tblinvoices as invoice')
+            ->leftJoin(Migrator::MAPPING_TABLE . ' as mapping', 'invoice.id', '=', 'mapping.invoice_id')
+            ->where('invoice.status', 'Paid')
+            ->whereNull('mapping.id');
+        if ($importAfter instanceof DateTimeImmutable) {
+            $paidUnmappedQuery->where('invoice.date', '>=', $importAfter->format('Y-m-d'));
+        }
+
+        $inventory = [
+            'typed_vouchers' => $typedVoucher,
+            'typed_invoices' => $typedInvoice,
+            'untyped_complete' => $untypedComplete,
+            'null_remote_mappings' => $nullRemote,
+            'orphan_mappings' => $orphans,
+            'active_export_jobs' => $activeJobs,
+            'ambiguous_export_jobs' => $ambiguousJobs,
+            'failed_export_jobs' => $failedJobs,
+            'paid_unmapped' => (int) $paidUnmappedQuery->count(),
+            'possible_remote_duplicates' => $possibleRemoteDuplicates,
+            'mapping_high_water' => (int) (Capsule::table(Migrator::MAPPING_TABLE)->max('id') ?? 0),
+            'item_high_water' => (int) (Capsule::table(Migrator::ITEMS_TABLE)->max('id') ?? 0),
+            'invoice_high_water' => (int) (Capsule::table('tblinvoices')->max('id') ?? 0),
+        ];
+        $protectedProfile = [];
+        $protectedSettings = [
+            'export_mode',
+            'document_authority',
+            'oss_profile',
+            'eu_b2c_mode',
+            'invoice_canary_confirmed',
+            'invoice_sev_user_id',
+            'invoice_unity_id',
+            'e_invoice_mode',
+            'e_invoice_client_field_id',
+            'e_invoice_payment_method_id',
+            'e_invoice_active_from',
+            'e_invoice_canary_confirmed',
+            'invoice_delivery_channel',
+        ];
+        foreach ($protectedSettings as $setting) {
+            $protectedProfile[$setting] = (string) $this->application->config->get($setting, '');
+        }
+        $inventory['protected_profile_fingerprint'] = hash(
+            'sha256',
+            json_encode($protectedProfile, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES),
+        );
+        $inventory['fingerprint'] = hash(
+            'sha256',
+            json_encode($inventory, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES),
+        );
+
+        return $inventory;
     }
 
     private function saveSetup(): void
@@ -1179,6 +1643,68 @@ final class AdminController
             }
         }
 
+        $eInvoiceMode = trim((string) ($_POST['e_invoice_mode'] ?? 'off'));
+        if (!in_array($eInvoiceMode, ['off', 'zugferd_domestic_b2b'], true)) {
+            throw new RuntimeException('Ungültiger E-Rechnungsmodus.');
+        }
+        $eInvoiceClientFieldId = (int) ($_POST['e_invoice_client_field_id'] ?? 0);
+        $eInvoicePaymentMethodId = trim((string) ($_POST['e_invoice_payment_method_id'] ?? ''));
+        $eInvoiceActiveFromInput = trim((string) ($_POST['e_invoice_active_from'] ?? ''));
+        $eInvoiceActiveFrom = $eInvoiceActiveFromInput === ''
+            ? null
+            : $this->parseIsoDate($eInvoiceActiveFromInput);
+        $eInvoiceCanaryConfirmed = isset($_POST['e_invoice_canary_confirmed']);
+        if ($eInvoicePaymentMethodId !== '' && preg_match('/^[1-9]\d*$/', $eInvoicePaymentMethodId) !== 1) {
+            throw new RuntimeException('Die sevdesk-Zahlungsmethode muss eine gültige numerische ID sein.');
+        }
+        if ($eInvoiceActiveFromInput !== '' && !($eInvoiceActiveFrom instanceof DateTimeImmutable)) {
+            throw new RuntimeException('Bitte ein gültiges Aktivierungsdatum für E-Rechnungen wählen.');
+        }
+        if (
+            $eInvoiceClientFieldId > 0
+            && !$this->application->whmcs->isEInvoiceOptInField($eInvoiceClientFieldId)
+        ) {
+            throw new RuntimeException(
+                'Das E-Rechnungs-Kundenfeld muss ein vorhandenes, nur für Administratoren sichtbares Tickbox-Feld sein.',
+            );
+        }
+        if ($eInvoiceMode === 'zugferd_domestic_b2b') {
+            if (!class_exists(\XMLReader::class)) {
+                throw new RuntimeException('ZUGFeRD benötigt die PHP-Erweiterung XMLReader.');
+            }
+            if ($exportMode !== 'invoice_only' || $documentAuthority !== 'sevdesk') {
+                throw new RuntimeException(
+                    'ZUGFeRD ist ausschließlich mit „Invoice only“ und sevdesk-Dokumenthoheit zulässig.',
+                );
+            }
+            if (!$eInvoiceCanaryConfirmed) {
+                throw new RuntimeException(
+                    'ZUGFeRD bleibt gesperrt, bis der separate E-Rechnungs-Canary bestätigt ist.',
+                );
+            }
+            if (
+                $eInvoiceClientFieldId < 1
+                || !$this->application->whmcs->isEInvoiceOptInField($eInvoiceClientFieldId)
+            ) {
+                throw new RuntimeException(
+                    'ZUGFeRD benötigt ein vorhandenes, nur für Administratoren sichtbares Kunden-Tickbox-Feld.',
+                );
+            }
+            if (
+                preg_match('/^[1-9]\d*$/', $eInvoicePaymentMethodId) !== 1
+                || !($eInvoiceActiveFrom instanceof DateTimeImmutable)
+            ) {
+                throw new RuntimeException(
+                    'ZUGFeRD benötigt eine sevdesk-Zahlungsmethode und ein Aktivierungsdatum.',
+                );
+            }
+            if ((string) ($_POST['e_invoice_profile_acknowledged'] ?? '') !== '1') {
+                throw new RuntimeException(
+                    'Die Grenzen des deutschen B2B-ZUGFeRD-Profils müssen ausdrücklich bestätigt werden.',
+                );
+            }
+        }
+
         $deliveryChannel = trim((string) ($_POST['invoice_delivery_channel'] ?? 'sevdesk'));
         if (!in_array($deliveryChannel, ['sevdesk', 'whmcs_template'], true)) {
             throw new RuntimeException('Ungültiger Versandkanal.');
@@ -1242,8 +1768,18 @@ final class AdminController
             || $documentAuthority !== (string) $this->application->config->get('document_authority', 'whmcs')
             || $ossProfile !== (string) $this->application->config->get('oss_profile', 'blocked')
             || $mode !== (string) $this->application->config->get('eu_b2c_mode', 'blocked');
+        $documentProfileChanged = $modeChanged
+            || $eInvoiceMode !== (string) $this->application->config->get('e_invoice_mode', 'off')
+            || ($eInvoiceClientFieldId > 0 ? (string) $eInvoiceClientFieldId : '')
+                !== (string) $this->application->config->get('e_invoice_client_field_id', '')
+            || $eInvoicePaymentMethodId
+                !== (string) $this->application->config->get('e_invoice_payment_method_id', '')
+            || ($eInvoiceActiveFrom?->format('d-m-Y') ?? '')
+                !== (string) $this->application->config->get('e_invoice_active_from', '')
+            || ($eInvoiceCanaryConfirmed ? 'on' : '')
+                !== (string) $this->application->config->get('e_invoice_canary_confirmed', '');
         if (
-            $modeChanged
+            $documentProfileChanged
             && Capsule::table(Migrator::ITEMS_TABLE)
                 ->whereIn('action', ['export_document', 'export_voucher', 'reconcile_voucher'])
                 ->whereIn('status', ['pending', 'running', 'retry_wait', 'ambiguous'])
@@ -1253,6 +1789,20 @@ final class AdminController
                 'Exportmodus, Dokumenthoheit und Steuerprofile können erst geändert werden, wenn aktive und '
                     . 'ungeklärte Exportjobs abgeschlossen oder bereinigt sind.',
             );
+        }
+        if ($documentProfileChanged) {
+            $inventory = $this->transitionInventory();
+            $submittedFingerprint = trim((string) ($_POST['transition_inventory_fingerprint'] ?? ''));
+            if (
+                (string) ($_POST['transition_inventory_confirmed'] ?? '') !== '1'
+                || $submittedFingerprint === ''
+                || !hash_equals((string) $inventory['fingerprint'], $submittedFingerprint)
+            ) {
+                throw new RuntimeException(
+                    'Vor einer Änderung an Dokumentmodus, Hoheit, OSS- oder E-Rechnungsprofil muss die aktuelle '
+                        . 'Übergangsinventur auf dieser Seite geprüft und ausdrücklich bestätigt werden.',
+                );
+            }
         }
 
         $numericSettings = [
@@ -1282,6 +1832,14 @@ final class AdminController
         $this->application->config->set('invoice_canary_confirmed', $invoiceCanaryConfirmed);
         $this->application->config->set('invoice_sev_user_id', $sevUserId);
         $this->application->config->set('invoice_unity_id', $unityId);
+        $this->application->config->set('e_invoice_mode', $eInvoiceMode);
+        $this->application->config->set('e_invoice_client_field_id', $eInvoiceClientFieldId ?: '');
+        $this->application->config->set('e_invoice_payment_method_id', $eInvoicePaymentMethodId);
+        $this->application->config->set(
+            'e_invoice_active_from',
+            $eInvoiceActiveFrom?->format('d-m-Y') ?? '',
+        );
+        $this->application->config->set('e_invoice_canary_confirmed', $eInvoiceCanaryConfirmed);
         $this->application->config->set('invoice_delivery_channel', $deliveryChannel);
         $this->application->config->set('whmcs_invoice_email_template', $emailTemplate);
         $this->application->config->set('sevdesk_email_subject', $emailSubject);
@@ -1311,6 +1869,14 @@ final class AdminController
                 || !$this->application->referenceData()->hasUnity($unityId)
             ) {
                 throw new RuntimeException('SevUser oder Unity wurde im aktuellen sevdesk-Mandanten nicht gefunden.');
+            }
+            if (
+                $eInvoiceMode === 'zugferd_domestic_b2b'
+                && !$this->application->referenceData()->hasPaymentMethod($eInvoicePaymentMethodId)
+            ) {
+                throw new RuntimeException(
+                    'Die gewählte E-Rechnungs-Zahlungsmethode wurde im aktuellen sevdesk-Mandanten nicht gefunden.',
+                );
             }
             $this->application->config->set('health_alarm', '');
         }
@@ -1405,6 +1971,14 @@ final class AdminController
             'invoice_canary_confirmed' => isset($_POST['invoice_canary_confirmed']) ? 'on' : '',
             'invoice_sev_user_id' => trim((string) ($_POST['invoice_sev_user_id'] ?? '')),
             'invoice_unity_id' => trim((string) ($_POST['invoice_unity_id'] ?? '')),
+            'e_invoice_mode' => trim((string) ($_POST['e_invoice_mode'] ?? 'off')),
+            'e_invoice_client_field_id' => (int) ($_POST['e_invoice_client_field_id'] ?? 0) > 0
+                ? (string) (int) $_POST['e_invoice_client_field_id']
+                : '',
+            'e_invoice_payment_method_id' => trim((string) ($_POST['e_invoice_payment_method_id'] ?? '')),
+            'e_invoice_active_from' => ($this->parseIsoDate((string) ($_POST['e_invoice_active_from'] ?? '')))
+                ?->format('d-m-Y') ?? '',
+            'e_invoice_canary_confirmed' => isset($_POST['e_invoice_canary_confirmed']) ? 'on' : '',
             'invoice_delivery_channel' => (string) ($_POST['invoice_delivery_channel'] ?? 'sevdesk'),
             'whmcs_invoice_email_template' => trim((string) ($_POST['whmcs_invoice_email_template'] ?? '')),
             'sevdesk_email_subject' => trim((string) ($_POST['sevdesk_email_subject']
@@ -1619,6 +2193,29 @@ final class AdminController
         foreach (Capsule::table(Migrator::MAPPING_TABLE)->whereIn('invoice_id', $invoiceIds)->get() as $mapping) {
             $mappings[(int) $mapping->invoice_id] = $mapping;
         }
+        $activeExportOwners = [];
+        foreach (
+            Capsule::table(Migrator::ITEMS_TABLE)
+                ->whereIn('invoice_id', $invoiceIds)
+                ->whereIn('action', ['export_document', 'export_voucher', 'reconcile_voucher'])
+                ->whereIn('status', [
+                    'pending', 'running', 'retry_wait', 'ambiguous', 'permanent_failed', 'cancelled',
+                ])
+                ->get(['invoice_id', 'status', 'checkpoint']) as $owner
+        ) {
+            if (
+                !in_array((string) $owner->status, ['permanent_failed', 'cancelled'], true)
+                || JobRepository::isRiskyCheckpoint((string) ($owner->checkpoint ?? ''))
+            ) {
+                $activeExportOwners[(int) $owner->invoice_id] = in_array(
+                    (string) $owner->status,
+                    ['permanent_failed', 'cancelled'],
+                    true,
+                )
+                    ? 'unresolved_export_history'
+                    : 'active_export_owner';
+            }
+        }
         $invoiceItems = [];
         foreach (
             Capsule::table('tblinvoiceitems')
@@ -1654,17 +2251,24 @@ final class AdminController
         foreach ($rows as $invoice) {
             $invoiceId = (int) $invoice->id;
             $mapping = $mappings[$invoiceId] ?? null;
+            $mappingRemoteId = $mapping === null ? '' : trim((string) ($mapping->sevdesk_id ?? ''));
             $country = strtoupper((string) ($invoice->country ?? ''));
             $taxExempt = in_array(strtolower((string) ($invoice->taxexempt ?? '')), ['1', 'true', 'yes', 'on'], true);
             $exportable = true;
             $reason = '';
             $reasonCode = '';
-            if ($mapping !== null && $mapping->sevdesk_id !== null) {
+            if ($mapping !== null && $mappingRemoteId !== '') {
                 $exportable = false;
                 $reason = 'Bereits zugeordnet';
             } elseif ($mapping !== null) {
                 $exportable = false;
                 $reason = 'Alte NULL-Zuordnung: Reconciliation erforderlich';
+            } elseif (isset($activeExportOwners[$invoiceId])) {
+                $exportable = false;
+                $reasonCode = $activeExportOwners[$invoiceId];
+                $reason = $reasonCode === 'unresolved_export_history'
+                    ? 'Ein älterer Export endete nach einem möglichen Remote-Write und muss zuerst geklärt werden'
+                    : 'Ein aktiver oder ungeklärter Exportjob besitzt diese Rechnung bereits';
             } elseif ((float) $invoice->credit > 0) {
                 $exportable = false;
                 $reason = 'Angewendetes Guthaben benötigt Einzelprüfung';
@@ -1785,6 +2389,15 @@ final class AdminController
                 if (
                     $target->allowed
                     && $target->documentType === DocumentTargetDecision::DOCUMENT_INVOICE
+                    && $snapshot instanceof InvoiceSnapshot
+                    && $snapshot->lineGrossMinorUnits() !== $snapshot->totalMinorUnits()
+                ) {
+                    $exportable = false;
+                    $reason = 'Für Invoices müssen Positionssumme und WHMCS-Rechnungsbetrag centgenau übereinstimmen';
+                    $reasonCode = 'invoice_total_mismatch';
+                } elseif (
+                    $target->allowed
+                    && $target->documentType === DocumentTargetDecision::DOCUMENT_INVOICE
                     && !$this->application->config->bool('invoice_canary_confirmed')
                 ) {
                     $exportable = false;
@@ -1823,8 +2436,8 @@ final class AdminController
                 'credit_formatted' => number_format((float) $invoice->credit, 2, ',', '.'),
                 'payable_formatted' => number_format(max(0, (float) $invoice->total - (float) $invoice->credit), 2, ',', '.'),
                 'status' => (string) $invoice->status,
-                'mapped' => $mapping !== null && $mapping->sevdesk_id !== null,
-                'sevdesk_id' => $mapping->sevdesk_id ?? null,
+                'mapped' => $mappingRemoteId !== '',
+                'sevdesk_id' => $mappingRemoteId !== '' ? $mappingRemoteId : null,
                 'eligible' => $exportable,
                 'exportable' => $exportable,
                 'reason' => $reason,

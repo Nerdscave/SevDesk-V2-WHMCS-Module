@@ -61,12 +61,23 @@ final class MappingRepository
         string $sevdeskId,
         string $documentType,
         ?string $documentNumber = null,
+        ?bool $isEInvoice = null,
+        ?string $xmlSha256 = null,
     ): void {
         self::validateMappingIds($invoiceId, $sevdeskId);
         $documentType = self::validateDocumentType($documentType);
         $documentNumber = self::validateDocumentNumber($documentNumber);
+        $xmlSha256 = self::validateSha256($xmlSha256, 'XML');
+        self::validateEInvoiceMetadata($documentType, $isEInvoice, $xmlSha256);
 
-        $this->persistLink($invoiceId, $sevdeskId, $documentType, $documentNumber);
+        $this->persistLink(
+            $invoiceId,
+            $sevdeskId,
+            $documentType,
+            $documentNumber,
+            $isEInvoice,
+            $xmlSha256,
+        );
     }
 
     public function enrichDocumentMetadata(
@@ -77,11 +88,15 @@ final class MappingRepository
         ?DateTimeInterface $documentReadyAt = null,
         ?DateTimeInterface $deliveredAt = null,
         ?string $pdfSha256 = null,
+        ?bool $isEInvoice = null,
+        ?string $xmlSha256 = null,
     ): void {
         self::validateMappingIds($invoiceId, $sevdeskId);
         $documentType = self::validateDocumentType($documentType);
         $documentNumber = self::validateDocumentNumber($documentNumber);
-        $pdfSha256 = self::validatePdfSha256($pdfSha256);
+        $pdfSha256 = self::validateSha256($pdfSha256, 'PDF');
+        $xmlSha256 = self::validateSha256($xmlSha256, 'XML');
+        self::validateEInvoiceMetadata($documentType, $isEInvoice, $xmlSha256);
         $readyAt = $documentReadyAt?->format('Y-m-d H:i:s');
         $deliveryAt = $deliveredAt?->format('Y-m-d H:i:s');
 
@@ -93,6 +108,8 @@ final class MappingRepository
             $readyAt,
             $deliveryAt,
             $pdfSha256,
+            $isEInvoice,
+            $xmlSha256,
         ): void {
             $existing = Capsule::table(Migrator::MAPPING_TABLE)
                 ->where('invoice_id', $invoiceId)
@@ -124,6 +141,27 @@ final class MappingRepository
                     $updates['pdf_sha256'] = $pdfSha256;
                 }
             }
+            $currentEInvoice = self::storedNullableBool($existing->is_e_invoice ?? null);
+            if ($isEInvoice !== null) {
+                if ($currentEInvoice !== null && $currentEInvoice !== $isEInvoice) {
+                    throw new RuntimeException('A different E-Invoice flag already exists for this mapping.');
+                }
+                if ($currentEInvoice === null) {
+                    $updates['is_e_invoice'] = $isEInvoice ? 1 : 0;
+                }
+            }
+            $currentXmlHash = strtolower(trim((string) ($existing->xml_sha256 ?? '')));
+            if ($xmlSha256 !== null) {
+                if ($currentEInvoice === false || $isEInvoice === false) {
+                    throw new RuntimeException('An XML checksum is only valid for an E-Invoice mapping.');
+                }
+                if ($currentXmlHash !== '' && $currentXmlHash !== $xmlSha256) {
+                    throw new RuntimeException('A different XML checksum already exists for this mapping.');
+                }
+                if ($currentXmlHash === '') {
+                    $updates['xml_sha256'] = $xmlSha256;
+                }
+            }
 
             if ($updates !== []) {
                 $updated = Capsule::table(Migrator::MAPPING_TABLE)->where('id', $existing->id)->update($updates);
@@ -139,12 +177,16 @@ final class MappingRepository
         string $sevdeskId,
         ?string $documentType,
         ?string $documentNumber,
+        ?bool $isEInvoice = null,
+        ?string $xmlSha256 = null,
     ): void {
         Capsule::connection()->transaction(static function () use (
             $invoiceId,
             $sevdeskId,
             $documentType,
             $documentNumber,
+            $isEInvoice,
+            $xmlSha256,
         ): void {
             $existing = Capsule::table(Migrator::MAPPING_TABLE)
                 ->where('invoice_id', $invoiceId)
@@ -159,6 +201,12 @@ final class MappingRepository
                     if ($documentType !== null) {
                         $insert['document_type'] = $documentType;
                         $insert['document_number'] = $documentNumber;
+                        if ($isEInvoice !== null) {
+                            $insert['is_e_invoice'] = $isEInvoice ? 1 : 0;
+                        }
+                        if ($xmlSha256 !== null) {
+                            $insert['xml_sha256'] = $xmlSha256;
+                        }
                     }
                     Capsule::table(Migrator::MAPPING_TABLE)->insert($insert);
                     return;
@@ -186,6 +234,22 @@ final class MappingRepository
             $updates = $documentType === null
                 ? []
                 : self::compatibleDocumentUpdates($existing, $documentType, $documentNumber);
+            if ($documentType !== null) {
+                $currentEInvoice = self::storedNullableBool($existing->is_e_invoice ?? null);
+                if ($isEInvoice !== null && $currentEInvoice !== null && $currentEInvoice !== $isEInvoice) {
+                    throw new RuntimeException('A different E-Invoice flag already exists for this mapping.');
+                }
+                if ($isEInvoice !== null && $currentEInvoice === null) {
+                    $updates['is_e_invoice'] = $isEInvoice ? 1 : 0;
+                }
+                $currentXmlHash = strtolower(trim((string) ($existing->xml_sha256 ?? '')));
+                if ($xmlSha256 !== null && $currentXmlHash !== '' && $currentXmlHash !== $xmlSha256) {
+                    throw new RuntimeException('A different XML checksum already exists for this mapping.');
+                }
+                if ($xmlSha256 !== null && $currentXmlHash === '') {
+                    $updates['xml_sha256'] = $xmlSha256;
+                }
+            }
             if ($currentRemoteId === '') {
                 $updates['sevdesk_id'] = $sevdeskId;
             }
@@ -268,28 +332,105 @@ final class MappingRepository
         return $documentNumber;
     }
 
-    private static function validatePdfSha256(?string $pdfSha256): ?string
+    private static function validateSha256(?string $sha256, string $label): ?string
     {
-        if ($pdfSha256 === null || trim($pdfSha256) === '') {
+        if ($sha256 === null || trim($sha256) === '') {
             return null;
         }
 
-        $pdfSha256 = strtolower(trim($pdfSha256));
-        if (preg_match('/^[a-f0-9]{64}$/', $pdfSha256) !== 1) {
-            throw new InvalidArgumentException('PDF checksum must be a SHA-256 hex value.');
+        $sha256 = strtolower(trim($sha256));
+        if (preg_match('/^[a-f0-9]{64}$/', $sha256) !== 1) {
+            throw new InvalidArgumentException($label . ' checksum must be a SHA-256 hex value.');
         }
 
-        return $pdfSha256;
+        return $sha256;
+    }
+
+    private static function validateEInvoiceMetadata(
+        string $documentType,
+        ?bool $isEInvoice,
+        ?string $xmlSha256,
+    ): void {
+        if ($isEInvoice === true && $documentType !== self::DOCUMENT_TYPE_INVOICE) {
+            throw new InvalidArgumentException('Only an Invoice mapping can be marked as E-Invoice.');
+        }
+        if ($xmlSha256 !== null && $isEInvoice !== true) {
+            throw new InvalidArgumentException('An XML checksum requires an explicit E-Invoice flag.');
+        }
+    }
+
+    private static function storedNullableBool(mixed $value): ?bool
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+
+        return in_array($value, [true, 1, '1'], true);
     }
 
     public function unlink(int $invoiceId): bool
     {
-        return Capsule::table(Migrator::MAPPING_TABLE)->where('invoice_id', $invoiceId)->delete() > 0;
+        return Capsule::connection()->transaction(static function () use ($invoiceId): bool {
+            $mapping = Capsule::table(Migrator::MAPPING_TABLE)
+                ->where('invoice_id', $invoiceId)
+                ->lockForUpdate()
+                ->first();
+            if ($mapping === null || self::mappingIsComplete($mapping)) {
+                return false;
+            }
+
+            return Capsule::table(Migrator::MAPPING_TABLE)
+                ->where('id', (int) $mapping->id)
+                ->where('invoice_id', $invoiceId)
+                ->delete() === 1;
+        });
     }
 
-    public function unlinkById(int $mappingId): bool
+    public function unlinkById(
+        int $mappingId,
+        bool $remoteMissingConfirmed = false,
+        ?string $expectedRemoteId = null,
+        ?string $expectedDocumentType = null,
+    ): bool {
+        return Capsule::connection()->transaction(static function () use (
+            $mappingId,
+            $remoteMissingConfirmed,
+            $expectedRemoteId,
+            $expectedDocumentType,
+        ): bool {
+            $mapping = Capsule::table(Migrator::MAPPING_TABLE)
+                ->where('id', $mappingId)
+                ->lockForUpdate()
+                ->first();
+            if ($mapping === null) {
+                return false;
+            }
+            if (self::mappingIsComplete($mapping)) {
+                if (!$remoteMissingConfirmed) {
+                    return false;
+                }
+                if (
+                    trim((string) $expectedRemoteId) !== trim((string) $mapping->sevdesk_id)
+                    || trim((string) $expectedDocumentType) !== trim((string) ($mapping->document_type ?? ''))
+                ) {
+                    return false;
+                }
+            }
+            if (!self::mappingIsComplete($mapping) && $remoteMissingConfirmed) {
+                // A proof about a previously complete row must never be reused
+                // after another process changed the mapping state.
+                return false;
+            }
+
+            return Capsule::table(Migrator::MAPPING_TABLE)
+                ->where('id', $mappingId)
+                ->delete() === 1;
+        });
+    }
+
+    private static function mappingIsComplete(object $mapping): bool
     {
-        return Capsule::table(Migrator::MAPPING_TABLE)->where('id', $mappingId)->delete() > 0;
+        return trim((string) ($mapping->sevdesk_id ?? '')) !== '';
     }
 
     /** @return array{complete:int,ambiguous:int,orphans:int} */
@@ -350,7 +491,7 @@ final class MappingRepository
             ->select([
                 'm.id as mapping_id', 'm.id', 'm.invoice_id', 'm.sevdesk_id',
                 'm.document_type', 'm.document_number', 'm.document_ready_at',
-                'm.delivered_at', 'm.pdf_sha256',
+                'm.delivered_at', 'm.pdf_sha256', 'm.is_e_invoice', 'm.xml_sha256',
                 'i.id as existing_invoice_id', 'i.invoicenum', 'i.date', 'i.status',
             ])
             ->orderByDesc('m.id')

@@ -22,9 +22,15 @@ final class ExportResult
     ) {
     }
 
-    public static function succeeded(int $invoiceId, string $remoteId): self
-    {
-        return new self(self::SUCCEEDED, $invoiceId, $remoteId, 'exported', 'Invoice exported successfully.');
+    /** @param array<string, scalar|null> $context */
+    public static function succeeded(
+        int $invoiceId,
+        ?string $remoteId,
+        string $code = 'exported',
+        string $message = 'Invoice exported successfully.',
+        array $context = [],
+    ): self {
+        return new self(self::SUCCEEDED, $invoiceId, $remoteId, $code, $message, $context);
     }
 
     public static function skipped(int $invoiceId, string $remoteId, string $code = 'already_mapped'): self

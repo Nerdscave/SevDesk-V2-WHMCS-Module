@@ -51,6 +51,8 @@ final class LegacyMappingAdminContractTest extends TestCase
         self::assertStringContainsString('$mapping.document_number', $template);
         self::assertStringContainsString('$mapping.document_ready_at', $template);
         self::assertStringContainsString('$mapping.delivered_at', $template);
+        self::assertStringContainsString('$mapping.is_e_invoice', $template);
+        self::assertStringContainsString('$mapping.xml_sha256', $template);
         self::assertStringContainsString('name="inspect_legacy_type"', $template);
         self::assertStringContainsString('name="confirm_legacy_type"', $template);
         self::assertStringContainsString('name="document_type"', $template);
@@ -83,17 +85,34 @@ final class LegacyMappingAdminContractTest extends TestCase
         );
 
         self::assertStringContainsString('if ($mappingId < 1)', $method);
-        self::assertStringContainsString("->value('invoice_id')", $method);
+        self::assertStringContainsString("->first(['invoice_id', 'sevdesk_id', 'document_type'])", $method);
         self::assertStringContainsString('$invoiceId > 0 && $invoiceId !== $storedInvoiceId', $method);
         self::assertStringContainsString('$invoiceId = $storedInvoiceId;', $method);
         self::assertStringContainsString('Zuordnungs-ID und Rechnungs-ID widersprechen sich', $method);
-        self::assertStringContainsString('mappings->unlinkById($mappingId)', $method);
+        self::assertStringContainsString('remoteDocumentDefinitelyMissing', $method);
+        self::assertStringContainsString('mappings->unlinkById(', $method);
+        self::assertStringContainsString('$remoteMissingConfirmed', $method);
+        self::assertStringContainsString('$remoteId !== \'\' ? $remoteId : null', $method);
         self::assertStringNotContainsString('mappings->unlink($invoiceId)', $method);
-        $lookupPosition = strpos($method, "->value('invoice_id')");
+        $lookupPosition = strpos($method, "->first(['invoice_id', 'sevdesk_id', 'document_type'])");
         $activeItemPosition = strpos($method, "->where('invoice_id', \$invoiceId)");
         self::assertNotFalse($lookupPosition);
         self::assertNotFalse($activeItemPosition);
         self::assertLessThan($activeItemPosition, $lookupPosition);
+    }
+
+    public function testBatchTypingOnlyAcceptsMarkerBackedFreshRemoteEvidence(): void
+    {
+        $controller = $this->source('lib/Controllers/AdminController.php');
+        $template = $this->template('assignment_manager.tpl');
+
+        self::assertStringContainsString('inspectLegacyMappingsBatch', $controller);
+        self::assertStringContainsString('confirmLegacyMappingsBatch', $controller);
+        self::assertStringContainsString("['context']['markerEvidence']", $controller);
+        self::assertStringContainsString('name="inspect_legacy_types_batch"', $template);
+        self::assertStringContainsString('name="confirm_legacy_types_batch"', $template);
+        self::assertStringContainsString('Markerbestätigte Typen übernehmen', $template);
+        self::assertStringContainsString('Dieser Beleg bleibt ein Einzelfall', $controller);
     }
 
     private function source(string $relativePath): string

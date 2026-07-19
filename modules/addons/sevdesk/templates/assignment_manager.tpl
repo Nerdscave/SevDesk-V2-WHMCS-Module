@@ -1,7 +1,7 @@
 {include file="partials/layout_top.tpl" pageTitle="Zuordnungen"}
 
 <div class="alert alert-warning" role="status">
-    Das Aufheben einer Zuordnung löscht keinen sevdesk-Beleg; ein erneuter Export kann ein Duplikat erzeugen.
+    Eine vollständige Zuordnung kann nur aufgehoben werden, wenn Voucher und Invoice unter der gespeicherten ID read-only nachweislich fehlen.
     Legacy-Zuordnungen ohne Typ werden ausschließlich gelesen und erst nach einer zweiten Remote-Prüfung bestätigt.
 </div>
 
@@ -27,6 +27,62 @@
         {if $filters.q || $filters.status}<a class="btn btn-link btn-sm" href="{$moduleLink|escape:'html':'UTF-8'}&amp;a=assignmentManager">Filter zurücksetzen</a>{/if}
     </form>
 </div>
+
+{if $legacyBatchIds}
+    <div class="panel panel-default">
+        <div class="panel-heading"><h3 class="panel-title">Legacy-Typen gesammelt vorprüfen</h3></div>
+        <div class="panel-body">
+            <p>Die Sammelprüfung liest höchstens 25 sichtbare, vollständige Legacy-Zuordnungen. Nur eindeutige Treffer mit Rewrite-Marker können danach gesammelt bestätigt werden.</p>
+            <form method="post" action="{$moduleLink|escape:'html':'UTF-8'}&amp;a=assignmentManager">
+                <input type="hidden" name="token" value="{$csrfToken|escape:'html':'UTF-8'}">
+                <input type="hidden" name="batch_mapping_ids" value="{$legacyBatchIds|escape:'html':'UTF-8'}">
+                <input type="hidden" name="page" value="{$pagination.page|escape:'html':'UTF-8'}">
+                <input type="hidden" name="filter_status" value="{$filters.status|escape:'html':'UTF-8'}">
+                <input type="hidden" name="filter_q" value="{$filters.q|escape:'html':'UTF-8'}">
+                <button type="submit" name="inspect_legacy_types_batch" value="1" class="btn btn-default btn-sm">Sichtbare Legacy-Typen read-only prüfen</button>
+            </form>
+        </div>
+    </div>
+{/if}
+
+{if $batchTypeInspections|@count}
+    <div class="panel panel-info">
+        <div class="panel-heading"><h3 class="panel-title">Ergebnis der Sammelprüfung</h3></div>
+        <div class="panel-body">
+            <form method="post" action="{$moduleLink|escape:'html':'UTF-8'}&amp;a=assignmentManager" data-confirm="Alle markerbestätigten Typen nach einer erneuten Remote-Prüfung übernehmen?">
+                <input type="hidden" name="token" value="{$csrfToken|escape:'html':'UTF-8'}">
+                <input type="hidden" name="page" value="{$pagination.page|escape:'html':'UTF-8'}">
+                <input type="hidden" name="filter_status" value="{$filters.status|escape:'html':'UTF-8'}">
+                <input type="hidden" name="filter_q" value="{$filters.q|escape:'html':'UTF-8'}">
+                <div class="table-responsive">
+                    <table class="table table-condensed">
+                        <thead><tr><th scope="col">Mapping</th><th scope="col">WHMCS-Rechnung</th><th scope="col">Vorschlag</th><th scope="col">Nachweis</th></tr></thead>
+                        <tbody>
+                        {foreach from=$batchTypeInspections item=inspection}
+                            <tr>
+                                <td class="sd-mono">{$inspection.mappingId|escape:'html':'UTF-8'}</td>
+                                <td>{$inspection.invoiceNumber|default:$inspection.invoiceId|escape:'html':'UTF-8'}</td>
+                                <td>{if $inspection.suggestedType === 'invoice'}Invoice{elseif $inspection.suggestedType === 'voucher'}Voucher{else}—{/if}</td>
+                                <td>
+                                    {$inspection.message|escape:'html':'UTF-8'}
+                                    {if $inspection.batchEligible}
+                                        <input type="hidden" name="batch_confirmations[{$inspection.mappingId|escape:'html':'UTF-8'}]" value="{$inspection.suggestedType|escape:'html':'UTF-8'}">
+                                    {/if}
+                                </td>
+                            </tr>
+                        {/foreach}
+                        </tbody>
+                    </table>
+                </div>
+                {if $batchTypeEligibleCount > 0}
+                    <button type="submit" name="confirm_legacy_types_batch" value="1" class="btn btn-primary btn-sm">Markerbestätigte Typen übernehmen</button>
+                {else}
+                    <p class="help-block">Kein Treffer ist für eine Sammelbestätigung geeignet. Bitte die angezeigten Einzelfälle getrennt prüfen.</p>
+                {/if}
+            </form>
+        </div>
+    </div>
+{/if}
 
 {if $mappings|@count}
     <div class="table-responsive">
@@ -75,6 +131,9 @@
                         {/if}
                         <small class="sd-mono">{$mapping.document_number|default:'keine Dokumentnummer'|escape:'html':'UTF-8'}</small>
                         <small>Hoheit: {$mapping.document_authority|default:'nicht historisch erfasst'|escape:'html':'UTF-8'} · Rule: {$mapping.tax_rule|default:'—'|escape:'html':'UTF-8'}</small>
+                        {if $mapping.document_type === 'invoice'}
+                            <small>E-Rechnung: {if $mapping.is_e_invoice == 1}<strong>ja</strong>{if $mapping.xml_sha256} · XML geprüft{/if}{elseif $mapping.is_e_invoice === null}historisch ungeklärt{else}nein{/if}</small>
+                        {/if}
                     </td>
                     <td>
                         <small>
@@ -133,14 +192,14 @@
                                 </form>
                             {/if}
                         {/if}
-                        <form method="post" action="{$moduleLink|escape:'html':'UTF-8'}&amp;a=assignmentManager" data-confirm="Zuordnung wirklich aufheben? Der Beleg in sevdesk bleibt bestehen und ein späterer Export kann ein Duplikat anlegen.">
+                        <form method="post" action="{$moduleLink|escape:'html':'UTF-8'}&amp;a=assignmentManager" data-confirm="Zuordnung wirklich prüfen und nur bei nachgewiesener Remote-Abwesenheit aufheben?">
                             <input type="hidden" name="token" value="{$csrfToken|escape:'html':'UTF-8'}">
                             <input type="hidden" name="mapping_id" value="{$mapping.mapping_id|default:$mapping.id|escape:'html':'UTF-8'}">
                             <input type="hidden" name="invoiceid" value="{$mapping.invoice_id|escape:'html':'UTF-8'}">
                             <input type="hidden" name="page" value="{$pagination.page|escape:'html':'UTF-8'}">
                             <input type="hidden" name="filter_status" value="{$filters.status|escape:'html':'UTF-8'}">
                             <input type="hidden" name="filter_q" value="{$filters.q|escape:'html':'UTF-8'}">
-                            <button type="submit" name="delete" value="1" class="btn btn-default btn-sm">Aufheben</button>
+                            <button type="submit" name="delete" value="1" class="btn btn-default btn-sm">{if $mapping.sevdesk_id}Fehlen prüfen und aufheben{else}Unvollständige Reservierung aufheben{/if}</button>
                         </form>
                     </td>
                 </tr>

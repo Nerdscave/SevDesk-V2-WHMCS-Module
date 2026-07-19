@@ -72,6 +72,32 @@ final class AdminInvoiceQuickExportContractTest extends TestCase
         self::assertStringContainsString("'candidate' => \$this->requestedExportContext()", $quick);
         self::assertStringContainsString('$requestedContext = $this->requestedExportContext();', $bulk);
         self::assertStringContainsString("'candidate' => \$requestedContext", $bulk);
+        self::assertStringContainsString("\$requestedContext['historicalBackfill'] = true", $bulk);
+        self::assertStringContainsString("\$requestedContext['delivery_requested'] = false", $bulk);
+        self::assertStringContainsString("\$requestedContext['requestedEInvoiceMode'] = 'off'", $bulk);
+        self::assertStringContainsString("\$requestedContext['requestedEInvoiceCanaryConfirmed'] = false", $bulk);
+        self::assertStringContainsString("create('historical_backfill'", $bulk);
+        self::assertStringContainsString('$queuedCount = (int) Capsule::table', $bulk);
+        self::assertStringContainsString('$ownerCount = (int) Capsule::table', $bulk);
+
+        $dryRun = $this->methodSource(
+            $controller,
+            'private function decorateDryRun(array $rows): array',
+            'private function dryRunTaxReason(',
+        );
+        self::assertStringContainsString('$activeExportOwners', $dryRun);
+        self::assertStringContainsString("'active_export_owner'", $dryRun);
+        self::assertStringContainsString("'unresolved_export_history'", $dryRun);
+        self::assertStringContainsString('JobRepository::isRiskyCheckpoint', $dryRun);
+        self::assertStringContainsString(
+            '$target->documentType === DocumentTargetDecision::DOCUMENT_INVOICE',
+            $dryRun,
+        );
+        self::assertStringContainsString(
+            '$snapshot->lineGrossMinorUnits() !== $snapshot->totalMinorUnits()',
+            $dryRun,
+        );
+        self::assertStringContainsString("\$reasonCode = 'invoice_total_mismatch';", $dryRun);
 
         $snapshot = $this->methodSource(
             $controller,
@@ -85,6 +111,13 @@ final class AdminInvoiceQuickExportContractTest extends TestCase
                 'requestedOssProfile',
                 'requestedEuB2cMode',
                 'requestedDeliveryChannel',
+                'requestedEInvoiceMode',
+                'requestedEInvoiceClientFieldId',
+                'requestedEInvoicePaymentMethodId',
+                'requestedEInvoiceActiveFrom',
+                'requestedEInvoiceCanaryConfirmed',
+                'requestedEInvoiceSevUserId',
+                'requestedEInvoiceUnityId',
             ] as $field
         ) {
             self::assertStringContainsString("'" . $field . "'", $snapshot);

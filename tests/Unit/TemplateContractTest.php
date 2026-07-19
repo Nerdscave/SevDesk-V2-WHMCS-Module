@@ -13,9 +13,17 @@ final class TemplateContractTest extends TestCase
         'save',
         'runtime_quarantine_token',
         'runtime_review_confirmed',
+        'transition_inventory_fingerprint',
+        'transition_inventory_confirmed',
         'sevdesk_api_key',
         'custom_field_id',
         'customer_number_contact_creation_confirmed',
+        'e_invoice_mode',
+        'e_invoice_client_field_id',
+        'e_invoice_payment_method_id',
+        'e_invoice_active_from',
+        'e_invoice_canary_confirmed',
+        'e_invoice_profile_acknowledged',
         'import_after',
         'import_only_paid',
         'sync_enabled',
@@ -48,6 +56,9 @@ final class TemplateContractTest extends TestCase
         'third_country_confirmed',
         'add_funds_confirmed',
         'small_business_confirmed',
+        'transition_inventory_confirmed',
+        'e_invoice_canary_confirmed',
+        'e_invoice_profile_acknowledged',
     ];
 
     private const TAX_PROFILES = [
@@ -161,6 +172,8 @@ final class TemplateContractTest extends TestCase
             $setup
         );
         self::assertStringContainsString('Das Speichern startet keinen Export.', $setup);
+        self::assertStringContainsString('Das Modul legt kein Feld an.', $setup);
+        self::assertStringContainsString('es gibt keinen stillen Rückfall auf eine normale PDF-Invoice', $setup);
     }
 
     public function testSetupNeverRendersAPartialStoredApiToken(): void
@@ -270,6 +283,20 @@ final class TemplateContractTest extends TestCase
         self::assertStringContainsString('<th scope="col">Mapping-ID</th>', $template);
         self::assertStringContainsString('$mapping.mapping_id|escape:', $template);
         self::assertStringNotContainsString('$mapping.created_at', $template);
+    }
+
+    public function testStaleExportContextHasAnExplicitMailFreeRequeueControl(): void
+    {
+        $template = $this->template('corrections.tpl');
+        $controller = file_get_contents(
+            dirname(__DIR__, 2) . '/modules/addons/sevdesk/lib/Controllers/AdminController.php',
+        );
+
+        self::assertIsString($controller);
+        self::assertStringContainsString('name="requeue_current_mode"', $template);
+        self::assertStringContainsString('name="confirm_mail_free_requeue"', $template);
+        self::assertStringContainsString('requeueExportDocument(', $controller);
+        self::assertStringContainsString("'stale_export_context_requeue_required'", $controller);
     }
 
     private function template(string $relativePath): string

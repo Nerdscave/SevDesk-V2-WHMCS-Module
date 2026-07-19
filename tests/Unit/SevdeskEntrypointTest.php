@@ -18,7 +18,7 @@ final class SevdeskEntrypointTest extends TestCase
     {
         $configuration = \sevdesk_config();
 
-        self::assertSame('2.1.0-rc.1', $configuration['version']);
+        self::assertSame('2.1.0-rc.2', $configuration['version']);
         self::assertArrayHasKey('fields', $configuration);
         self::assertSame([], $configuration['fields']);
         self::assertStringContainsString('Modul-Seite „Einrichtung“', (string) $configuration['description']);
@@ -114,14 +114,20 @@ final class SevdeskEntrypointTest extends TestCase
         self::assertIsString($script);
         self::assertIsString($upgrade);
         self::assertFileExists($root . '/LICENSE');
-        self::assertStringContainsString('${source_module}/UPGRADE.md', $script);
-        self::assertStringContainsString('${root}/docs/operations.md', $script);
+        self::assertStringContainsString('UPGRADE.md', $script);
+        self::assertStringContainsString("git -C \"\${root}\" show ':docs/operations.md'", $script);
         self::assertStringContainsString('OPERATIONS.md', $script);
-        self::assertStringContainsString('${root}/LICENSE', $script);
+        self::assertStringContainsString("git -C \"\${root}\" show ':LICENSE'", $script);
         self::assertStringContainsString('tar -C "${target}"', $script);
         self::assertStringContainsString('LICENSE modules', $script);
         self::assertStringContainsString('nicht deaktivieren', $upgrade);
-        self::assertStringContainsString("configured_version=\"\$(sed", $script);
+        self::assertStringContainsString('git -C "${root}" ls-files -z --cached', $script);
+        self::assertStringContainsString('ls-files --others --exclude-standard', $script);
+        self::assertStringContainsString('git -C "${root}" show ":${path}"', $script);
+        self::assertStringContainsString('Release module contains untracked files', $script);
+        self::assertStringContainsString('Release sources contain unstaged changes', $script);
+        self::assertStringNotContainsString('cp -R', $script);
+        self::assertStringContainsString('configured_version="$(git', $script);
         self::assertStringContainsString('does not match module version', $script);
     }
 

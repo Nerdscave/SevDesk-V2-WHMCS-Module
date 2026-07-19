@@ -72,6 +72,13 @@ namespace WHMCS\Module\Addon\SevDesk\Tests\Unit\Fixtures {
             return in_array(strtolower($value), ['1', 'true', 'yes', 'on', 'enabled'], true);
         }
 
+        public function int(string $key, int $default = 0): int
+        {
+            $value = $this->get($key);
+
+            return is_numeric($value) ? (int) $value : $default;
+        }
+
         public function set(string $key, string|int|bool|null $value): void
         {
             HookState::$config[$key] = is_bool($value)
@@ -551,6 +558,67 @@ namespace {
         emit_result([
             'guard' => InvoiceEmailGuardContext::appliesTo(42),
             'mailResult' => $result,
+            'remoteCalls' => HookState::$remoteCalls,
+        ]);
+    }
+
+    if ($scenario === 'mapped_sevdesk_invoice_later_read_failure') {
+        HookState::$mapping = (object) ['sevdesk_id' => '99', 'document_type' => 'invoice'];
+        HookState::$documentContext = [
+            'itemId' => 1,
+            'itemStatus' => 'succeeded',
+            'checkpoint' => 'finished',
+            'source' => 'frozen',
+            'allowed' => true,
+            'documentType' => 'invoice',
+            'documentAuthority' => 'sevdesk',
+            'exportMode' => 'invoice_only',
+            'ossProfile' => 'blocked',
+            'euB2cMode' => 'blocked',
+            'deliveryChannel' => 'whmcs_template',
+        ];
+        hook_callback('InvoicePaidPreEmail')(['invoiceid' => 42]);
+        HookState::$throwMappingRead = true;
+        $result = hook_callback('EmailPreSend')([
+            'relid' => 42,
+            'messagename' => 'Invoice Payment Confirmation',
+        ]);
+
+        emit_result([
+            'guard' => InvoiceEmailGuardContext::appliesTo(42),
+            'mailResult' => $result,
+            'logged' => HookState::$logs !== [],
+            'remoteCalls' => HookState::$remoteCalls,
+        ]);
+    }
+
+    if ($scenario === 'mapped_sevdesk_invoice_after_global_whmcs_switch') {
+        HookState::$config['document_authority'] = 'whmcs';
+        HookState::$mapping = (object) ['sevdesk_id' => '99', 'document_type' => 'invoice'];
+        HookState::$documentContext = [
+            'itemId' => 1,
+            'itemStatus' => 'succeeded',
+            'checkpoint' => 'finished',
+            'source' => 'frozen',
+            'allowed' => true,
+            'documentType' => 'invoice',
+            'documentAuthority' => 'sevdesk',
+            'exportMode' => 'invoice_only',
+            'ossProfile' => 'blocked',
+            'euB2cMode' => 'blocked',
+            'deliveryChannel' => 'whmcs_template',
+        ];
+        hook_callback('InvoicePaidPreEmail')(['invoiceid' => 42]);
+        HookState::$throwMappingRead = true;
+        $result = hook_callback('EmailPreSend')([
+            'relid' => 42,
+            'messagename' => 'Invoice Payment Confirmation',
+        ]);
+
+        emit_result([
+            'guard' => InvoiceEmailGuardContext::appliesTo(42),
+            'mailResult' => $result,
+            'logged' => HookState::$logs !== [],
             'remoteCalls' => HookState::$remoteCalls,
         ]);
     }

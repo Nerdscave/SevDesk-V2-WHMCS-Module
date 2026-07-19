@@ -2,14 +2,15 @@
 
 ## Freigabestatus
 
-Dieses Runbook gilt für das Voucher- und Invoice-Modul bis zum Zielrelease 2.1.0. Vor einer Produktivfreigabe stehen noch der MariaDB-/WHMCS-Test, die bisherigen Voucher-Canaries und der Invoice-API-Canary in einem echten sevDesk-Testmandanten aus.
+Dieses Runbook gilt für `2.1.0-rc.2`. Der RC ist für Testinstallationen gedacht, nicht für Produktivdaten. Vor der Freigabe stehen noch der vollständige Lauf mit PHP 8.3 und MariaDB, die Prüfung unter WHMCS 8.13.4, die bisherigen Voucher-Canaries, der Invoice-API-Canary und der getrennte ZUGFeRD-Canary in einem echten sevDesk-Testmandanten aus.
 
-Bis dahin bleiben `invoice_canary_confirmed` und bei neuen Rollouts auch `sync_enabled` deaktiviert. Ein 2.0-Bestand behält beim Upgrade den Modus `voucher_only` und erhält `runtime_review_required=on`. Diese Quarantäne stoppt automatische und manuelle Verarbeitung. Sie endet erst nach einer erfolgreichen read-only Prüfung und der Bestätigung im Setup.
+Bis dahin bleiben `invoice_canary_confirmed`, `e_invoice_canary_confirmed` und bei neuen Rollouts auch `sync_enabled` deaktiviert. Ein 2.0-Bestand behält beim Upgrade den Modus `voucher_only` und erhält `runtime_review_required=on`. Diese Quarantäne stoppt automatische und manuelle Verarbeitung. Sie endet erst nach einer erfolgreichen read-only Prüfung und der Bestätigung im Setup.
 
 ## Unterstützte Umgebung
 
 - WHMCS 8.13.4
 - PHP 8.3 für Web und Cron
+- für native ZUGFeRD-Invoices zusätzlich PHP XMLReader (`ext-xml`) in Web und Cron
 - von dieser WHMCS-Version unterstützte MySQL-/MariaDB-Version
 - regelmäßiger WHMCS-Cron
 - sevDesk-Mandant mit sevDesk-Update 2.0
@@ -27,8 +28,8 @@ PHP-CLI und PHP-FPM müssen dieselbe relevante Konfiguration und dieselben Erwei
 4. Anzahl und Prüfsummen der bestehenden `mod_sevdesk`-Zeilen dokumentieren, ohne den Dump in Git abzulegen.
 5. Aktive Jobs stoppen und laufende Worker sowie Web-/CLI-Requests des
    Altmoduls vollständig beenden oder auslaufen lassen.
-6. Prüfen, dass keine `ambiguous` Exportitems offen sind; sie blockieren einen Moduswechsel.
-7. Sicherstellen, dass Web und Cron PHP 8.3 verwenden.
+6. Prüfen, dass keine `ambiguous` Exportitems offen sind; sie blockieren einen Moduswechsel. Alte `permanent_failed`-Voucher-Jobs ebenfalls erfassen, weil sie nach einem Wechsel nicht normal wiederholt werden dürfen.
+7. Sicherstellen, dass Web und Cron PHP 8.3 verwenden. Für ZUGFeRD muss XMLReader in beiden Laufzeiten verfügbar sein.
 8. Rollback-Dateien griffbereit halten.
 9. Prüfen, dass private Exporte, PDF-Kopien und API-Token nicht im Deployment-Paket liegen.
 10. Gegen die Funktionsmatrix im README prüfen, ob der Altbetrieb Kontaktaktualisierungen, automatische Zahlungsbuchung, Produktkonten oder Fremdwährungen verwendet. Für solche Abweichungen bleibt `sync_enabled` aus, bis ein eigener Übergang entschieden ist.
@@ -49,16 +50,16 @@ Der Dateideploy unterscheidet sich je nach Hosting. Die Reihenfolge ist immer:
    kein vor dem Tausch gestarteter Prozess mehr läuft.
 4. Im WHMCS-Adminbereich den vom Versionswechsel ausgelösten Upgrade-Callback abwarten beziehungsweise direkt die neue Addon-Seite öffnen. Das neue Addon nicht nochmals als vermeintliche Erstinstallation aktivieren. Danach die Addon-Einstellungen einmal speichern, damit WHMCS bei einem bereits aktiven Altmodul die neue `hooks.php` sicher registriert.
 5. Schema-/Migrationsreport prüfen. Bei einem der unten beschriebenen Diagnosecodes abbrechen, nicht automatisch bereinigen.
-6. Im Addon die interne Seite **Einrichtung** öffnen und Mandant/API-Token, Kontaktfeld und vorhandene Kontakt-IDs, Konten, Steuerprofile, Dokumentmodus sowie offene Jobs prüfen. Das normale WHMCS-Addon-Konfigurationsformular enthält keine operativen Felder.
+6. Im Addon die interne Seite **Einrichtung** öffnen und Mandant/API-Token, Kontaktfeld und vorhandene Kontakt-IDs, Konten, Steuerprofile, Dokumentmodus sowie offene Jobs prüfen. Die dort angezeigte Übergangsinventur muss mit der zuvor erfassten Bestandsaufnahme plausibel sein. Das normale WHMCS-Addon-Konfigurationsformular enthält keine operativen Felder.
 7. Abgelaufene Alt-Worker-Leases werden beim Speichern unter dem Runner-Lock ausschließlich lokal klassifiziert. Ohne Abbruch wechseln sichere Checkpoints und Checkpoints mit bestätigtem Remote-Effekt zu `retry_wait`. Bei einem abgebrochenen Job werden sichere Checkpoints `cancelled`; unbekannte Write-Ausgänge und bereits bestätigte Remote-Effekte werden `ambiguous`. Dabei läuft kein Handler. Ein laufendes Item muss regulär enden oder seine Lease muss ablaufen. Pause und Abbruch verhindern nur weitere Claims.
 8. Die Bestandsfreigabe im Setup ausdrücklich bestätigen. Die Bestätigung ist an den beim Seitenaufruf angezeigten, opaken Quarantäne-Stand gebunden. Wurde die Quarantäne zwischenzeitlich erneuert, Seite neu laden und den Bestand erneut prüfen. Erst eine erfolgreiche read-only Mandantenprüfung löscht `runtime_review_required`; `sync_enabled` bleibt separat wählbar.
 9. Health Check vollständig ausführen.
 10. Cron-/Worker-Lauf im Diagnosemodus starten.
 11. Zuerst einen synthetischen oder fachlich freigegebenen Voucher-Canary im Defaultmodus ausführen.
 12. Ergebnis in WHMCS, `mod_sevdesk` und sevDesk prüfen.
-13. Invoice-Modi erst nach dem gesonderten Invoice-API-Canary und dokumentierter Betreiberbestätigung aktivieren.
-14. Erst danach kleine Invoice-Batches, Hooks und Bulk-Nachlauf freigeben und
-    den WHMCS-Wartungsmodus beenden.
+13. Invoice-Modi erst nach dem gesonderten Invoice-API-Canary und dokumentierter Betreiberbestätigung aktivieren. Für den ersten produktionsnahen Test `invoice_only + whmcs` wählen und E-Rechnungen ausgeschaltet lassen.
+14. Erst danach kleine Invoice-Batches prüfen und einen bestätigten Altbestand über die gemeinsame Vorschau mailfrei einreihen. Der Moduswechsel allein startet keinen Nachlauf.
+15. sevDesk-Hoheit und ZUGFeRD erst nach den jeweils eigenen Live- und Canary-Prüfungen aktivieren. Anschließend Hooks freigeben und den WHMCS-Wartungsmodus beenden.
 
 Das Öffnen der Settings darf weder Voucher noch Invoice schreiben und muss auch bei falschem Token möglich bleiben.
 
@@ -126,6 +127,8 @@ export_mode=voucher_only
 document_authority=whmcs
 oss_profile=blocked
 invoice_canary_confirmed=off
+e_invoice_mode=off
+e_invoice_canary_confirmed=off
 customer_number_contact_creation_confirmed=off
 runtime_review_required=off (erst nach bestätigter Bestandsprüfung)
 ```
@@ -134,7 +137,28 @@ Die Migration ergänzt Mappingfelder nur additiv. Vollständige Altzuordnungen b
 
 Die read-only Prüfung fragt die gespeicherte ID am Voucher- und am Invoice-Endpoint ab. Nur genau ein Treffer mit passender Objektart, ID und exakter WHMCS-Dokumentnummer darf einen Typ vorschlagen. Bei neuen Modulbelegen liefert der Rewrite-Marker einen zusätzlichen Nachweis. Bei Belegen des Originalmoduls kann er fehlen; die Oberfläche weist dann auf den schwächeren Legacy-Nachweis hin.
 
-Ein widersprüchlicher Marker oder eine ID, die an beiden Endpoints existiert, blockiert die Zuordnung. `400` gilt nur beim Invoice-by-ID-Endpoint als dokumentierte Abwesenheit, beim Voucher nur `404`. Erst eine Adminbestätigung nach einer erneuten Prüfung beider Endpoints ergänzt den Typ. Dabei entstehen weder ein neues Remote-Dokument noch eine andere Remote-ID.
+Ein widersprüchlicher Marker oder eine ID, die an beiden Endpoints existiert, blockiert die Zuordnung. Nur eine eindeutige 400- oder 404-Antwort gilt beim jeweiligen Voucher-/Invoice-by-ID-Endpoint als Abwesenheit. Erst eine Adminbestätigung nach einer erneuten Prüfung beider Endpoints ergänzt den Typ. Dabei entstehen weder ein neues Remote-Dokument noch eine andere Remote-ID.
+
+### Übergangsinventur und Moduswechsel
+
+Vor einer Änderung an Exportmodus, Dokumenthoheit, OSS-Profil oder E-Rechnungsprofil zeigt das Setup eine rein lokale Bestandsaufnahme. Sie zählt:
+
+- typisierte Voucher und Invoices;
+- vollständige Mappings ohne Dokumenttyp;
+- `NULL`-/Leer-Mappings und verwaiste Zuordnungen;
+- aktive, unklare und alte fehlgeschlagene Exportjobs;
+- bezahlte, ungemappte Rechnungen ab `import_after`;
+- lokale Hinweise auf mögliche Remote-Dubletten.
+
+Die Bestätigung ist an den aktuellen Fingerprint dieser Inventur gebunden. Ändert sich der Bestand zwischen Seitenaufruf und Speichern, muss die Seite neu geladen und erneut geprüft werden. Das Speichern einer neuen Einstellung erzeugt keinen Exportjob.
+
+Vorhandene Zuordnungen sind unveränderlich. Ein Voucher bleibt Voucher. Eine bereits erzeugte Invoice behält die Dokumenthoheit, die in ihrem Jobkontext eingefroren wurde. Weder ein Modus- noch ein Hoheitswechsel konvertiert, versendet oder exportiert bestehende Belege erneut.
+
+Alte fehlgeschlagene `export_voucher`-Items behalten ihren ursprünglichen Pfad. Weicht ihre eingefrorene Konfiguration vom aktuellen Setup ab, erscheint `stale_export_context_requeue_required`. Ein normaler Retry ist dann gesperrt. Nur ein eindeutig sicherer Zustand vor dem ersten Dokument-Write kann nach sichtbarer Bestätigung als neuer `export_document`-Job eingereiht werden. Dieser Job ist mailfrei, verwendet den aktuellen Modus, erzeugt keine E-Rechnung und verweist auf das alte Item. Das alte Item bleibt als Nachweis erhalten. Ab `voucher_write_requested` oder einem späteren riskanten Checkpoint gibt es diesen Übergang nicht; dort gilt ausschließlich die Recovery des ursprünglichen Dokumenttyps. Solange so ein riskanter Altzustand ungeklärt ist, sperrt er außerdem jeden neuen Exportjob für dieselbe WHMCS-Rechnung, auch Kurzexport und Einzelimport.
+
+Die Zuordnungsansicht kann höchstens 25 sichtbare Legacy-Mappings gesammelt vorprüfen. Nur eindeutige Treffer mit passendem Rewrite-Marker sind für die Sammelbestätigung zugelassen. Markerlose Belege des Originalmoduls, Cross-Type-Kollisionen und widersprüchliche Treffer bleiben Einzelfälle. Vor jeder Übernahme liest das Modul beide Endpoints erneut.
+
+Eine vollständige Zuordnung lässt sich nicht mehr allein durch einen Admin-Klick für einen Neu-Export freigeben. Das Modul prüft die gespeicherte ID zuerst am Voucher- und am Invoice-by-ID-Endpoint. Nur wenn beide Abfragen die Remote-Abwesenheit jeweils eindeutig mit HTTP 400 oder 404 bestätigen, darf die lokale Zeile entfernt werden. Authentifizierungsfehler, Timeouts, 429, 5xx und jeder vorhandene Remote-Beleg lassen das Mapping stehen. Unvollständige lokale Reservierungen ohne Remote-ID können weiterhin nach der gesonderten Prüfung entfernt werden.
 
 ## Erforderliche Konfiguration
 
@@ -168,6 +192,8 @@ Vor dem ersten Canary sind Stichproben aus allen tatsächlich vorkommenden Zust�
 
 Bereits verknüpfte sevDesk-Kontakte werden nicht automatisch mit späteren WHMCS-Stammdatenänderungen aktualisiert.
 
+Eine neue Kontakt-ID wird direkt in WHMCS unter Datenbanksperre eingetragen. Ist inzwischen dieselbe ID vorhanden, ist der Schritt bereits erledigt. Eine andere ID, doppelte Custom-Field-Zeilen oder ein gelöschter Kunde stoppen den Vorgang; das Modul überschreibt die Zuordnung nicht.
+
 Leere Custom-Fields müssen vor der Aktivierung inventarisiert werden. Die exakte Suche findet einen alten Kontakt nur, wenn sevDesk in diesem Mandanten bereits die interne WHMCS-Client-ID als `customerNumber` verwendet. Fehlt die Kundennummer oder folgt sie einem anderen Schema, ist kein sicherer automatischer Abgleich möglich. Solche Kontakte müssen vor der Freigabe manuell über ihre bestätigte ID verknüpft werden.
 
 Erst danach darf `customer_number_contact_creation_confirmed` im Setup aktiviert werden. Ohne diesen Schalter bleiben vorhandene IDs und exakte Treffer nutzbar, aber ein leerer Suchausgang erzeugt keinen Kontakt. Liefert ein API-Treffer keine prüfbare Kundennummer, blockiert das Modul die Verknüpfung und Neuanlage. Auch ein 401/403 in einem optionalen Kontakt-Detailabruf löst den mandantenweiten Zugangsalarm aus.
@@ -190,6 +216,26 @@ Erst danach darf `customer_number_contact_creation_confirmed` im Setup aktiviert
 - Hinweis für `invoice_only` akzeptieren: Invoice-Positionen übernehmen kein frei konfiguriertes `accountDatev`.
 
 Invoice-Ziele werden nur für vollständig bezahlte WHMCS-Rechnungen mit finaler Rechnungsnummer verarbeitet. Rules 18/20, gemischte oder unklare Leistungsarten bleiben blockiert.
+
+### Native ZUGFeRD-Invoices
+
+ZUGFeRD ist eine Eigenschaft einer normalen sevDesk-`Invoice`, kein dritter Dokumenttyp. Die geschützte Setupseite enthält dafür:
+
+- `e_invoice_mode=off|zugferd_domestic_b2b`;
+- die ID eines vorhandenen, nur für Administratoren sichtbaren WHMCS-Kundenfelds vom Typ Tickbox;
+- eine im aktuellen sevDesk-Mandanten bestätigte `PaymentMethod`;
+- das Aktivierungsdatum;
+- `e_invoice_canary_confirmed` als eigenes Gate.
+
+Der Pfad ist nur mit `invoice_only`, sevDesk-Dokumenthoheit, bestandenem Invoice- und ZUGFeRD-Canary sowie PHP XMLReader aktivierbar. Das Kundenfeld muss für den betroffenen Kunden gesetzt sein. Zusätzlich verlangt das Modul eine deutsche Organisation, deutsche Rechnungsdaten, Rule 1, eine Rechnung ab dem Aktivierungsdatum und vollständige Referenzen für `SevUser`, `Unity`, `PaymentMethod`, Kontakt und Land.
+
+Der bestehende sevDesk-Kontakt muss eine Käuferreferenz, genau eine passende Haupt-E-Mail, eine vollständige deutsche Rechnungsadresse und `governmentAgency=false` besitzen. Das Modul trägt fehlende Daten nicht automatisch nach. Sobald das Kunden-Opt-in greift, führt ein fehlendes oder abweichendes Pflichtfeld zu einem Prüffall. Es gibt keinen stillen Rückfall auf eine normale PDF-Invoice.
+
+Das Modul übergibt `propertyIsEInvoice=true`, die strukturierte Empfängeradresse, die `PaymentMethod` und `takeDefaultAddress=false`. Nach dem Create liest es Invoice, Kontakt, Zahlungsmethode und Adresse zurück. Anschließend lädt es `getXml`, prüft Größe, UTF-8, CII-Wurzelelement und wohlgeformtes XML ohne DTD oder externe Entitäten und friert den SHA-256-Hash ein. Die EN-16931-Prüfung bleibt Bestandteil des externen Canarys; die lokale Strukturprüfung ersetzt sie nicht.
+
+Das Mapping bleibt `document_type=invoice` und erhält additiv `is_e_invoice` sowie `xml_sha256`. `pdf_sha256` gehört weiterhin zur ausgelieferten sevDesk-PDF. Namen und Adressen werden nicht im Job gespeichert; dort liegen nur die notwendigen IDs und ein PII-freier Adresshash. PDF und XML werden weder dauerhaft in WHMCS gespeichert noch geloggt.
+
+Der Kundenbereich und der WHMCS-Mailkanal liefern die geprüfte ZUGFeRD-PDF. Beim sevDesk-Versand setzt das Modul `sendXml=false`, weil der strukturierte Bestandteil bereits in der PDF steckt. Rule 19 bleibt immer eine normale Invoice. Rules 18/20, B2G, XRechnung und historische E-Rechnungs-Backfills sind nicht freigegeben.
 
 ### sevDesk-Dokumenthoheit und Versand
 
@@ -227,6 +273,20 @@ Das vollständige Protokoll mit Datum, Mandant, synthetischen WHMCS-/Remote-IDs,
 
 Scheitert die ID-Eindeutigkeit, Rule 19 oder der Markerabgleich, bleiben mindestens `invoice_for_oss` und alle davon abhängigen Rolloutschritte gesperrt. Es darf nicht durch manuelles Setzen der Checkbox „freigegeben“ werden; zuerst ist eine neue Architekturentscheidung nötig.
 
+## ZUGFeRD-Canary
+
+Der ZUGFeRD-Canary ist vom normalen Invoice-Canary getrennt. Er verwendet einen synthetischen deutschen B2B-Kunden und muss vor `e_invoice_canary_confirmed` belegen:
+
+1. `propertyIsEInvoice=true`, strukturierte Adresse, `PaymentMethod`, `SevUser`, `Unity`, Kontakt und Rule 1 werden von sevDesk angenommen und unverändert zurückgegeben.
+2. `getXml` liefert wohlgeformtes CII-XML. Der Inhalt besteht zusätzlich eine externe EN-16931-Prüfung.
+3. Die von sevDesk erzeugte ZUGFeRD-PDF lässt sich über `getPdf` stabil laden; PDF- und XML-Hashes bleiben im getesteten Lifecycle nachvollziehbar.
+4. `sendBy` öffnet die Invoice ohne Vertragsabweichung.
+5. `sendViaEmail` akzeptiert `sendXml=false` und versendet keine lose XML-Datei zusätzlich zur PDF.
+6. Der WHMCS-Kanal hängt exakt die geprüfte PDF an, und der authentifizierte Kundendownload liefert dieselben Bytes nur an den Rechnungseigentümer.
+7. Recovery nach Create, XML-/PDF-Abruf, Öffnung und Versand führt keinen zweiten Remote-Write aus.
+
+Das Protokoll bleibt wie beim Invoice-Canary außerhalb von Git. Im Repository stehen weder Testadressen noch PDFs, XML-Dateien, IDs oder Rohpayloads. Ein gesetzter Setup-Schalter ersetzt den Canary nicht.
+
 ## Twenty-One-Adapter installieren
 
 1. `modules/addons/sevdesk/theme-adapters/twenty-one/sevdesk-invoice-authority.tpl` in das Wurzelverzeichnis des aktiven Twenty-One-Child-Themes kopieren.
@@ -256,6 +316,7 @@ Alle Punkte müssen grün sein:
 - freigegebene Tax-Rule-/Rate-/Voucher-Kombinationen sind laut Guidance zulässig;
 - bei Invoice-Modus: Canary bestätigt, Modus/Hoheit gültig, SevUser und Unity lesbar und Rule freigegeben;
 - bei Rule 19: Digitalprofil ausdrücklich bestätigt; Rules 18/20 bleiben gesperrt;
+- bei ZUGFeRD: `invoice_only`, sevDesk-Hoheit, PHP XMLReader, eigener Canary, gültiges Admin-Tickbox-Feld, Aktivierungsdatum und PaymentMethod bestätigt;
 - bei sevDesk-Hoheit: Proforma aktiv, Adapter-Manifest/Bestätigung vorhanden und Versandkanal vollständig konfiguriert;
 - Client-Custom-Field existiert;
 - im Voucher-Pfad lässt sich die WHMCS-PDF erzeugen; im Invoice-Pfad ist der getrennte sevDesk-PDF-Vertrag bestätigt;
@@ -300,7 +361,9 @@ API-Request. Mapping-, Job- und Itemzahlen müssen danach unverändert sein.
 9. Nach Abschluss alle `permanent_failed`- und `ambiguous`-Items bearbeiten. Die UI kennzeichnet anhand des Fehlercodes, welche davon manuell geprüft werden müssen.
 10. Endzahlen, Dokumenttypen, Ready-/Delivery-Zustand mit WHMCS und sevDesk abstimmen.
 
-Ein Bulk- oder historischer Job löst nie automatisch Invoice-Versand aus, auch wenn `document_authority=sevdesk` konfiguriert ist. Eine Zustellung braucht einen separat bestätigten Vorgang.
+Ein Bulk- oder historischer Job löst nie automatisch Invoice-Versand aus, auch wenn `document_authority=sevdesk` konfiguriert ist. Eine Zustellung braucht einen separat bestätigten Vorgang. Historische Jobs erzeugen außerdem keine E-Rechnung.
+
+Der bestätigte Altbestand wird als eigener Jobtyp `historical_backfill` eingereiht. Vor jedem Invoice-Create sucht der Worker read-only nach der exakten finalen Rechnungsnummer. Danach prüft er mögliche Invoices mit demselben Datum, Kontakt, Währung und Betrag sowie Voucher-Kandidaten über Nummer, Datum, Kontakt, Betrag und `[WHMCS-INVOICE:<id>]`. Jeder mögliche Treffer, eine volle Suchseite oder ein nicht sicher abschließbarer Read blockiert die Neuanlage. Der Dublettenschutz setzt selbst kein Mapping; ein Kandidat muss separat geklärt werden.
 
 Ein Cancel verhindert neue Claims, bricht laufende API-Operationen aber nicht gewaltsam ab. Deren Ergebnis wird gespeichert oder per Recovery geklärt. Cancel, Claim und Lease-Recovery sperren dabei stets Job vor Item und vergleichen die aktuelle Lease erneut. Liefert ein bereits laufendes Item anschließend nur einen sicheren Retry zurück, wird es stattdessen `cancelled` und gibt seinen Dedupe-Key frei. Liegt am fortzusetzenden Checkpoint ein möglicher oder bereits bestätigter Remote-Effekt vor, wird das Item `ambiguous` und behält den Dedupe-Key; so bleibt kein nicht mehr claimbares `retry_wait` zurück.
 
@@ -347,6 +410,7 @@ Für den Nachlauf zählt nur der aktuelle Datenbestand. Deshalb beginnt er mit e
 - Invoice-Mappings ohne `document_ready_at` nach erwartetem Abschluss;
 - offene oder unklare Delivery-/WHMCS-Mailcheckpoints;
 - PDF-Hashabweichungen und Client-Downloadfehler;
+- ZUGFeRD-Mappings mit fehlendem oder abweichendem XML-Hash;
 - ungemappte, exportfähige Paid-Invoices;
 - mit dokumentiertem Grund übersprungene Unpaid-/Datumsfälle;
 - bestätigte Rule-19-Invoice-Kandidaten sowie Rule-18/20-, gemischte, Credit-, Nullsummen-, Fremdwährungs- und sonstige manuelle Fälle.
@@ -355,15 +419,15 @@ Rechnungen mit angewendetem Kundenguthaben bleiben aus Bulk-Jobs ausgeschlossen.
 
 Ohne diese Bestätigung gibt es keinen Write. Eine proportionale Umsatzkürzung ist nicht vorgesehen.
 
-Ungemappte Invoices dürfen nicht pauschal in einen Job übernommen werden. Maßgeblich ist die aktuelle Live-Inventur.
+Ungemappte Invoices dürfen nicht pauschal in einen Job übernommen werden. Maßgeblich ist die aktuelle Live-Inventur. Die Übergangsinventur im Setup liefert dafür Zähler und Sperrhinweise; die fachliche Auswahl erfolgt anschließend in der gemeinsamen Vorschau.
 
 ### 2. Altzustände bereinigen
 
-Alle `sevdesk_id=NULL`-Mappings werden einzeln geprüft. Vollständige untypisierte Legacy-Mappings werden separat read-only klassifiziert und nur nach Adminbestätigung ergänzt. Verwaiste Mappings werden nicht automatisch gelöscht.
+Alle `sevdesk_id=NULL`-Mappings werden einzeln geprüft. Vollständige untypisierte Legacy-Mappings werden separat read-only klassifiziert und nur nach Adminbestätigung ergänzt. Die Sammelbestätigung ist ausschließlich für eindeutige Markertreffer vorgesehen. Verwaiste Mappings werden nicht automatisch gelöscht.
 
 ### 3. Dry-Run
 
-Der Dry-Run lädt die WHMCS-Daten, prüft Eligibility, klassifiziert Steuerfall und unveränderliches Dokumentziel und gleicht den Voucher-Pfad mit Guidance beziehungsweise den Invoice-Pfad mit seinen Fähigkeiten ab. Er schreibt weder Kontakte, PDFs, Voucher noch Invoices. Der Report nennt Zieltyp, Hoheit, Rule, Delivery und Grund.
+Der Dry-Run lädt die WHMCS-Daten, prüft Eligibility, klassifiziert Steuerfall und unveränderliches Dokumentziel und gleicht den Voucher-Pfad mit Guidance beziehungsweise den Invoice-Pfad mit seinen Fähigkeiten ab. Er schreibt weder Kontakte, PDFs, XML, Voucher noch Invoices. Der Report nennt Zieltyp, Hoheit, Rule, Delivery und Grund. In der historischen Vorschau bleibt der E-Rechnungsmodus aus; eingereihte Invoice-Backfills speichern `is_e_invoice=false`.
 
 ### 4. Canary
 
@@ -409,7 +473,8 @@ Der Checkpoint bestimmt die einzig zulässige Aktion:
 
 - bei `invoice_payment_pending`: kein sevDesk-Dokument wurde geschrieben. Im Hybridmodus aktuellen WHMCS-Paid-Status neu lesen; `invoice_payment_event_followup` bedeutet, dass ein während des Abschlusses beobachtetes `InvoicePaid`-Ereignis denselben Dedupe-Besitzer einmal erneut prüfen lässt;
 - nach `invoice_write_requested`: ausschließlich Invoice anhand Marker, Nummer, Kontakt, Währung, Rule, Betrag und Positionen suchen; kein zweiter Create;
-- nach `invoice_created` vor `mapping_persisted`: bekannte Invoice-ID lesen, exakt prüfen und erst dann Typ/ID mappen;
+- nach `invoice_created` vor `mapping_persisted`: bekannte Invoice-ID lesen, exakt prüfen und erst dann Typ/ID mappen; bei ZUGFeRD zusätzlich `getXml` prüfen und den ersten XML-Hash einfrieren;
+- nach `invoice_xml_verified`: bekannte Invoice-ID, E-Rechnungsflag, PaymentMethod, Kontakt, Adresshash und gespeicherten XML-Hash erneut lesen; ein fehlendes oder abweichendes XML bleibt `ambiguous`;
 - nach `mapping_persisted` ohne auffindbares lokales Mapping: nur den exakten Draft lesend suchen und typisiert wiederherstellen; niemals neu erstellen;
 - nach `invoice_open_write_requested`: Status, `sendType`, Kontakt, Lieferland und Positionen lesen; `sendBy` nicht automatisch wiederholen;
 - nach `invoice_delivery_write_requested`: Status, `sendType`, `sendDate`, Kontakt, Lieferland und Positionen lesen; `sendViaEmail` nicht automatisch wiederholen;
@@ -419,6 +484,8 @@ Der Checkpoint bestimmt die einzig zulässige Aktion:
 Fehlt das Mapping erst nach einem Open-, Delivery- oder Mail-Checkpoint, bleibt der Job mit unverändertem Checkpoint `ambiguous`. Dieser Zustand wird nicht automatisch auf Create-Recovery zurückgestuft; Remote-Dokument und lokale Zuordnung müssen einzeln geprüft werden.
 
 Nach einem erfolgreichen Ready-Schritt wird die finale PDF erneut über `getPdf` geladen, auf Signatur und Größe geprüft und gegen `pdf_sha256` verglichen. Ein anderer Hash ist ein Prüffall; eine lokale PDF-Kopie wird nicht angelegt.
+
+Für eine E-Rechnung wird vor Öffnung und Zustellung zusätzlich `getXml` gegen `xml_sha256` geprüft. Ein neuer Hash ersetzt den gespeicherten Wert nicht. Die Recovery bleibt beim vorhandenen Remote-Dokument und darf weder eine normale Invoice noch eine zweite E-Rechnung erzeugen.
 
 ## Störungsmatrix
 
@@ -492,6 +559,16 @@ Wenn bereits das Anlegen eines Jobs timeoutet, zuerst in der Jobliste prüfen, o
 - Item/Mapping als Prüffall behandeln und sevDesk-PDF-Stabilität gegen den Canary bewerten;
 - keine PDF-Bytes in Datenbank, Ticket oder Log kopieren.
 
+### ZUGFeRD-XML fehlt oder hat einen anderen Hash
+
+- `document_type=invoice`, `is_e_invoice`, Remote-ID, `xml_sha256` und den aktuellen Checkpoint prüfen;
+- PHP XMLReader in der Web- und Cron-Laufzeit kontrollieren;
+- `getXml` nur über den typisierten Workerpfad lesen; keine XML-Datei aus einem Ticket oder lokalen Export als Ersatz einspielen;
+- bei ungültigem CII, DTD-/Entity-Inhalt, Größenüberschreitung oder Hashabweichung das Item `ambiguous` lassen;
+- Kontakt, PaymentMethod und strukturierte Adresse gegen den eingefrorenen Kontext prüfen;
+- weder den Soll-Hash überschreiben noch eine normale Invoice als Fallback erzeugen;
+- keine XML-Bytes in Datenbank, Log, Supportexport oder Repository ablegen.
+
 ### Versand unklar
 
 Nach `invoice_delivery_write_requested` oder `whmcs_email_write_requested` keinen automatischen Resend auslösen. Remote-Status beziehungsweise WHMCS-Mailprovider nur lesend prüfen. Kann der Ausgang nicht bewiesen werden, bleibt `ambiguous`. Ein manueller Resend erfordert eine sichtbare Bestätigung, dass der Kunde die Rechnung möglicherweise doppelt erhält.
@@ -546,6 +623,7 @@ Nicht loggen:
 - vollständige Request-/Response-Bodies;
 - Namen, Adressen, E-Mails und USt-IDs;
 - PDF-Inhalte;
+- XML-Inhalte;
 - vollständige Rechnungspositionen;
 - WHMCS-Konfiguration oder Sessiondaten.
 
@@ -582,10 +660,10 @@ Ein Tokenwechsel verändert keine Mappings und löst keinen automatischen Nachla
 
 1. Neue Claims und Hooks deaktivieren.
 2. laufende Items auslaufen lassen oder ihren Zustand dokumentieren.
-3. prüfen, ob seit dem Wechsel ein Invoice-Mapping, ein ungemappter/unklarer Invoice-Write oder sevDesk-Dokumenthoheit entstanden ist.
+3. prüfen, ob seit dem Wechsel ein Invoice-/E-Rechnungs-Mapping, ein ungemappter oder unklarer Invoice-Write oder sevDesk-Dokumenthoheit entstanden ist.
 4. Nur wenn Punkt 3 sicher verneint wurde, neue Moduldateien aus dem Scanpfad nehmen und zuvor gesicherte, mit der PHP-Runtime kompatible Moduldateien wiederherstellen. Andernfalls den Rewrite installiert, aber deaktiviert lassen.
 5. `mod_sevdesk` und neue Jobtabellen nicht löschen.
-6. Additive Mappingfelder und typisierte Zuordnungen nicht zurücksetzen; sie werden für Cross-Type-Idempotenz und Recovery benötigt.
+6. Additive Mappingfelder und typisierte Zuordnungen einschließlich `is_e_invoice`, `pdf_sha256` und `xml_sha256` nicht zurücksetzen; sie werden für Cross-Type-Idempotenz und Recovery benötigt.
 7. Bei vorheriger sevDesk-Hoheit den Clientbereich kontrolliert auf Proforma/Pending setzen; nicht ungeprüft alte WHMCS-Endrechnungslinks oder Mails reaktivieren.
 8. Health der verbleibenden WHMCS-Installation prüfen.
 9. Remote-Writes und mögliche Versandübergaben seit Deployment anhand der Jobs erfassen und mit sevDesk abstimmen.

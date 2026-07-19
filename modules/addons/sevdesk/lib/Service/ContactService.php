@@ -104,6 +104,13 @@ final class ContactService
             return $this->apiFailure('contact_search_failed', $exception);
         }
         $matches = $search['matches'];
+        if ($search['truncated']) {
+            return Result::failure(
+                'contact_search_truncated',
+                'sevdesk returned a full contact search page, so uniqueness could not be proven.',
+                ['pageSize' => self::CONTACT_SEARCH_LIMIT],
+            );
+        }
         if ($search['unverifiable'] > 0) {
             return Result::failure(
                 'contact_search_unverifiable',
@@ -241,19 +248,26 @@ final class ContactService
         return self::extractContactId($response) === $contactId;
     }
 
-    /** @return array{matches:list<array<array-key,mixed>>,unverifiable:int} */
+    private const int CONTACT_SEARCH_LIMIT = 1000;
+
+    /** @return array{matches:list<array<array-key,mixed>>,unverifiable:int,truncated:bool} */
     private function findByCustomerNumber(int $whmcsClientId): array
     {
         $response = $this->client->get('/Contact', [
             'customerNumber' => (string) $whmcsClientId,
             'depth' => '1',
+            'limit' => self::CONTACT_SEARCH_LIMIT,
+            'offset' => 0,
         ]);
 
         if ($response === []) {
-            return ['matches' => [], 'unverifiable' => 0];
+            return ['matches' => [], 'unverifiable' => 0, 'truncated' => false];
         }
 
         $candidates = array_is_list($response) ? $response : [$response];
+        if (count($candidates) >= self::CONTACT_SEARCH_LIMIT) {
+            return ['matches' => [], 'unverifiable' => 0, 'truncated' => true];
+        }
         $matches = [];
         $unverifiable = 0;
         foreach ($candidates as $candidate) {
@@ -281,7 +295,7 @@ final class ContactService
             }
         }
 
-        return ['matches' => $matches, 'unverifiable' => $unverifiable];
+        return ['matches' => $matches, 'unverifiable' => $unverifiable, 'truncated' => false];
     }
 
     /** @return array<string, mixed> */
@@ -289,6 +303,11 @@ final class ContactService
     {
         $payload = [
             'customerNumber' => (string) $contact->whmcsClientId,
+            // New contacts receive the neutral B2B buyer reference required by
+            // sevdesk's native E-Invoice contract. Existing contacts are never
+            // patched or re-linked by this service.
+            'buyerReference' => (string) $contact->whmcsClientId,
+            'governmentAgency' => false,
             'status' => 1000,
             'category' => [
                 'id' => self::payloadId($this->contactCategoryId),

@@ -38,6 +38,7 @@ Vor dem ersten Write und im Health Check liest das Modul `/Tools/bookkeepingSyst
 | Invoice ohne Mail öffnen | `PUT /Invoice/{id}/sendBy` |
 | Invoice per sevDesk senden | `POST /Invoice/{id}/sendViaEmail` |
 | finale Invoice-PDF abrufen | `GET /Invoice/{id}/getPdf` |
+| native E-Rechnungs-XML lesen | `GET /Invoice/{id}/getXml` |
 | Invoice-Zahlung buchen | `PUT /Invoice/{id}/bookAmount` plus typabhängige Read-/Log-Endpunkte |
 
 Invoice-Erstellung, Öffnen, PDF und Versand sind getrennte Schritte. Erfolg eines Schritts beweist keinen späteren Schritt.
@@ -159,6 +160,27 @@ Verbindliche Regeln:
 
 Die fehlende freie `accountDatev`-Zuordnung ist eine sichtbare Einschränkung von `invoice_only`, nicht etwas, das das Modul verdeckt ergänzt.
 
+### Native ZUGFeRD-Invoice
+
+ZUGFeRD bleibt eine Eigenschaft der normalen `Invoice`. Es gibt keinen dritten Dokumenttyp und das Modul erzeugt kein eigenes XML. Der Pfad stützt sich auf sevDesks `propertyIsEInvoice`, `getXml` und die von sevDesk gerenderte PDF. Grundlage ist die [sevDesk-Ankündigung zur E-Rechnungs-API](https://tech.sevdesk.com/api_news/posts/2024_11_15-einvoice_changes/).
+
+Ausgewählt wird er nur, wenn alle folgenden Bedingungen gleichzeitig erfüllt sind:
+
+- `invoice_only` und sevDesk-Dokumenthoheit;
+- normaler Invoice-Canary und eigener ZUGFeRD-Canary bestätigt;
+- Admin-Tickbox beim Kunden gesetzt und Rechnungsdatum nicht vor `e_invoice_active_from`;
+- deutsche Organisation mit deutschem Rechnungsland und Rule 1;
+- gültige `SevUser`-, `Unity`-, `PaymentMethod`-, Kontakt- und Länderreferenzen;
+- Käuferreferenz, genau eine Haupt-E-Mail, vollständige deutsche Kontaktadresse und `governmentAgency=false`.
+
+Der Payload ergänzt `propertyIsEInvoice=true`, `paymentMethod`, `addressName`, `addressStreet`, `addressZip`, `addressCity`, `addressCountry` und `takeDefaultAddress=false`. Empfängername und strukturierte Adresse werden normalisiert zusammen gehasht. Die Persistenz enthält nur IDs und diesen Hash, keine Anschrift.
+
+Nach Create liest das Modul Flag, PaymentMethod, Kontakt und strukturierte Adresse zurück. Danach wird `getXml` auf Größenlimit, UTF-8, verbotene DTD-/Entity-Deklarationen, Wohlgeformtheit und den CII-Wurzelknoten `CrossIndustryInvoice` geprüft. Der erste bestätigte SHA-256 bleibt Bestandteil des unveränderlichen Recovery-Snapshots. Ein später abweichender Hash wird nur als beobachtete Abweichung protokolliert und führt zu `ambiguous`; er ersetzt niemals den Sollwert. Die vollständige EN-16931-Prüfung bleibt Teil des externen Canarys und wird nicht durch die Strukturprüfung im Modul vorgetäuscht.
+
+Die versionierte Spezifikation nennt außerdem Pflichtdaten des eigenen sevDesk-Mandanten. Da dieser Stand keinen belastbaren vollständigen `SevClient`-Read-Vertrag enthält, bestätigt der Betreiber diese Stammdaten im separaten Canary. Eine sevDesk-Ablehnung mit 422 bleibt dauerhaft fehlgeschlagen. Nach einem ausdrücklichen Kunden-Opt-in gibt es keinen stillen Rückfall auf eine normale PDF-Invoice.
+
+Rule 19 sowie Rules 18/20, Behördenfälle und historische Backfills werden nie als E-Rechnung erzeugt. Beim sevDesk-Mailkanal setzt das Modul `sendXml=false`; ausgeliefert wird die von sevDesk erzeugte ZUGFeRD-PDF. PDF und XML werden nicht dauerhaft in WHMCS gespeichert. Der strukturierte Bestandteil ist fachlich maßgeblich; die rechtliche Einordnung bleibt Sache des Betreibers und seiner Buchhaltung. Dazu siehe auch die [BMF-FAQ zur E-Rechnung](https://www.bundesfinanzministerium.de/Content/DE/FAQ/e-rechnung.html).
+
 ### Öffnen, Versand und PDF
 
 - `sendBy` öffnet eine Invoice ohne kundenseitige sevDesk-Mail und wird für WHMCS-Hoheit sowie den WHMCS-Mailkanal verwendet.
@@ -166,6 +188,7 @@ Die fehlende freie `accountDatev`-Zuordnung ist eine sichtbare Einschränkung vo
 - Unmittelbar vor beiden Writes werden Draft-Header und Positionen erneut vollständig gelesen und exakt mit dem gefrorenen Snapshot verglichen. Abweichungen verhindern Open und Versand.
 - `getPdf` wird erst nach nachweisbarer Finalisierung verwendet. Der Abruf akzeptiert nur PDF-MIME, Base64, `%PDF`-Signatur, EOF-Marker und höchstens 10 MiB.
 - Die PDF wird nicht dauerhaft in WHMCS gespeichert; SHA-256, Ready- und Delivery-Zeitpunkt dürfen im Mapping stehen.
+- Bei ZUGFeRD wird vor Öffnung, Versand und PDF-Fortsetzung zusätzlich der unveränderliche XML-Hash geprüft.
 
 Nach `invoice_write_requested`, `invoice_open_write_requested` oder `invoice_delivery_write_requested` ist ein Transportfehler potenziell nicht wiederholbar. Recovery darf dann nur GETs ausführen. Ein fehlender Nachweis oder ein fehlendes Mapping nach einem späteren Write bleibt `ambiguous`; es gibt keinen Rückfall auf `saveInvoice`. Volle 1.000er-Seiten bei Kandidaten oder Positionen gelten als abgeschnitten und nicht beweiskräftig.
 
@@ -251,6 +274,8 @@ Erlaubt ein Voucher-Konto laut Guidance nur `AUSFUHREN`, muss jede andere Rule l
 
 Das konfigurierte WHMCS-Client-Custom-Field bleibt die Kontaktzuordnung. Enthält es eine Remote-ID, wird `GET /Contact/{id}` ausgeführt. Ein vorhandener Kontakt wird als explizite Legacy-/Betreiberzuordnung wiederverwendet, auch wenn dessen optionales `customerNumber` fehlt oder historisch anders vergeben wurde. Das Modul verändert weder diese ID noch vorhandene Kontaktstammdaten. Liefert die ID keinen Kontakt, wird der Vorgang als `configured_contact_missing` blockiert; Suche und Neuanlage sind dann ausdrücklich kein Fallback.
 
+Neu angelegte Kontakte erhalten die WHMCS-Client-ID als `customerNumber` und `buyerReference` sowie `governmentAgency=false`. Diese Werte werden bei bestehenden Kontakten bewusst nicht nachgetragen. Ein für ZUGFeRD ausgewählter Bestandskontakt ohne die nötigen Stammdaten blockiert daher, bis er in sevDesk geprüft und manuell ergänzt wurde.
+
 Vor dieser Auflösung muss die konfigurierte `custom_field_id` auf ein existierendes WHMCS-Feld mit `type=client` zeigen. Fehlt das Setting, wurde das Feld gelöscht oder hat es einen anderen Typ, scheitert der Worker lokal, bevor er einen sevDesk-Kontakt liest, sucht oder anlegt.
 
 Nur bei leerem Feld sucht das Modul über `GET /Contact?customerNumber=<WHMCS-Client-ID>`. Genau ein passender Treffer darf in das Custom-Field geschrieben werden; mehrere Treffer ergeben `contact_conflict`.
@@ -259,13 +284,19 @@ Bleibt die Suche leer, ist eine Neuanlage nur mit der gespeicherten Bestätigung
 
 Nach einem möglicherweise ausgeführten Contact-Create sucht die Recovery ausschließlich nach derselben WHMCS-Kundennummer. Sie verknüpft nur genau einen passenden Treffer. Kein oder mehrere Treffer bleiben `ambiguous`; ein zweiter `POST /Contact` ist ausgeschlossen.
 
+## Historischer Dublettenschutz
+
+Ein mailfreier Backfill prüft vor jedem Create zunächst die exakte finale Rechnungsnummer. Danach liest er Invoices für denselben Kontakt und Tag über dokumentierte Filter und vergleicht Datum, Kontakt, EUR-Währung und Bruttobetrag clientseitig exakt. Unbekannte Betragsfilter werden nicht an sevDesk gesendet. Eine volle Seite mit 1.000 Treffern bleibt vorsorglich blockiert.
+
+Zusätzlich sucht das Modul nach markerlosen Voucher-Kandidaten über Nummer, Datum, Kontakt und Betragsfenster sowie nach dem stabilen Marker `[WHMCS-INVOICE:<id>]`. Jeder mögliche Treffer verhindert die Neuanlage, ohne automatisch ein Mapping zu setzen. Die [sevDesk-OSS-Ankündigung](https://tech.sevdesk.com/api_news/posts/2025_03_06-oss-available/) ändert daran nichts: Rules 18 bis 20 werden nur über den ausdrücklich freigegebenen Invoice-Vertrag bewertet.
+
 ## HTTP-Fehlerklassen
 
 | Klasse | Verhalten |
 | --- | --- |
 | 400/409/422 | kein automatischer Retry; Payload, Rule oder Lifecycle korrigieren |
 | 401/403 | mandantenweiter Auth-Stopp bis erfolgreicher read-only Setupprüfung |
-| 404 | fachlich und dokumenttypabhängig einordnen |
+| 400/404 bei GET nach Remote-ID | die versionierte Spezifikation beschreibt 400 für fehlende Voucher und Invoices; 404 wird kompatibel ebenfalls als Abwesenheit akzeptiert, aber nur in eng begrenzten read-only Prüfungen |
 | 429 | begrenzter Backoff, sofern noch kein unklarer Write vorliegt |
 | 5xx/Timeout | vor Write begrenzt retrybar; während/nach Write zuerst Reconciliation |
 | ungültiges JSON/Pflichtfeld fehlt | sicherer Fehler bei Reads; nach Write potenziell `ambiguous` |

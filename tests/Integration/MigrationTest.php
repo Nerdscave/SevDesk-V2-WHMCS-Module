@@ -25,7 +25,10 @@ final class MigrationTest extends MariaDbTestCase
         self::assertTrue(Capsule::schema()->hasTable(Migrator::JOBS_TABLE));
         self::assertTrue(Capsule::schema()->hasTable(Migrator::ITEMS_TABLE));
         foreach (
-            ['document_type', 'document_number', 'document_ready_at', 'delivered_at', 'pdf_sha256'] as $column
+            [
+                'document_type', 'document_number', 'document_ready_at', 'delivered_at',
+                'pdf_sha256', 'is_e_invoice', 'xml_sha256',
+            ] as $column
         ) {
             self::assertTrue(Capsule::schema()->hasColumn(Migrator::MAPPING_TABLE, $column));
         }
@@ -42,6 +45,8 @@ final class MigrationTest extends MariaDbTestCase
         ], Migrator::schemaReport());
         Migrator::assertRuntimeSchema();
         self::assertSame('voucher_only', (new Config())->get('export_mode'));
+        self::assertSame('off', (new Config())->get('e_invoice_mode'));
+        self::assertFalse((new Config())->bool('e_invoice_canary_confirmed'));
     }
 
     public function testWorkerRuntimeRejectsUnsignedSchemaBeforeMigrationAndDisablesSync(): void
@@ -137,6 +142,8 @@ final class MigrationTest extends MariaDbTestCase
         self::assertSame(12, Capsule::table(Migrator::MAPPING_TABLE)->whereNull('document_ready_at')->count());
         self::assertSame(12, Capsule::table(Migrator::MAPPING_TABLE)->whereNull('delivered_at')->count());
         self::assertSame(12, Capsule::table(Migrator::MAPPING_TABLE)->whereNull('pdf_sha256')->count());
+        self::assertSame(12, Capsule::table(Migrator::MAPPING_TABLE)->whereNull('is_e_invoice')->count());
+        self::assertSame(12, Capsule::table(Migrator::MAPPING_TABLE)->whereNull('xml_sha256')->count());
         self::assertSame(
             ['complete' => 5, 'ambiguous' => 3, 'orphans' => 4],
             (new MappingRepository())->counts(),

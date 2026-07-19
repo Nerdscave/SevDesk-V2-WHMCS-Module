@@ -32,6 +32,7 @@ final class JobRepository
         'voucher_created',
         'mapping_persisted',
         'invoice_created',
+        'invoice_xml_verified',
         'invoice_opened',
         'invoice_delivered',
         'whmcs_email_handed_off',
@@ -42,6 +43,9 @@ final class JobRepository
     ];
 
     private const DEDUPE_SKIPPED_MESSAGE = 'Die Rechnung ist bereits in einem anderen aktiven Job eingeplant.';
+
+    private const UNRESOLVED_HISTORY_SKIPPED_MESSAGE =
+        'Ein älterer Export endete nach einem möglichen Remote-Write und muss zuerst geklärt werden.';
 
     /**
      * Return the newest validated document decision for one WHMCS invoice.
@@ -65,7 +69,13 @@ final class JobRepository
      *     taxRuleId:?string,
      *     deliveryState:?string,
      *     sevUserId:?string,
-     *     unityId:?string
+     *     unityId:?string,
+     *     isEInvoice:?bool,
+     *     eInvoiceMode:string,
+     *     eInvoiceContactId:?string,
+     *     paymentMethodId:?string,
+     *     eInvoiceCountryId:?string,
+     *     addressHash:?string
      * }
      */
     public function latestDocumentContextForInvoice(int $invoiceId, bool $frozenOnly = false): ?array
@@ -83,7 +93,9 @@ final class JobRepository
      *     itemId:int,itemStatus:string,checkpoint:string,source:'frozen'|'requested',
      *     allowed:?bool,documentType:?string,documentAuthority:string,exportMode:string,
      *     ossProfile:string,euB2cMode:string,deliveryChannel:?string,taxRuleId:?string,
-     *     deliveryState:?string,sevUserId:?string,unityId:?string
+     *     deliveryState:?string,sevUserId:?string,unityId:?string,
+     *     isEInvoice:?bool,eInvoiceMode:string,eInvoiceContactId:?string,
+     *     paymentMethodId:?string,eInvoiceCountryId:?string,addressHash:?string
      * }>
      */
     public function documentContextsForInvoices(array $invoiceIds, bool $frozenOnly = false): array
@@ -168,6 +180,22 @@ final class JobRepository
                     'updated_at' => $now,
                 ];
 
+                $candidate = is_array($item['candidate'] ?? null) ? $item['candidate'] : [];
+                if (
+                    $invoiceId !== null
+                    && $invoiceId > 0
+                    && $action === 'export_document'
+                    && $this->lockUnresolvedRiskyExportHistory($invoiceId) !== null
+                ) {
+                    $row['status'] = 'skipped';
+                    $row['dedupe_key'] = null;
+                    $row['error_code'] = 'unresolved_export_history';
+                    $row['message'] = self::UNRESOLVED_HISTORY_SKIPPED_MESSAGE;
+                    $row['finished_at'] = $now;
+                    Capsule::table(Migrator::ITEMS_TABLE)->insert($row);
+                    continue;
+                }
+
                 try {
                     Capsule::table(Migrator::ITEMS_TABLE)->insert($row);
                 } catch (QueryException $error) {
@@ -178,7 +206,7 @@ final class JobRepository
                         $dedupeKey,
                         $invoiceId,
                         $action,
-                        is_array($item['candidate'] ?? null) ? $item['candidate'] : null,
+                        $candidate !== [] ? $candidate : null,
                         $now,
                     );
                     // An active item already owns this accounting action. Keep a
@@ -320,6 +348,7 @@ final class JobRepository
                 $candidate = [];
             }
         }
+        $context = self::preserveFrozenXmlHash($candidate, $context);
         foreach ($context as $key => $value) {
             if (preg_match('/^[A-Za-z][A-Za-z0-9_]{0,63}$/', $key) === 1) {
                 $candidate[$key] = is_string($value) ? mb_substr($value, 0, 255) : $value;
@@ -425,6 +454,9 @@ final class JobRepository
                 && (string) ($current->action ?? '') === 'review_notice'
                 && $storedStatus === 'permanent_failed'
                 && $storedErrorCode === 'manual_review_required';
+            $retainRiskDedupe = !$cancelRequested
+                && $storedStatus === 'permanent_failed'
+                && self::isRiskyCheckpoint($storedCheckpoint);
 
             Capsule::table(Migrator::ITEMS_TABLE)
                 ->where('id', $current->id)
@@ -435,7 +467,9 @@ final class JobRepository
                     'available_at' => $storedAvailableAt,
                     'lease_token' => null,
                     'leased_until' => null,
-                    'dedupe_key' => in_array($storedStatus, ['retry_wait', 'ambiguous'], true) || $retainReviewDedupe
+                    'dedupe_key' => in_array($storedStatus, ['retry_wait', 'ambiguous'], true)
+                        || $retainReviewDedupe
+                        || $retainRiskDedupe
                         ? $current->dedupe_key
                         : null,
                     'sevdesk_id' => $outcome->sevdeskId ?? $current->sevdesk_id,
@@ -507,6 +541,7 @@ final class JobRepository
             || in_array((string) ($item->error_code ?? ''), [
                 'booking_not_applied',
                 'manual_review_required',
+                'stale_export_context_requeue_required',
             ], true)
         ) {
             return false;
@@ -529,6 +564,7 @@ final class JobRepository
                     || in_array((string) ($current->error_code ?? ''), [
                         'booking_not_applied',
                         'manual_review_required',
+                        'stale_export_context_requeue_required',
                     ], true)
                 ) {
                     return 0;
@@ -582,6 +618,68 @@ final class JobRepository
         $this->refreshJob((int) $item->job_id);
 
         return true;
+    }
+
+    /**
+     * Create a fresh document job after an explicit mode-change review. The old
+     * item is retained as evidence and none of its frozen target fields are
+     * copied. Only checkpoints before a document write are eligible.
+     *
+     * @param array<string,scalar|null> $requestedContext
+     */
+    public function requeueExportDocument(
+        int $itemId,
+        array $requestedContext,
+        ?int $adminId = null,
+    ): ?int {
+        $candidate = self::normaliseCurrentModeRequeueContext($requestedContext);
+        if ($candidate === null) {
+            return null;
+        }
+        $candidate['trigger'] = 'mode_change_requeue';
+        $candidate['requeuedFromItemId'] = $itemId;
+        $candidate['historicalBackfill'] = true;
+        $candidate['delivery_requested'] = false;
+        $candidate['requestedEInvoiceMode'] = 'off';
+
+        return Capsule::connection()->transaction(function () use (
+            $itemId,
+            $candidate,
+            $adminId,
+        ): ?int {
+            $old = Capsule::table(Migrator::ITEMS_TABLE)
+                ->where('id', $itemId)
+                ->lockForUpdate()
+                ->first();
+            if (!self::safeForCurrentModeRequeue($old)) {
+                return null;
+            }
+
+            $invoiceId = (int) ($old->invoice_id ?? 0);
+            if (
+                $invoiceId < 1
+                || Capsule::table(Migrator::MAPPING_TABLE)->where('invoice_id', $invoiceId)->exists()
+                || Capsule::table(Migrator::ITEMS_TABLE)
+                    ->where('invoice_id', $invoiceId)
+                    ->where('id', '<>', $itemId)
+                    ->whereIn('action', ['export_document', 'export_voucher', 'reconcile_voucher'])
+                    ->whereIn('status', ['pending', 'running', 'retry_wait', 'ambiguous'])
+                    ->exists()
+            ) {
+                return null;
+            }
+
+            return $this->create('mode_change_requeue', [[
+                'invoice_id' => $invoiceId,
+                'action' => 'export_document',
+                'dedupe_key' => 'export_voucher:' . $invoiceId,
+                'candidate' => $candidate,
+            ]], [
+                'source_item_id' => $itemId,
+                'mail_free' => true,
+                'e_invoice' => false,
+            ], $adminId);
+        });
     }
 
     public function reconcile(int $itemId): bool
@@ -868,8 +966,16 @@ final class JobRepository
 
     public static function isRiskyCheckpoint(string $checkpoint): bool
     {
-        return self::isWriteOutcomeUnknownCheckpoint($checkpoint)
-            || self::isVerifiedSideEffectCheckpoint($checkpoint);
+        return in_array($checkpoint, self::riskyCheckpoints(), true);
+    }
+
+    /** @return list<string> */
+    public static function riskyCheckpoints(): array
+    {
+        return array_values(array_unique(array_merge(
+            self::UNKNOWN_WRITE_CHECKPOINTS,
+            self::VERIFIED_SIDE_EFFECT_CHECKPOINTS,
+        )));
     }
 
     public static function isWriteOutcomeUnknownCheckpoint(string $checkpoint): bool
@@ -880,6 +986,17 @@ final class JobRepository
     public static function isVerifiedSideEffectCheckpoint(string $checkpoint): bool
     {
         return in_array($checkpoint, self::VERIFIED_SIDE_EFFECT_CHECKPOINTS, true);
+    }
+
+    private function lockUnresolvedRiskyExportHistory(int $invoiceId): ?object
+    {
+        return Capsule::table(Migrator::ITEMS_TABLE)
+            ->where('invoice_id', $invoiceId)
+            ->whereIn('action', ['export_document', 'export_voucher', 'reconcile_voucher'])
+            ->whereIn('status', ['permanent_failed', 'cancelled'])
+            ->whereIn('checkpoint', self::riskyCheckpoints())
+            ->lockForUpdate()
+            ->first(['id']);
     }
 
     /**
@@ -1101,7 +1218,13 @@ final class JobRepository
      *     taxRuleId:?string,
      *     deliveryState:?string,
      *     sevUserId:?string,
-     *     unityId:?string
+     *     unityId:?string,
+     *     isEInvoice:?bool,
+     *     eInvoiceMode:string,
+     *     eInvoiceContactId:?string,
+     *     paymentMethodId:?string,
+     *     eInvoiceCountryId:?string,
+     *     addressHash:?string
      * }
      */
     public static function documentContextFromItem(object $item, bool $frozenOnly = false): ?array
@@ -1151,13 +1274,51 @@ final class JobRepository
             $deliveryState = self::contextDeliveryState($decoded);
             $sevUserId = self::contextOptionalNumericId($decoded, 'targetSevUserId');
             $unityId = self::contextOptionalNumericId($decoded, 'targetUnityId');
+            $isEInvoice = array_key_exists('targetIsEInvoice', $decoded)
+                ? self::contextBool($decoded, 'targetIsEInvoice')
+                : false;
+            $eInvoiceMode = self::contextEInvoiceMode($decoded, 'targetEInvoiceMode');
+            $eInvoiceContactId = self::contextOptionalNumericId($decoded, 'targetEInvoiceContactId');
+            $paymentMethodId = self::contextOptionalNumericId($decoded, 'targetEInvoicePaymentMethodId');
+            $eInvoiceUnityId = self::contextOptionalNumericId($decoded, 'targetEInvoiceUnityId');
+            $eInvoiceCountryId = self::contextOptionalNumericId($decoded, 'targetEInvoiceCountryId');
+            $addressHash = self::contextOptionalSha256($decoded, 'targetEInvoiceAddressHash');
             if (
                 !is_bool($allowed)
                 || ($documentType !== null && !is_string($documentType))
                 || (array_key_exists('targetTaxRuleId', $decoded) && $taxRuleId === null && $decoded['targetTaxRuleId'] !== null)
                 || (array_key_exists('targetSevUserId', $decoded) && $sevUserId === null && $decoded['targetSevUserId'] !== null)
                 || (array_key_exists('targetUnityId', $decoded) && $unityId === null && $decoded['targetUnityId'] !== null)
+                || $isEInvoice === null
+                || (array_key_exists('targetEInvoiceMode', $decoded) && $eInvoiceMode === '')
+                || (array_key_exists('targetEInvoiceContactId', $decoded)
+                    && $decoded['targetEInvoiceContactId'] !== null && $eInvoiceContactId === null)
+                || (array_key_exists('targetEInvoicePaymentMethodId', $decoded)
+                    && $decoded['targetEInvoicePaymentMethodId'] !== null && $paymentMethodId === null)
+                || (array_key_exists('targetEInvoiceUnityId', $decoded)
+                    && $decoded['targetEInvoiceUnityId'] !== null && $eInvoiceUnityId === null)
+                || (array_key_exists('targetEInvoiceCountryId', $decoded)
+                    && $decoded['targetEInvoiceCountryId'] !== null && $eInvoiceCountryId === null)
+                || (array_key_exists('targetEInvoiceAddressHash', $decoded)
+                    && $decoded['targetEInvoiceAddressHash'] !== null && $addressHash === null)
                 || (array_key_exists('deliveryState', $decoded) && $deliveryState === null)
+                || ($eInvoiceMode === 'zugferd_domestic_b2b' && (
+                    $authority !== DocumentTargetResolver::AUTHORITY_SEVDESK
+                    || $mode !== DocumentTargetResolver::MODE_INVOICE_ONLY
+                ))
+                || ($isEInvoice && (
+                    trim((string) $documentType) !== 'invoice'
+                    || $authority !== DocumentTargetResolver::AUTHORITY_SEVDESK
+                    || $mode !== DocumentTargetResolver::MODE_INVOICE_ONLY
+                    || $eInvoiceMode !== 'zugferd_domestic_b2b'
+                    || $eInvoiceContactId === null
+                    || $paymentMethodId === null
+                    || $unityId === null
+                    || $eInvoiceUnityId === null
+                    || $eInvoiceUnityId !== $unityId
+                    || $eInvoiceCountryId === null
+                    || $addressHash === null
+                ))
                 || !self::validDocumentContext(
                     $allowed,
                     is_string($documentType) ? trim($documentType) : null,
@@ -1187,6 +1348,12 @@ final class JobRepository
                 'deliveryState' => $deliveryState,
                 'sevUserId' => $sevUserId,
                 'unityId' => $unityId,
+                'isEInvoice' => $isEInvoice,
+                'eInvoiceMode' => $eInvoiceMode,
+                'eInvoiceContactId' => $eInvoiceContactId,
+                'paymentMethodId' => $paymentMethodId,
+                'eInvoiceCountryId' => $eInvoiceCountryId,
+                'addressHash' => $addressHash,
             ];
         }
 
@@ -1199,13 +1366,19 @@ final class JobRepository
         $ossProfile = self::contextString($decoded, 'requestedOssProfile');
         $euB2cMode = self::contextString($decoded, 'requestedEuB2cMode');
         $deliveryChannel = self::contextDeliveryChannel($decoded, 'requestedDeliveryChannel');
+        $eInvoiceMode = self::contextEInvoiceMode($decoded, 'requestedEInvoiceMode');
         $documentType = match ($mode) {
             'voucher_only' => 'voucher',
             'invoice_only' => 'invoice',
             default => null,
         };
         if (
-            !self::validRequestedContext(
+            $eInvoiceMode === ''
+            || ($eInvoiceMode === 'zugferd_domestic_b2b' && (
+                $authority !== DocumentTargetResolver::AUTHORITY_SEVDESK
+                || $mode !== DocumentTargetResolver::MODE_INVOICE_ONLY
+            ))
+            || !self::validRequestedContext(
                 $documentType,
                 $authority,
                 $mode,
@@ -1233,6 +1406,12 @@ final class JobRepository
             'deliveryState' => null,
             'sevUserId' => null,
             'unityId' => null,
+            'isEInvoice' => null,
+            'eInvoiceMode' => $eInvoiceMode,
+            'eInvoiceContactId' => null,
+            'paymentMethodId' => null,
+            'eInvoiceCountryId' => null,
+            'addressHash' => null,
         ];
     }
 
@@ -1270,6 +1449,44 @@ final class JobRepository
         $value = trim((string) $value);
 
         return preg_match('/^[1-9]\d*$/', $value) === 1 ? $value : null;
+    }
+
+    /** @param array<mixed> $candidate */
+    private static function contextBool(array $candidate, string $key): ?bool
+    {
+        $value = $candidate[$key] ?? null;
+        if (is_bool($value)) {
+            return $value;
+        }
+        if (in_array($value, [0, '0'], true)) {
+            return false;
+        }
+        if (in_array($value, [1, '1'], true)) {
+            return true;
+        }
+
+        return null;
+    }
+
+    /** @param array<mixed> $candidate */
+    private static function contextEInvoiceMode(array $candidate, string $key): string
+    {
+        if (!array_key_exists($key, $candidate)) {
+            return 'off';
+        }
+        $value = is_string($candidate[$key]) ? trim($candidate[$key]) : '';
+
+        return in_array($value, ['off', 'zugferd_domestic_b2b'], true) ? $value : '';
+    }
+
+    /** @param array<mixed> $candidate */
+    private static function contextOptionalSha256(array $candidate, string $key): ?string
+    {
+        $value = is_string($candidate[$key] ?? null)
+            ? strtolower(trim((string) $candidate[$key]))
+            : '';
+
+        return preg_match('/^[a-f0-9]{64}$/', $value) === 1 ? $value : null;
     }
 
     /** @param array<mixed> $candidate */
@@ -1378,7 +1595,53 @@ final class JobRepository
             }
         }
 
-        return $this->encode(array_replace($current, $newValues));
+        return $this->encode(array_replace(
+            $current,
+            self::preserveFrozenXmlHash($current, $newValues),
+        ));
+    }
+
+    /**
+     * The first verified native XML hash is part of the immutable accounting
+     * snapshot. A later mismatch may be recorded for diagnosis, but must never
+     * replace the value against which read-only recovery is evaluated.
+     *
+     * @param array<string,mixed> $current
+     * @param array<string,mixed> $incoming
+     * @return array<string,mixed>
+     */
+    private static function preserveFrozenXmlHash(array $current, array $incoming): array
+    {
+        if (!array_key_exists('xmlSha256', $incoming)) {
+            return $incoming;
+        }
+
+        $expected = self::candidateSha256($current['xmlSha256'] ?? null);
+        if ($expected === null) {
+            return $incoming;
+        }
+
+        $observed = self::candidateSha256($incoming['xmlSha256']);
+        if ($observed === $expected) {
+            return $incoming;
+        }
+
+        unset($incoming['xmlSha256']);
+        if ($observed !== null) {
+            $incoming['observedXmlSha256'] = $observed;
+        }
+
+        return $incoming;
+    }
+
+    private static function candidateSha256(mixed $value): ?string
+    {
+        if (!is_string($value)) {
+            return null;
+        }
+        $value = strtolower(trim($value));
+
+        return preg_match('/^[a-f0-9]{64}$/', $value) === 1 ? $value : null;
     }
 
     /**
@@ -1453,6 +1716,63 @@ final class JobRepository
         return ($candidate['requestedExportMode'] ?? null) === 'invoice_for_oss'
             && ($candidate['invoicePaymentPending'] ?? null) === true
             && ($candidate['paidTriggerObserved'] ?? null) === true;
+    }
+
+    private static function safeForCurrentModeRequeue(?object $item): bool
+    {
+        if (
+            $item === null
+            || (string) ($item->status ?? '') !== 'permanent_failed'
+            || !in_array((string) ($item->action ?? ''), ['export_voucher', 'export_document'], true)
+            || trim((string) ($item->sevdesk_id ?? '')) !== ''
+        ) {
+            return false;
+        }
+
+        return in_array((string) ($item->checkpoint ?? ''), [
+            'queued',
+            'finished',
+            'invoice_payment_pending',
+            'document_type_selected',
+            'preflight_complete',
+            'pdf_validated',
+            'contact_linked',
+            'e_invoice_target_selected',
+        ], true);
+    }
+
+    /**
+     * @param array<string,scalar|null> $context
+     * @return null|array<string,scalar|null>
+     */
+    private static function normaliseCurrentModeRequeueContext(array $context): ?array
+    {
+        $mode = trim((string) ($context['requestedExportMode'] ?? ''));
+        $authority = trim((string) ($context['requestedDocumentAuthority'] ?? ''));
+        $ossProfile = trim((string) ($context['requestedOssProfile'] ?? ''));
+        $euB2cMode = trim((string) ($context['requestedEuB2cMode'] ?? ''));
+        $deliveryChannel = $authority === DocumentTargetResolver::AUTHORITY_SEVDESK
+            ? trim((string) ($context['requestedDeliveryChannel'] ?? ''))
+            : null;
+        if (
+            !DocumentTargetResolver::contextValuesAreValid(
+                $mode,
+                $authority,
+                $ossProfile,
+                $euB2cMode,
+                $deliveryChannel,
+            )
+        ) {
+            return null;
+        }
+
+        return [
+            'requestedExportMode' => $mode,
+            'requestedDocumentAuthority' => $authority,
+            'requestedOssProfile' => $ossProfile,
+            'requestedEuB2cMode' => $euB2cMode,
+            'requestedDeliveryChannel' => $deliveryChannel,
+        ];
     }
 
     /** @return array<string,mixed> */

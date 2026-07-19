@@ -152,13 +152,7 @@ final class WhmcsGateway
     {
         $customFieldId = $this->configuredContactFieldId();
         $client = $this->client($clientId);
-        $sevdeskId = null;
-        foreach (self::normaliseRows($client['customfields']['customfield'] ?? $client['customfields'] ?? []) as $field) {
-            if ((int) ($field['id'] ?? 0) === $customFieldId) {
-                $sevdeskId = trim((string) ($field['value'] ?? '')) ?: null;
-                break;
-            }
-        }
+        $sevdeskId = self::contactIdFromClient($client, $customFieldId);
 
         $vatNumber = trim((string) (
             $client['tax_id']
@@ -187,12 +181,142 @@ final class WhmcsGateway
     public function storeContactId(int $clientId, string $sevdeskId): void
     {
         $customFieldId = $this->configuredContactFieldId();
+        $clientId = $this->positiveId($clientId, 'client');
+        $sevdeskId = trim($sevdeskId);
+        if (preg_match('/^[1-9]\d*$/', $sevdeskId) !== 1) {
+            throw new RuntimeException('A valid sevdesk contact ID is required.');
+        }
 
-        $this->call('UpdateClient', [
-            'clientid' => $this->positiveId($clientId, 'client'),
-            'customfields' => base64_encode(serialize([$customFieldId => trim($sevdeskId)])),
-            'skipvalidation' => true,
-        ]);
+        Capsule::connection()->transaction(static function () use ($clientId, $customFieldId, $sevdeskId): void {
+            // Locking the client serialises first-time links for this customer,
+            // even when WHMCS has not created an empty custom-field row yet.
+            $client = Capsule::table('tblclients')
+                ->where('id', $clientId)
+                ->lockForUpdate()
+                ->first(['id']);
+            if ($client === null) {
+                throw new RuntimeException('The WHMCS client no longer exists.');
+            }
+
+            $rows = Capsule::table('tblcustomfieldsvalues')
+                ->where('fieldid', $customFieldId)
+                ->where('relid', $clientId)
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->get(['id', 'value']);
+            if ($rows->count() > 1) {
+                throw new RuntimeException('The WHMCS client has duplicate sevdesk contact field rows.');
+            }
+
+            $row = $rows->first();
+            if ($row !== null) {
+                $current = trim((string) ($row->value ?? ''));
+                if ($current !== '') {
+                    if (hash_equals($current, $sevdeskId)) {
+                        return;
+                    }
+
+                    throw new RuntimeException('The WHMCS client is already linked to another sevdesk contact.');
+                }
+
+                $updated = Capsule::table('tblcustomfieldsvalues')
+                    ->where('id', (int) $row->id)
+                    ->update(['value' => $sevdeskId]);
+                if ($updated !== 1) {
+                    throw new RuntimeException('The sevdesk contact link could not be stored safely.');
+                }
+
+                return;
+            }
+
+            Capsule::table('tblcustomfieldsvalues')->insert([
+                'fieldid' => $customFieldId,
+                'relid' => $clientId,
+                'value' => $sevdeskId,
+            ]);
+
+            $stored = Capsule::table('tblcustomfieldsvalues')
+                ->where('fieldid', $customFieldId)
+                ->where('relid', $clientId)
+                ->get(['value']);
+            if ($stored->count() !== 1 || !hash_equals($sevdeskId, trim((string) $stored->first()->value))) {
+                throw new RuntimeException('The sevdesk contact link could not be stored unambiguously.');
+            }
+        });
+    }
+
+    /** @param array<string,mixed> $client */
+    private static function contactIdFromClient(array $client, int $customFieldId): ?string
+    {
+        $customFields = self::normaliseRows(
+            $client['customfields']['customfield'] ?? $client['customfields'] ?? [],
+        );
+        foreach ($customFields as $field) {
+            if ((int) ($field['id'] ?? 0) !== $customFieldId) {
+                continue;
+            }
+
+            $value = trim((string) ($field['value'] ?? ''));
+
+            return $value !== '' ? $value : null;
+        }
+
+        return null;
+    }
+
+    /**
+     * Return existing client custom fields that can serve as the explicit
+     * E-Invoice opt-in. The module never creates or changes such a field.
+     *
+     * @return list<array{id:int,label:string}>
+     */
+    public function eInvoiceOptInFields(): array
+    {
+        $fields = [];
+        foreach (Capsule::table('tblcustomfields')->where('type', 'client')->orderBy('id')->get() as $field) {
+            if (!self::isAdminTickboxField($field)) {
+                continue;
+            }
+            $fields[] = [
+                'id' => (int) $field->id,
+                'label' => trim((string) ($field->fieldname ?? '')) ?: 'Feld #' . (int) $field->id,
+            ];
+        }
+
+        return $fields;
+    }
+
+    public function isEInvoiceOptInField(int $fieldId): bool
+    {
+        if ($fieldId < 1) {
+            return false;
+        }
+        $field = Capsule::table('tblcustomfields')
+            ->where('id', $fieldId)
+            ->where('type', 'client')
+            ->first();
+
+        return $field !== null && self::isAdminTickboxField($field);
+    }
+
+    /** Read the configured admin-only client tickbox without modifying it. */
+    public function eInvoiceOptedIn(int $clientId): bool
+    {
+        $fieldId = $this->config->int('e_invoice_client_field_id');
+        if (!$this->isEInvoiceOptInField($fieldId)) {
+            throw new RuntimeException(
+                'The configured E-Invoice opt-in field is missing or is not an admin-only client tickbox.',
+            );
+        }
+
+        $client = $this->client($clientId);
+        foreach (self::normaliseRows($client['customfields']['customfield'] ?? $client['customfields'] ?? []) as $field) {
+            if ((int) ($field['id'] ?? 0) === $fieldId) {
+                return self::truthy($field['value'] ?? false);
+            }
+        }
+
+        return false;
     }
 
     private function configuredContactFieldId(): int
@@ -543,6 +667,12 @@ final class WhmcsGateway
     {
         return $value === true || $value === 1
             || (is_string($value) && in_array(strtolower($value), ['1', 'true', 'yes', 'on'], true));
+    }
+
+    private static function isAdminTickboxField(object $field): bool
+    {
+        return strtolower(trim((string) ($field->fieldtype ?? ''))) === 'tickbox'
+            && self::truthy($field->adminonly ?? false);
     }
 
     private static function decimal(float $value): string

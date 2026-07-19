@@ -6,6 +6,7 @@ namespace WHMCS\Module\Addon\SevDesk\Service;
 
 use DateTimeImmutable;
 use WHMCS\Module\Addon\SevDesk\Domain\Decimal;
+use WHMCS\Module\Addon\SevDesk\Domain\EInvoiceContext;
 use WHMCS\Module\Addon\SevDesk\Domain\InvoiceSnapshot;
 
 /** Exact, read-only verification shared by Invoice creation and recovery. */
@@ -31,6 +32,7 @@ final class InvoiceRemoteVerifier
         int $expectedStatus,
         ?string $expectedRemoteId = null,
         ?string $deliveryCountryCode = null,
+        ?EInvoiceContext $eInvoiceContext = null,
     ): ?string {
         $actualRemoteId = self::numericId($remote['id'] ?? null);
         if ($actualRemoteId === null) {
@@ -78,6 +80,21 @@ final class InvoiceRemoteVerifier
                 !== strtoupper(trim($deliveryCountryCode))
         ) {
             return 'delivery_country_mismatch';
+        }
+        if ($eInvoiceContext !== null) {
+            if (
+                $sevdeskContactId === null
+                || $sevdeskContactId !== $eInvoiceContext->contactId
+            ) {
+                return 'e_invoice_context_contact_mismatch';
+            }
+            if ($this->unityId !== $eInvoiceContext->unityId) {
+                return 'e_invoice_context_unity_mismatch';
+            }
+            $eInvoiceMismatch = $eInvoiceContext->remoteMismatch($remote);
+            if ($eInvoiceMismatch !== null) {
+                return $eInvoiceMismatch;
+            }
         }
 
         $sumGross = $remote['sumGross'] ?? null;

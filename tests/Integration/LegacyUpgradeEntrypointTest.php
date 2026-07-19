@@ -89,6 +89,8 @@ final class LegacyUpgradeEntrypointTest extends MariaDbTestCase
         self::assertSame('whmcs', $config->get('document_authority'));
         self::assertSame('blocked', $config->get('oss_profile'));
         self::assertFalse($config->bool('invoice_canary_confirmed'));
+        self::assertSame('off', $config->get('e_invoice_mode'));
+        self::assertFalse($config->bool('e_invoice_canary_confirmed'));
     }
 
     public function testSameVersionAdminBootstrapStillRecognisesMissingRewriteRuntime(): void

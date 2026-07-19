@@ -7,13 +7,13 @@ namespace Tests\Unit\Jobs;
 use GuzzleHttp\Client;
 use GuzzleHttp\Handler\MockHandler;
 use GuzzleHttp\HandlerStack;
-use GuzzleHttp\Middleware;
 use GuzzleHttp\Psr7\Response;
 use Illuminate\Database\Capsule\Manager as IlluminateCapsule;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunClassInSeparateProcess;
 use PHPUnit\Framework\TestCase;
+use Psr\Http\Message\RequestInterface;
 use WHMCS\Database\Capsule;
 use WHMCS\Module\Addon\SevDesk\Api\SevdeskClient;
 use WHMCS\Module\Addon\SevDesk\Config;
@@ -67,6 +67,8 @@ final class ExportJobHandlerFlowTest extends TestCase
             $table->dateTime('document_ready_at')->nullable();
             $table->dateTime('delivered_at')->nullable();
             $table->string('pdf_sha256', 64)->nullable();
+            $table->boolean('is_e_invoice')->nullable();
+            $table->string('xml_sha256', 64)->nullable();
         });
         Capsule::schema()->create('tbladdonmodules', static function ($table): void {
             $table->increments('id');
@@ -249,7 +251,7 @@ final class ExportJobHandlerFlowTest extends TestCase
         ], $history);
         $config = new Config();
         $config->set('custom_field_id', 123);
-        $config->set('export_mode', DocumentTargetResolver::MODE_VOUCHER_ONLY);
+        $config->set('export_mode', DocumentTargetResolver::MODE_INVOICE_ONLY);
         $config->set('document_authority', DocumentTargetResolver::AUTHORITY_WHMCS);
         $config->set('invoice_canary_confirmed', true);
         $config->set('invoice_sev_user_id', '7');
@@ -311,7 +313,7 @@ final class ExportJobHandlerFlowTest extends TestCase
             ),
             new InvoicePdf($client),
             static fn (): DocumentTargetResolver => new DocumentTargetResolver(
-                DocumentTargetResolver::MODE_VOUCHER_ONLY,
+                DocumentTargetResolver::MODE_INVOICE_ONLY,
                 DocumentTargetResolver::AUTHORITY_WHMCS,
                 DocumentTargetResolver::OSS_BLOCKED,
             ),
@@ -371,8 +373,8 @@ final class ExportJobHandlerFlowTest extends TestCase
         self::assertContains('invoice_opened', $checkpoints);
         $mapping = $mappings->findCompleteByInvoice(10);
         self::assertSame('invoice', $mapping?->document_type);
-        self::assertSame('RE-10', $mapping?->document_number);
-        self::assertNotNull($mapping?->document_ready_at);
+        self::assertSame('RE-10', $mapping->document_number);
+        self::assertNotNull($mapping->document_ready_at);
     }
 
     public function testConfirmedWhmcsMailHandoffFinishesLocallyWithoutSendingAgain(): void
@@ -983,6 +985,13 @@ SQL);
         $config->set('invoice_sev_user_id', '7');
         $config->set('invoice_unity_id', '8');
         $config->set('theme_adapter_confirmed', true);
+        $config->set('export_mode', DocumentTargetResolver::MODE_INVOICE_ONLY);
+        $config->set('document_authority', DocumentTargetResolver::AUTHORITY_SEVDESK);
+        $config->set('oss_profile', DocumentTargetResolver::OSS_BLOCKED);
+        $config->set('eu_b2c_mode', TaxPolicy::EU_B2C_BLOCKED);
+        $config->set('invoice_delivery_channel', 'sevdesk');
+        $config->set('e_invoice_mode', 'zugferd_domestic_b2b');
+        $config->set('e_invoice_canary_confirmed', false);
         $mappings = new MappingRepository();
         $handler = new ExportJobHandler(
             $config,
@@ -1020,6 +1029,8 @@ SQL);
             'targetMessage' => 'Frozen target.',
             'selectedInvoiceNumber' => 'RE-10',
             'targetDeliveryChannel' => 'sevdesk',
+            'targetEInvoiceMode' => 'zugferd_domestic_b2b',
+            'targetIsEInvoice' => false,
         ], JSON_THROW_ON_ERROR);
 
         $outcome = $handler(
@@ -1037,6 +1048,53 @@ SQL);
         self::assertSame('permanent_failed', $outcome->status);
         self::assertSame('sevdesk_authority_prerequisites_missing', $outcome->errorCode);
         self::assertCount(0, $history);
+        self::assertNull($mappings->findByInvoice(10));
+    }
+
+    public function testOldVoucherJobCannotWriteAfterSwitchToInvoiceOnly(): void
+    {
+        $history = [];
+        $client = $this->client([], $history);
+        $config = new Config();
+        $config->set('export_mode', DocumentTargetResolver::MODE_INVOICE_ONLY);
+        $config->set('document_authority', DocumentTargetResolver::AUTHORITY_WHMCS);
+        $config->set('oss_profile', DocumentTargetResolver::OSS_BLOCKED);
+        $config->set('eu_b2c_mode', TaxPolicy::EU_B2C_BLOCKED);
+        $mappings = new MappingRepository();
+        $handler = new ExportJobHandler(
+            $config,
+            new WhmcsGateway($config, function (string $command, array $parameters): array {
+                $response = $this->localApi($command, $parameters);
+                if ($command === 'GetInvoice') {
+                    $response['credit'] = '0.00';
+                }
+
+                return $response;
+            }),
+            $mappings,
+            new JobRepository(),
+            new ContactService($client, static fn (): bool => true, static fn (): string => '1'),
+            new PdfRenderer(static fn (): string => "%PDF-1.7\nnot expected"),
+            new VoucherExporter($client, static fn (): null => null, static fn (): bool => true),
+            new ReconciliationService($client, $mappings),
+            fn (): TaxPolicy => $this->domesticTaxPolicy(),
+        );
+
+        $outcome = $handler(
+            (object) [
+                'invoice_id' => 10,
+                'job_id' => 1,
+                'action' => 'export_voucher',
+                'checkpoint' => 'queued',
+                'attempts' => 2,
+                'candidate_json' => null,
+            ],
+            static fn (): bool => true,
+        );
+
+        self::assertSame('permanent_failed', $outcome->status);
+        self::assertSame('stale_export_context_requeue_required', $outcome->errorCode);
+        self::assertSame([], $history);
         self::assertNull($mappings->findByInvoice(10));
     }
 
@@ -1206,12 +1264,18 @@ SQL);
 
     /**
      * @param list<Response> $responses
-     * @param array<int, array<string, mixed>> $history
+     * @param list<array{request:RequestInterface}> $history
      */
     private function client(array $responses, array &$history): SevdeskClient
     {
         $stack = HandlerStack::create(new MockHandler($responses));
-        $stack->push(Middleware::history($history));
+        $stack->push(static function (callable $handler) use (&$history): callable {
+            return static function (RequestInterface $request, array $options) use ($handler, &$history) {
+                $history[] = ['request' => $request];
+
+                return $handler($request, $options);
+            };
+        });
 
         return new SevdeskClient(new Client(['handler' => $stack]), 'synthetic-token');
     }

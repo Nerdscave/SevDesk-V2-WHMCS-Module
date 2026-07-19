@@ -12,6 +12,7 @@ use WHMCS\Module\Addon\SevDesk\Config;
 use WHMCS\Module\Addon\SevDesk\Domain\ContactData;
 use WHMCS\Module\Addon\SevDesk\Domain\ContactResolution;
 use WHMCS\Module\Addon\SevDesk\Domain\DocumentTargetDecision;
+use WHMCS\Module\Addon\SevDesk\Domain\EInvoiceContext;
 use WHMCS\Module\Addon\SevDesk\Domain\ExportResult;
 use WHMCS\Module\Addon\SevDesk\Domain\InvoiceSnapshot;
 use WHMCS\Module\Addon\SevDesk\Domain\TaxDecision;
@@ -19,6 +20,7 @@ use WHMCS\Module\Addon\SevDesk\Repository\JobRepository;
 use WHMCS\Module\Addon\SevDesk\Repository\MappingRepository;
 use WHMCS\Module\Addon\SevDesk\Service\ContactService;
 use WHMCS\Module\Addon\SevDesk\Service\DocumentTargetResolver;
+use WHMCS\Module\Addon\SevDesk\Service\EInvoiceEligibilityService;
 use WHMCS\Module\Addon\SevDesk\Service\InvoiceExporter;
 use WHMCS\Module\Addon\SevDesk\Service\InvoicePdf;
 use WHMCS\Module\Addon\SevDesk\Service\InvoiceReconciliationService;
@@ -60,6 +62,7 @@ final class ExportJobHandler
         private readonly ?InvoiceReconciliationService $invoiceReconciliation = null,
         private readonly ?InvoicePdf $invoicePdf = null,
         ?callable $targetResolver = null,
+        private readonly ?EInvoiceEligibilityService $eInvoiceEligibility = null,
     ) {
         $this->taxPolicy = Closure::fromCallable($taxPolicy);
         $this->targetResolver = Closure::fromCallable($targetResolver ?? static fn (): DocumentTargetResolver =>
@@ -517,7 +520,74 @@ final class ExportJobHandler
             return $resolution;
         }
 
+        $eInvoiceContext = null;
+        $requestedEInvoiceMode = self::truthy($candidate['historicalBackfill'] ?? false)
+            ? EInvoiceEligibilityService::MODE_OFF
+            : trim((string) ($candidate['targetEInvoiceMode']
+                ?? $candidate['requestedEInvoiceMode']
+                ?? EInvoiceEligibilityService::MODE_OFF));
+        if (
+            $this->eInvoiceEligibility === null
+            && ($requestedEInvoiceMode !== EInvoiceEligibilityService::MODE_OFF
+                || self::truthy($candidate['targetIsEInvoice'] ?? false))
+        ) {
+            return JobOutcome::permanentFailure(
+                'Die E-Rechnungsprüfung ist in dieser Installation nicht verfügbar.',
+                errorCode: 'e_invoice_components_unavailable',
+                checkpoint: (string) ($item->checkpoint ?? 'document_type_selected'),
+            );
+        }
+        if ($this->eInvoiceEligibility !== null) {
+            $eInvoiceDecision = $this->eInvoiceEligibility->decide(
+                $invoice,
+                $contact,
+                $resolution->contactId,
+                $tax,
+                $target,
+                $candidate,
+                !$writeStarted && $mappingRemoteId === null,
+            );
+            if ($eInvoiceDecision->isFailure()) {
+                return $this->eInvoiceFailureOutcome(
+                    $item,
+                    $eInvoiceDecision->errorCode() ?? 'e_invoice_selection_failed',
+                    $eInvoiceDecision->errorMessage() ?? 'Die E-Rechnungsprüfung ist fehlgeschlagen.',
+                );
+            }
+            $selected = $eInvoiceDecision->valueOrNull();
+            if ($selected !== null && !$selected instanceof EInvoiceContext) {
+                return JobOutcome::permanentFailure(
+                    'Die E-Rechnungsprüfung lieferte keinen gültigen Kontext.',
+                    errorCode: 'e_invoice_context_invalid',
+                    checkpoint: (string) ($item->checkpoint ?? 'document_type_selected'),
+                );
+            }
+            $eInvoiceContext = $selected;
+        }
+        if (!array_key_exists('targetIsEInvoice', $candidate)) {
+            $eInvoiceTarget = self::eInvoiceTargetSnapshot($eInvoiceContext, $requestedEInvoiceMode);
+            if ($writeStarted) {
+                if ($requestedEInvoiceMode !== EInvoiceEligibilityService::MODE_OFF) {
+                    return JobOutcome::ambiguous(
+                        'Nach einem Invoice-Write fehlt die eingefrorene E-Rechnungsentscheidung. '
+                            . 'Mit dem aktuellen Profil darf der Altjob nicht neu interpretiert werden.',
+                        (string) ($item->checkpoint ?? 'invoice_write_requested'),
+                        isset($item->sevdesk_id) ? (string) $item->sevdesk_id : null,
+                        errorCode: 'e_invoice_snapshot_missing_after_write',
+                    );
+                }
+            } elseif (!$checkpoint('e_invoice_target_selected', $eInvoiceTarget)) {
+                    return JobOutcome::permanentFailure(
+                        'Die unveränderliche E-Rechnungsentscheidung konnte nicht gespeichert werden.',
+                        errorCode: 'e_invoice_target_checkpoint_failed',
+                        checkpoint: (string) ($item->checkpoint ?? 'document_type_selected'),
+                    );
+            }
+            $candidate = array_replace($candidate, $eInvoiceTarget);
+        }
+
         $remoteId = $mappingRemoteId;
+        $documentResult = null;
         if ($remoteId === null && $writeStarted) {
             $reconciled = $invoiceReconciliation->reconcile(
                 $invoice,
@@ -526,12 +596,25 @@ final class ExportJobHandler
                 $contact->countryCode,
                 isset($item->sevdesk_id) ? (string) $item->sevdesk_id : null,
                 $checkpoint,
+                $eInvoiceContext,
             );
             if ($reconciled->status !== ExportResult::SUCCEEDED && $reconciled->status !== ExportResult::SKIPPED) {
                 return $this->toOutcome($reconciled, $item, 'reconciled');
             }
+            $documentResult = $reconciled;
             $remoteId = $reconciled->remoteId;
         } elseif ($remoteId === null) {
+            if (self::truthy($candidate['historicalBackfill'] ?? false)) {
+                $duplicateRisk = $invoiceReconciliation->historicalDuplicateRisk(
+                    $invoice,
+                    $resolution->contactId,
+                    $tax,
+                    $contact->countryCode,
+                );
+                if ($duplicateRisk->status !== ExportResult::SUCCEEDED) {
+                    return $this->toOutcome($duplicateRisk, $item, 'duplicate_guard');
+                }
+            }
             $created = $invoiceExporter->export(
                 $invoice,
                 $resolution->contactId,
@@ -539,10 +622,12 @@ final class ExportJobHandler
                 $contact->countryCode,
                 $target,
                 $checkpoint,
+                $eInvoiceContext,
             );
             if ($created->status !== ExportResult::SUCCEEDED) {
                 return $this->toOutcome($created, $item, 'exported');
             }
+            $documentResult = $created;
             $remoteId = $created->remoteId;
         }
 
@@ -552,6 +637,32 @@ final class ExportJobHandler
                 (string) ($item->checkpoint ?? 'invoice_created'),
                 errorCode: 'invoice_remote_id_missing',
             );
+        }
+
+        if ($eInvoiceContext !== null) {
+            $xmlSha256 = strtolower(trim((string) ($documentResult?->context['xmlSha256'] ?? '')));
+            if (preg_match('/^[a-f0-9]{64}$/', $xmlSha256) !== 1) {
+                $xmlSha256 = self::mappingXmlHash($this->mappings->findByInvoice($invoice->invoiceId)) ?? '';
+            }
+            if (preg_match('/^[a-f0-9]{64}$/', $xmlSha256) !== 1) {
+                return JobOutcome::ambiguous(
+                    'Die native E-Rechnung wurde angelegt, aber der verifizierte XML-Hash fehlt. '
+                        . 'Öffnen, Versand und PDF-Auslieferung bleiben bis zum read-only Abgleich gesperrt.',
+                    (string) ($item->checkpoint ?? 'mapping_persisted'),
+                    $remoteId,
+                    errorCode: 'e_invoice_xml_snapshot_missing',
+                );
+            }
+            try {
+                $eInvoiceContext = $eInvoiceContext->withExpectedXmlSha256($xmlSha256);
+            } catch (\InvalidArgumentException) {
+                return JobOutcome::ambiguous(
+                    'Der verifizierte XML-Hash der nativen E-Rechnung widerspricht dem eingefrorenen Recovery-Snapshot.',
+                    (string) ($item->checkpoint ?? 'mapping_persisted'),
+                    $remoteId,
+                    errorCode: 'e_invoice_xml_snapshot_changed',
+                );
+            }
         }
 
         if ($target->documentAuthority === DocumentTargetResolver::AUTHORITY_WHMCS) {
@@ -564,6 +675,7 @@ final class ExportJobHandler
                 $contact->countryCode,
                 $checkpoint,
                 $invoiceExporter,
+                $eInvoiceContext,
             );
             if ($opened !== null) {
                 return $opened;
@@ -574,6 +686,8 @@ final class ExportJobHandler
                 MappingRepository::DOCUMENT_TYPE_INVOICE,
                 $invoice->invoiceNumber,
                 new DateTimeImmutable(),
+                isEInvoice: $eInvoiceContext !== null,
+                xmlSha256: self::mappingXmlHash($this->mappings->findByInvoice($invoice->invoiceId)),
             );
 
             return JobOutcome::succeeded(
@@ -583,6 +697,7 @@ final class ExportJobHandler
                     'documentType' => DocumentTargetDecision::DOCUMENT_INVOICE,
                     'documentAuthority' => DocumentTargetResolver::AUTHORITY_WHMCS,
                     'deliveryState' => 'not_requested',
+                    ...$this->mappingEInvoiceOutcome($invoice->invoiceId),
                 ],
             );
         }
@@ -597,6 +712,7 @@ final class ExportJobHandler
             $remoteId,
             $checkpoint,
             $invoiceExporter,
+            $eInvoiceContext,
         );
     }
 
@@ -610,13 +726,17 @@ final class ExportJobHandler
         string $deliveryCountryCode,
         callable $checkpoint,
         InvoiceExporter $invoiceExporter,
+        ?EInvoiceContext $eInvoiceContext = null,
     ): ?JobOutcome {
         $current = (string) ($item->checkpoint ?? '');
-        if (in_array($current, ['invoice_opened', 'whmcs_email_write_requested', 'whmcs_email_handed_off'], true)) {
+        if (in_array($current, ['whmcs_email_write_requested', 'whmcs_email_handed_off'], true)) {
+            return null;
+        }
+        if ($current === 'invoice_opened' && $eInvoiceContext === null) {
             return null;
         }
 
-        $result = $current === 'invoice_open_write_requested'
+        $result = in_array($current, ['invoice_open_write_requested', 'invoice_opened'], true)
             ? $invoiceExporter->reconcileOpened(
                 $invoice,
                 $remoteId,
@@ -624,6 +744,7 @@ final class ExportJobHandler
                 $sevdeskContactId,
                 $deliveryCountryCode,
                 $checkpoint,
+                $eInvoiceContext,
             )
             : $invoiceExporter->openForWhmcsAuthority(
                 $invoice,
@@ -632,6 +753,7 @@ final class ExportJobHandler
                 $sevdeskContactId,
                 $deliveryCountryCode,
                 $checkpoint,
+                $eInvoiceContext,
             );
         if ($result->status !== ExportResult::SUCCEEDED) {
             return $this->toOutcome($result, $item, 'exported');
@@ -651,6 +773,7 @@ final class ExportJobHandler
         string $remoteId,
         callable $checkpoint,
         InvoiceExporter $invoiceExporter,
+        ?EInvoiceContext $eInvoiceContext = null,
     ): JobOutcome {
         $deliveryRequested = self::truthy($candidate['delivery_requested'] ?? false);
         $channel = (string) ($candidate['targetDeliveryChannel']
@@ -686,7 +809,10 @@ final class ExportJobHandler
         }
 
         if ($channel === 'sevdesk' && $deliveryRequested) {
-            if ($current === 'invoice_delivery_write_requested') {
+            if (
+                $current === 'invoice_delivery_write_requested'
+                || ($current === 'invoice_delivered' && $eInvoiceContext !== null)
+            ) {
                 $delivered = $invoiceExporter->reconcileDelivered(
                     $invoice,
                     $remoteId,
@@ -694,8 +820,9 @@ final class ExportJobHandler
                     $sevdeskContactId,
                     $contact->countryCode,
                     $checkpoint,
+                    $eInvoiceContext,
                 );
-            } elseif ($current === 'invoice_delivered') {
+            } elseif ($current === 'invoice_delivered' && $eInvoiceContext === null) {
                 $delivered = ExportResult::succeeded($invoice->invoiceId, $remoteId);
             } else {
                 $delivered = $invoiceExporter->deliverViaSevdesk(
@@ -708,6 +835,7 @@ final class ExportJobHandler
                     $this->deliveryText('sevdesk_email_subject', $invoice, $contact),
                     $this->deliveryText('sevdesk_email_body', $invoice, $contact),
                     $checkpoint,
+                    $eInvoiceContext,
                 );
             }
             if ($delivered->status !== ExportResult::SUCCEEDED) {
@@ -726,6 +854,8 @@ final class ExportJobHandler
                 new DateTimeImmutable(),
                 new DateTimeImmutable(),
                 $pdf['sha256'],
+                $eInvoiceContext !== null,
+                self::mappingXmlHash($this->mappings->findByInvoice($invoice->invoiceId)),
             );
 
             return JobOutcome::succeeded(
@@ -735,6 +865,7 @@ final class ExportJobHandler
                     'documentType' => DocumentTargetDecision::DOCUMENT_INVOICE,
                     'documentAuthority' => DocumentTargetResolver::AUTHORITY_SEVDESK,
                     'deliveryState' => 'delivered',
+                    ...$this->mappingEInvoiceOutcome($invoice->invoiceId),
                 ],
             );
         }
@@ -748,6 +879,7 @@ final class ExportJobHandler
             $contact->countryCode,
             $checkpoint,
             $invoiceExporter,
+            $eInvoiceContext,
         );
         if ($opened !== null) {
             return $opened;
@@ -764,6 +896,8 @@ final class ExportJobHandler
             new DateTimeImmutable(),
             null,
             $pdf['sha256'],
+            $eInvoiceContext !== null,
+            self::mappingXmlHash($this->mappings->findByInvoice($invoice->invoiceId)),
         );
 
         if (!$deliveryRequested) {
@@ -774,6 +908,7 @@ final class ExportJobHandler
                     'documentType' => DocumentTargetDecision::DOCUMENT_INVOICE,
                     'documentAuthority' => DocumentTargetResolver::AUTHORITY_SEVDESK,
                     'deliveryState' => 'ready_not_delivered',
+                    ...$this->mappingEInvoiceOutcome($invoice->invoiceId),
                 ],
             );
         }
@@ -842,6 +977,8 @@ final class ExportJobHandler
             new DateTimeImmutable(),
             new DateTimeImmutable(),
             $pdf['sha256'],
+            $eInvoiceContext !== null,
+            self::mappingXmlHash($this->mappings->findByInvoice($invoice->invoiceId)),
         );
 
         return JobOutcome::succeeded(
@@ -851,6 +988,7 @@ final class ExportJobHandler
                 'documentType' => DocumentTargetDecision::DOCUMENT_INVOICE,
                 'documentAuthority' => DocumentTargetResolver::AUTHORITY_SEVDESK,
                 'deliveryState' => 'handed_off',
+                ...$this->mappingEInvoiceOutcome($invoice->invoiceId),
             ],
         );
     }
@@ -903,8 +1041,70 @@ final class ExportJobHandler
                 'documentType' => DocumentTargetDecision::DOCUMENT_INVOICE,
                 'documentAuthority' => DocumentTargetResolver::AUTHORITY_SEVDESK,
                 'deliveryState' => 'handed_off',
+                ...$this->mappingEInvoiceOutcome($invoiceId),
             ],
         );
+    }
+
+    /** @return array<string,scalar|null> */
+    private static function eInvoiceTargetSnapshot(
+        ?EInvoiceContext $context,
+        string $requestedMode,
+    ): array {
+        if ($context === null) {
+            return [
+                'targetIsEInvoice' => false,
+                'targetEInvoiceMode' => $requestedMode,
+                'targetEInvoiceContactId' => null,
+                'targetEInvoicePaymentMethodId' => null,
+                'targetEInvoiceUnityId' => null,
+                'targetEInvoiceCountryId' => null,
+                'targetEInvoiceAddressHash' => null,
+            ];
+        }
+
+        return [
+            'targetIsEInvoice' => true,
+            'targetEInvoiceMode' => EInvoiceEligibilityService::MODE_ZUGFERD_DOMESTIC_B2B,
+            'targetEInvoiceContactId' => $context->contactId,
+            'targetEInvoicePaymentMethodId' => $context->paymentMethodId,
+            'targetEInvoiceUnityId' => $context->unityId,
+            'targetEInvoiceCountryId' => $context->countryId,
+            'targetEInvoiceAddressHash' => $context->expectedAddressHash,
+        ];
+    }
+
+    private function eInvoiceFailureOutcome(object $item, string $code, string $message): JobOutcome
+    {
+        $checkpoint = (string) ($item->checkpoint ?? 'document_type_selected');
+        if ($this->documentWriteStarted($checkpoint) || JobRepository::isRiskyCheckpoint($checkpoint)) {
+            return JobOutcome::ambiguous(
+                $message,
+                $checkpoint,
+                isset($item->sevdesk_id) ? (string) $item->sevdesk_id : null,
+                errorCode: $code,
+            );
+        }
+
+        return JobOutcome::permanentFailure($message, errorCode: $code, checkpoint: $checkpoint);
+    }
+
+    /** @return array{isEInvoice:bool,xmlSha256:?string} */
+    private function mappingEInvoiceOutcome(int $invoiceId): array
+    {
+        $mapping = $this->mappings->findByInvoice($invoiceId);
+
+        return [
+            'isEInvoice' => $mapping !== null && self::truthy($mapping->is_e_invoice ?? false),
+            'xmlSha256' => self::mappingXmlHash($mapping),
+        ];
+    }
+
+    private static function mappingXmlHash(?object $mapping): ?string
+    {
+        $hash = strtolower(trim((string) ($mapping->xml_sha256 ?? '')));
+
+        return preg_match('/^[a-f0-9]{64}$/', $hash) === 1 ? $hash : null;
     }
 
     /** @param callable(string,array<string,scalar|null>):bool $checkpoint */
@@ -1231,6 +1431,11 @@ final class ExportJobHandler
             'targetUnityId' => $target->documentType === DocumentTargetDecision::DOCUMENT_INVOICE
                 ? $invoiceReferences['unityId']
                 : null,
+            'targetEInvoiceMode' => $target->documentType === DocumentTargetDecision::DOCUMENT_INVOICE
+                ? (self::truthy($candidate['historicalBackfill'] ?? false)
+                    ? EInvoiceEligibilityService::MODE_OFF
+                    : (string) ($candidate['requestedEInvoiceMode'] ?? EInvoiceEligibilityService::MODE_OFF))
+                : EInvoiceEligibilityService::MODE_OFF,
             ])
         ) {
             return JobOutcome::permanentFailure(
@@ -1250,6 +1455,18 @@ final class ExportJobHandler
     ): ?JobOutcome {
         if ((string) ($item->checkpoint ?? '') === 'whmcs_email_handed_off') {
             return null;
+        }
+
+        if (
+            !$this->documentWriteStarted((string) ($item->checkpoint ?? ''))
+            && !$this->frozenContextMatchesCurrentConfiguration($target, $candidate)
+        ) {
+            return JobOutcome::permanentFailure(
+                'Der eingefrorene Exportkontext gehört zu einer früheren Modulkonfiguration. '
+                    . 'Dieser sichere Vor-Write-Fall darf nur nach neuer Vorschau als export_document eingereiht werden.',
+                errorCode: 'stale_export_context_requeue_required',
+                checkpoint: (string) ($item->checkpoint ?? 'document_type_selected'),
+            );
         }
 
         $legacyEuB2c = (string) $this->config->get('eu_b2c_mode', TaxPolicy::EU_B2C_BLOCKED);
@@ -1306,6 +1523,29 @@ final class ExportJobHandler
             );
         }
 
+        $eInvoiceMode = trim((string) ($candidate['targetEInvoiceMode']
+            ?? $candidate['requestedEInvoiceMode']
+            ?? EInvoiceEligibilityService::MODE_OFF));
+        $eInvoiceDecisionPending = !array_key_exists('targetIsEInvoice', $candidate);
+        $eInvoiceSelected = self::truthy($candidate['targetIsEInvoice'] ?? false);
+        if (
+            !self::truthy($candidate['historicalBackfill'] ?? false)
+            && $eInvoiceMode === EInvoiceEligibilityService::MODE_ZUGFERD_DOMESTIC_B2B
+            && ($eInvoiceDecisionPending || $eInvoiceSelected)
+            && (
+                $target->exportMode !== DocumentTargetResolver::MODE_INVOICE_ONLY
+                || $target->documentAuthority !== DocumentTargetResolver::AUTHORITY_SEVDESK
+                || !$this->config->bool('e_invoice_canary_confirmed')
+                || !self::truthy($candidate['requestedEInvoiceCanaryConfirmed'] ?? false)
+            )
+        ) {
+            return $this->runtimePreflightFailure(
+                $item,
+                'Das native E-Rechnungsprofil ist für diesen eingefrorenen Zielkontext nicht vollständig freigegeben.',
+                'e_invoice_runtime_prerequisites_missing',
+            );
+        }
+
         if ($target->documentAuthority !== DocumentTargetResolver::AUTHORITY_SEVDESK) {
             return null;
         }
@@ -1335,6 +1575,61 @@ final class ExportJobHandler
         }
 
         return null;
+    }
+
+    /** @param array<string,mixed> $candidate */
+    private function frozenContextMatchesCurrentConfiguration(
+        DocumentTargetDecision $target,
+        array $candidate,
+    ): bool {
+        $currentAuthority = (string) $this->config->get(
+            'document_authority',
+            DocumentTargetResolver::AUTHORITY_WHMCS,
+        );
+        $currentDeliveryChannel = $currentAuthority === DocumentTargetResolver::AUTHORITY_SEVDESK
+            ? (string) $this->config->get('invoice_delivery_channel', 'sevdesk')
+            : null;
+        $targetDeliveryChannel = $target->documentAuthority === DocumentTargetResolver::AUTHORITY_SEVDESK
+            ? trim((string) ($candidate['targetDeliveryChannel'] ?? ''))
+            : null;
+        $targetEInvoiceMode = trim((string) ($candidate['targetEInvoiceMode']
+            ?? $candidate['requestedEInvoiceMode']
+            ?? 'off'));
+
+        return $target->exportMode === (string) $this->config->get(
+            'export_mode',
+            DocumentTargetResolver::MODE_VOUCHER_ONLY,
+        )
+            && $target->documentAuthority === $currentAuthority
+            && $target->ossProfile === (string) $this->config->get(
+                'oss_profile',
+                DocumentTargetResolver::OSS_BLOCKED,
+            )
+            && self::documentEuB2cMode($candidate, TaxPolicy::EU_B2C_BLOCKED)
+                === (string) $this->config->get('eu_b2c_mode', TaxPolicy::EU_B2C_BLOCKED)
+            && $targetDeliveryChannel === $currentDeliveryChannel
+            && (
+                self::truthy($candidate['historicalBackfill'] ?? false)
+                || $targetEInvoiceMode === (string) $this->config->get('e_invoice_mode', 'off')
+            );
+    }
+
+    private function documentWriteStarted(string $checkpoint): bool
+    {
+        return in_array($checkpoint, [
+            'voucher_write_requested',
+            'voucher_created',
+            'mapping_persisted',
+            'invoice_write_requested',
+            'invoice_created',
+            'invoice_xml_verified',
+            'invoice_open_write_requested',
+            'invoice_opened',
+            'invoice_delivery_write_requested',
+            'invoice_delivered',
+            'whmcs_email_write_requested',
+            'whmcs_email_handed_off',
+        ], true);
     }
 
     private function runtimePreflightFailure(object $item, string $message, string $code): JobOutcome
@@ -1467,7 +1762,7 @@ final class ExportJobHandler
                     : 'Die Rechnung wurde erfolgreich an sevdesk übertragen.',
                 $result->remoteId,
                 array_filter(
-                    array_merge($extra, ['resultCode' => $result->code]),
+                    array_merge($result->context, $extra, ['resultCode' => $result->code]),
                     static fn (mixed $value): bool => $value !== '',
                 ),
             );
@@ -1572,6 +1867,7 @@ final class ExportJobHandler
                 'contact_search_failed',
                 'contact_verification_failed',
                 'invoice_reconciliation_lookup_failed',
+                'historical_duplicate_guard_lookup_failed',
             ], true);
         if ($safeRetry && $attempts < 4) {
             $delays = [300, 900, 3600];
@@ -1711,7 +2007,12 @@ final class ExportJobHandler
 
     private static function invoiceCreateWriteStarted(string $checkpoint): bool
     {
-        return in_array($checkpoint, ['invoice_write_requested', 'invoice_created', 'mapping_persisted'], true);
+        return in_array($checkpoint, [
+            'invoice_write_requested',
+            'invoice_created',
+            'invoice_xml_verified',
+            'mapping_persisted',
+        ], true);
     }
 
     private static function invoicePostMappingWriteStarted(string $checkpoint): bool

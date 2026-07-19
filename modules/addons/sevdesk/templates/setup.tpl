@@ -4,6 +4,7 @@
     <input type="hidden" name="token" value="{$csrfToken|escape:'html':'UTF-8'}">
     <input type="hidden" name="save" value="1">
     <input type="hidden" name="runtime_quarantine_token" value="{$settings.runtime_quarantine_token|default:''|escape:'html':'UTF-8'}">
+    <input type="hidden" name="transition_inventory_fingerprint" value="{$transitionInventory.fingerprint|default:''|escape:'html':'UTF-8'}">
 
     {if $settings.runtime_review_required === 'on' || $settings.runtime_review_required === true || $settings.runtime_review_required == 1}
         <div class="alert alert-danger" role="alert">
@@ -17,6 +18,31 @@
             </div>
         </div>
     {/if}
+
+    <div class="panel panel-warning">
+        <div class="panel-heading"><h3 class="panel-title">Übergangsinventur für Dokumentänderungen</h3></div>
+        <div class="panel-body">
+            <p>Diese Bestandsaufnahme ist rein lesend. Sie zeigt, welche Zuordnungen und Jobs vor einer Änderung von Exportmodus, Dokumenthoheit, OSS- oder E-Rechnungsprofil zu prüfen sind.</p>
+            <div class="table-responsive">
+                <table class="table table-condensed">
+                    <tbody>
+                    <tr><th scope="row">Typisierte Voucher</th><td>{$transitionInventory.typed_vouchers|default:0|escape:'html':'UTF-8'}</td><th scope="row">Typisierte Invoices</th><td>{$transitionInventory.typed_invoices|default:0|escape:'html':'UTF-8'}</td></tr>
+                    <tr><th scope="row">Vollständig, Typ ungeklärt</th><td>{$transitionInventory.untyped_complete|default:0|escape:'html':'UTF-8'}</td><th scope="row">Ohne sevdesk-ID</th><td>{$transitionInventory.null_remote_mappings|default:0|escape:'html':'UTF-8'}</td></tr>
+                    <tr><th scope="row">Verwaiste Zuordnungen</th><td>{$transitionInventory.orphan_mappings|default:0|escape:'html':'UTF-8'}</td><th scope="row">Bezahlte, ungemappte Rechnungen ab Stichtag</th><td>{$transitionInventory.paid_unmapped|default:0|escape:'html':'UTF-8'}</td></tr>
+                    <tr><th scope="row">Aktive Exportjobs</th><td>{$transitionInventory.active_export_jobs|default:0|escape:'html':'UTF-8'}</td><th scope="row">Unklare Exportjobs</th><td>{$transitionInventory.ambiguous_export_jobs|default:0|escape:'html':'UTF-8'}</td></tr>
+                    <tr><th scope="row">Alte fehlgeschlagene Exportjobs</th><td>{$transitionInventory.failed_export_jobs|default:0|escape:'html':'UTF-8'}</td><th scope="row">Lokale Hinweise auf mögliche Remote-Dubletten</th><td>{$transitionInventory.possible_remote_duplicates|default:0|escape:'html':'UTF-8'}</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <p class="help-block">Ein Moduswechsel verändert keine bestehende Zuordnung und startet keinen Nachlauf. Mögliche Remote-Dubletten müssen vor einer Neuanlage in sevdesk geprüft werden.</p>
+            <div class="checkbox">
+                <label for="transition-inventory-confirmed">
+                    <input type="checkbox" id="transition-inventory-confirmed" name="transition_inventory_confirmed" value="1">
+                    Ich habe diese Übergangsinventur geprüft. Geplante Änderungen gelten nur für neue, noch nicht begonnene Dokumententscheidungen.
+                </label>
+            </div>
+        </div>
+    </div>
 
     <div class="panel panel-default">
         <div class="panel-heading"><h3 class="panel-title">sevdesk-Verbindung</h3></div>
@@ -132,6 +158,72 @@
                             <input type="number" id="invoice-unity" name="invoice_unity_id" class="form-control" min="1" step="1" value="{$settings.invoice_unity_id|escape:'html':'UTF-8'}">
                         {/if}
                         <small class="help-block">Invoice-v1 verwendet je WHMCS-Position zunächst Menge 1.</small>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel panel-warning">
+                <div class="panel-heading"><h4 class="panel-title">Native ZUGFeRD-E-Rechnungen</h4></div>
+                <div class="panel-body">
+                    <p>ZUGFeRD wird von sevdesk als Eigenschaft einer normalen Invoice erzeugt. Der Modus ist nur mit <strong>Invoice only</strong>, sevdesk-Dokumenthoheit, einem separaten Canary und einem ausdrücklich gesetzten Kunden-Tickbox-Feld zulässig. Fehlen nach dem Opt-in Pflichtdaten, wird die Rechnung blockiert; es gibt keinen stillen Rückfall auf eine normale PDF-Invoice.</p>
+                    <div class="form-group">
+                        <label class="control-label" for="e-invoice-mode">E-Rechnungsmodus</label>
+                        <select id="e-invoice-mode" name="e_invoice_mode" class="form-control">
+                            <option value="off"{if $settings.e_invoice_mode === 'off'} selected{/if}>Aus</option>
+                            <option value="zugferd_domestic_b2b"{if $settings.e_invoice_mode === 'zugferd_domestic_b2b'} selected{/if}>ZUGFeRD für bestätigte deutsche B2B-Kunden</option>
+                        </select>
+                        <small class="help-block">Rule 19 bleibt immer eine normale Invoice. OSS Rules 18–20, XRechnung und Behördenfälle sind in diesem Profil ausgeschlossen.</small>
+                    </div>
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="form-group">
+                                <label class="control-label" for="e-invoice-client-field">Admin-Tickbox für das Kunden-Opt-in</label>
+                                {if $eInvoiceClientFields|@count}
+                                    <select id="e-invoice-client-field" name="e_invoice_client_field_id" class="form-control">
+                                        <option value="">Bitte wählen</option>
+                                        {foreach from=$eInvoiceClientFields item=field}
+                                            <option value="{$field.id|escape:'html':'UTF-8'}"{if $settings.e_invoice_client_field_id == $field.id} selected{/if}>{$field.label|escape:'html':'UTF-8'} (ID {$field.id|escape:'html':'UTF-8'})</option>
+                                        {/foreach}
+                                    </select>
+                                {else}
+                                    <input type="number" id="e-invoice-client-field" name="e_invoice_client_field_id" class="form-control" min="1" step="1" value="{$settings.e_invoice_client_field_id|escape:'html':'UTF-8'}">
+                                {/if}
+                                <small class="help-block">Es werden nur vorhandene WHMCS-Kundenfelder vom Typ „Tickbox“ akzeptiert, die ausschließlich Administratoren sehen. Das Modul legt kein Feld an.</small>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="form-group">
+                                <label class="control-label" for="e-invoice-payment-method">sevdesk-Standard-Zahlungsmethode</label>
+                                {if $paymentMethods|@count}
+                                    <select id="e-invoice-payment-method" name="e_invoice_payment_method_id" class="form-control">
+                                        <option value="">Bitte wählen</option>
+                                        {foreach from=$paymentMethods item=reference}
+                                            <option value="{$reference.id|escape:'html':'UTF-8'}"{if $settings.e_invoice_payment_method_id == $reference.id} selected{/if}>{$reference.name|escape:'html':'UTF-8'} (ID {$reference.id|escape:'html':'UTF-8'})</option>
+                                        {/foreach}
+                                    </select>
+                                {else}
+                                    <input type="number" id="e-invoice-payment-method" name="e_invoice_payment_method_id" class="form-control" min="1" step="1" value="{$settings.e_invoice_payment_method_id|escape:'html':'UTF-8'}">
+                                {/if}
+                                <small class="help-block">Die Referenz wird beim Speichern read-only im aktuellen sevdesk-Mandanten geprüft.</small>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label class="control-label" for="e-invoice-active-from">E-Rechnungen aktiv ab</label>
+                        <input type="date" id="e-invoice-active-from" name="e_invoice_active_from" class="form-control" value="{$settings.e_invoice_active_from_iso|default:''|escape:'html':'UTF-8'}">
+                        <small class="help-block">Bestehende Dokumente und historische Backfills werden nie nachträglich zu E-Rechnungen.</small>
+                    </div>
+                    <div class="checkbox">
+                        <label for="e-invoice-canary-confirmed">
+                            <input type="checkbox" id="e-invoice-canary-confirmed" name="e_invoice_canary_confirmed" value="on"{if $settings.e_invoice_canary_confirmed === 'on' || $settings.e_invoice_canary_confirmed === true || $settings.e_invoice_canary_confirmed == 1} checked{/if}>
+                            Der separate ZUGFeRD-Canary mit Create, Readback, XML, PDF, Versand und Kundendownload wurde vollständig bestanden.
+                        </label>
+                    </div>
+                    <div class="checkbox">
+                        <label for="e-invoice-profile-acknowledged">
+                            <input type="checkbox" id="e-invoice-profile-acknowledged" name="e_invoice_profile_acknowledged" value="1">
+                            <strong>Bei aktiviertem Profil erneut bestätigen:</strong> ZUGFeRD wird nur für deutsche Organisationen mit Rule 1 und gesetztem Admin-Opt-in verwendet; Behörden- und OSS-Fälle bleiben ausgeschlossen.
+                        </label>
                     </div>
                 </div>
             </div>

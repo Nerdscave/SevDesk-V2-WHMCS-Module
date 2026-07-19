@@ -212,9 +212,10 @@ final class LegacyMappingTypeService
         try {
             $response = $this->client->get('/' . $resource . '/' . rawurlencode($remoteId));
         } catch (ApiException $exception) {
-            // Invoice-by-ID documents 400 as an absence response. A Voucher
-            // 400 is not equivalent to 404 and must not hide a cross-type ID.
-            $absenceStatuses = $resource === 'Invoice' ? [400, 404] : [404];
+            // The versioned sevdesk contract documents 400 as the definitive
+            // by-ID absence response for both Invoice and Voucher. Some
+            // tenants also return the conventional 404.
+            $absenceStatuses = [400, 404];
             if (in_array($exception->httpStatus, $absenceStatuses, true)) {
                 return null;
             }
@@ -223,7 +224,7 @@ final class LegacyMappingTypeService
         }
 
         if ($response === []) {
-            return null;
+            throw new \RuntimeException('Remote document lookup returned no document in a successful response.');
         }
         $records = array_is_list($response) ? $response : [$response];
         if (count($records) !== 1 || !is_array($records[0])) {

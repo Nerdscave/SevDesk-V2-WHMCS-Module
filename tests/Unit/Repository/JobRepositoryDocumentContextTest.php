@@ -253,6 +253,131 @@ final class JobRepositoryDocumentContextTest extends TestCase
         self::assertNull(JobRepository::documentContextFromItem($requested));
     }
 
+    public function testFrozenEInvoiceContextExposesOnlyIdsAndAddressHash(): void
+    {
+        $addressHash = hash('sha256', 'synthetic-normalised-address');
+        $item = (object) [
+            'id' => 9,
+            'status' => 'succeeded',
+            'checkpoint' => 'invoice_opened',
+            'message' => null,
+            'candidate_json' => json_encode([
+                'targetAllowed' => true,
+                'targetDocumentType' => 'invoice',
+                'targetDocumentAuthority' => 'sevdesk',
+                'targetExportMode' => 'invoice_only',
+                'targetOssProfile' => 'blocked',
+                'targetEuB2cMode' => 'blocked',
+                'targetDeliveryChannel' => 'sevdesk',
+                'targetSevUserId' => '7',
+                'targetUnityId' => '8',
+                'targetIsEInvoice' => true,
+                'targetEInvoiceMode' => 'zugferd_domestic_b2b',
+                'targetEInvoiceContactId' => '42',
+                'targetEInvoicePaymentMethodId' => '11',
+                'targetEInvoiceUnityId' => '8',
+                'targetEInvoiceCountryId' => '1',
+                'targetEInvoiceAddressHash' => $addressHash,
+            ], JSON_THROW_ON_ERROR),
+        ];
+
+        $context = JobRepository::documentContextFromItem($item, true);
+
+        self::assertNotNull($context);
+        self::assertTrue($context['isEInvoice']);
+        self::assertSame('42', $context['eInvoiceContactId']);
+        self::assertSame('11', $context['paymentMethodId']);
+        self::assertSame('8', $context['unityId']);
+        self::assertSame('1', $context['eInvoiceCountryId']);
+        self::assertSame($addressHash, $context['addressHash']);
+        self::assertStringNotContainsString('street', (string) $item->candidate_json);
+    }
+
+    public function testNormalInvoiceSnapshotsKeepTheirFrozenSevdeskAuthority(): void
+    {
+        foreach (['off', 'zugferd_domestic_b2b'] as $eInvoiceMode) {
+            $item = (object) [
+                'id' => $eInvoiceMode === 'off' ? 90 : 91,
+                'status' => 'succeeded',
+                'checkpoint' => 'invoice_opened',
+                'message' => null,
+                'candidate_json' => json_encode([
+                    'targetAllowed' => true,
+                    'targetDocumentType' => 'invoice',
+                    'targetDocumentAuthority' => 'sevdesk',
+                    'targetExportMode' => 'invoice_only',
+                    'targetOssProfile' => 'blocked',
+                    'targetEuB2cMode' => 'blocked',
+                    'targetDeliveryChannel' => 'sevdesk',
+                    'targetSevUserId' => '7',
+                    'targetUnityId' => '8',
+                    'targetIsEInvoice' => false,
+                    'targetEInvoiceMode' => $eInvoiceMode,
+                    'targetEInvoiceContactId' => null,
+                    'targetEInvoicePaymentMethodId' => null,
+                    'targetEInvoiceUnityId' => null,
+                    'targetEInvoiceCountryId' => null,
+                    'targetEInvoiceAddressHash' => null,
+                ], JSON_THROW_ON_ERROR),
+            ];
+
+            $context = JobRepository::documentContextFromItem($item, true);
+
+            self::assertNotNull($context, $eInvoiceMode);
+            self::assertFalse($context['isEInvoice']);
+            self::assertSame('sevdesk', $context['documentAuthority']);
+            self::assertSame('invoice', $context['documentType']);
+        }
+    }
+
+    public function testIncompleteFrozenEInvoiceContextFailsClosed(): void
+    {
+        $item = (object) [
+            'id' => 10,
+            'status' => 'running',
+            'checkpoint' => 'document_type_selected',
+            'message' => null,
+            'candidate_json' => json_encode([
+                'targetAllowed' => true,
+                'targetDocumentType' => 'invoice',
+                'targetDocumentAuthority' => 'sevdesk',
+                'targetExportMode' => 'invoice_only',
+                'targetOssProfile' => 'blocked',
+                'targetEuB2cMode' => 'blocked',
+                'targetDeliveryChannel' => 'sevdesk',
+                'targetUnityId' => '8',
+                'targetIsEInvoice' => true,
+                'targetEInvoiceMode' => 'zugferd_domestic_b2b',
+                'targetEInvoiceContactId' => '42',
+                'targetEInvoiceUnityId' => '8',
+                'targetEInvoiceCountryId' => '1',
+                'targetEInvoiceAddressHash' => hash('sha256', 'synthetic-normalised-address'),
+            ], JSON_THROW_ON_ERROR),
+        ];
+
+        self::assertNull(JobRepository::documentContextFromItem($item, true));
+    }
+
+    public function testRequestedEInvoiceProfileRequiresInvoiceOnlyAndSevdeskAuthority(): void
+    {
+        $item = (object) [
+            'id' => 11,
+            'status' => 'pending',
+            'checkpoint' => 'queued',
+            'message' => null,
+            'candidate_json' => json_encode([
+                'requestedExportMode' => 'invoice_only',
+                'requestedDocumentAuthority' => 'whmcs',
+                'requestedOssProfile' => 'blocked',
+                'requestedEuB2cMode' => 'blocked',
+                'requestedDeliveryChannel' => null,
+                'requestedEInvoiceMode' => 'zugferd_domestic_b2b',
+            ], JSON_THROW_ON_ERROR),
+        ];
+
+        self::assertNull(JobRepository::documentContextFromItem($item));
+    }
+
     public function testBatchContextReadIsolatedPerInvoiceAndKeepsFrozenOwner(): void
     {
         $this->insertContext(41, 'succeeded', 'mapping_persisted', [

@@ -8,7 +8,8 @@
     "ext-curl": "*",
     "ext-json": "*",
     "ext-mbstring": "*",
-    "ext-openssl": "*"
+    "ext-openssl": "*",
+    "ext-xmlreader": "*"
   },
   "require-dev": {
     "guzzlehttp/guzzle": "^7.9",

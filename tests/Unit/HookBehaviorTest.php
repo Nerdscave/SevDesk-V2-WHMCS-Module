@@ -148,6 +148,26 @@ final class HookBehaviorTest extends TestCase
         self::assertSame(0, $result['remoteCalls']);
     }
 
+    public function testMappedSevdeskInvoiceKeepsPaidMailGuardAcrossALaterReadFailure(): void
+    {
+        $result = $this->runScenario('mapped_sevdesk_invoice_later_read_failure');
+
+        self::assertTrue($result['guard']);
+        self::assertSame(['abortsend' => true], $result['mailResult']);
+        self::assertTrue($result['logged']);
+        self::assertSame(0, $result['remoteCalls']);
+    }
+
+    public function testFrozenSevdeskAuthoritySurvivesALaterGlobalSwitchToWhmcs(): void
+    {
+        $result = $this->runScenario('mapped_sevdesk_invoice_after_global_whmcs_switch');
+
+        self::assertTrue($result['guard']);
+        self::assertSame(['abortsend' => true], $result['mailResult']);
+        self::assertTrue($result['logged']);
+        self::assertSame(0, $result['remoteCalls']);
+    }
+
     #[DataProvider('enqueueMatrixProvider')]
     public function testInvoiceHookModeMatrix(
         string $mode,

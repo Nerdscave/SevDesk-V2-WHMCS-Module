@@ -37,11 +37,31 @@ final class AdminSetupBehaviorTest extends MariaDbTestCase
             $table->increments('id');
             $table->string('type', 32);
             $table->string('fieldname', 191);
+            $table->string('fieldtype', 32)->default('text');
+            $table->boolean('adminonly')->default(false);
         });
         Capsule::table('tblcustomfields')->insert([
-            'id' => 1,
-            'type' => 'client',
-            'fieldname' => 'sevdesk contact id',
+            [
+                'id' => 1,
+                'type' => 'client',
+                'fieldname' => 'sevdesk contact id',
+                'fieldtype' => 'text',
+                'adminonly' => 1,
+            ],
+            [
+                'id' => 2,
+                'type' => 'client',
+                'fieldname' => 'E-Invoice opt-in',
+                'fieldtype' => 'tickbox',
+                'adminonly' => 1,
+            ],
+            [
+                'id' => 3,
+                'type' => 'client',
+                'fieldname' => 'Public option',
+                'fieldtype' => 'tickbox',
+                'adminonly' => 0,
+            ],
         ]);
         $this->schemaReady = true;
         Migrator::up();
@@ -110,6 +130,94 @@ final class AdminSetupBehaviorTest extends MariaDbTestCase
         $this->invokeSaveSetup($application);
 
         self::assertFalse($application->config->bool('customer_number_contact_creation_confirmed'));
+    }
+
+    public function testDocumentProfileChangeRequiresTheFreshReadOnlyInventoryConfirmation(): void
+    {
+        $application = $this->application();
+        $_POST['e_invoice_canary_confirmed'] = 'on';
+
+        $this->expectSetupFailure($application, 'Übergangsinventur');
+
+        $_POST['transition_inventory_confirmed'] = '1';
+        $_POST['transition_inventory_fingerprint'] = $this->transitionInventoryFingerprint($application);
+        $this->invokeSaveSetup($application);
+
+        self::assertTrue($application->config->bool('e_invoice_canary_confirmed'));
+        self::assertSame('off', $application->config->get('e_invoice_mode'));
+    }
+
+    public function testStaleNormalSetupFormCannotOverwriteANewerDocumentProfile(): void
+    {
+        $application = $this->application();
+        $staleFingerprint = $this->transitionInventoryFingerprint($application);
+
+        $_POST['e_invoice_canary_confirmed'] = 'on';
+        $_POST['transition_inventory_confirmed'] = '1';
+        $_POST['transition_inventory_fingerprint'] = $staleFingerprint;
+        $this->invokeSaveSetup($application);
+        self::assertTrue($application->config->bool('e_invoice_canary_confirmed'));
+
+        unset($_POST['e_invoice_canary_confirmed']);
+        $_POST['transition_inventory_fingerprint'] = $staleFingerprint;
+        $this->expectSetupFailure($application, 'aktuelle Übergangsinventur');
+
+        self::assertTrue($application->config->bool('e_invoice_canary_confirmed'));
+    }
+
+    public function testAmbiguousExportBlocksPureEInvoiceProfileChange(): void
+    {
+        $application = $this->application();
+        $this->insertItem('completed', 'ambiguous', 'export_document');
+        $_POST['e_invoice_canary_confirmed'] = 'on';
+        $_POST['transition_inventory_confirmed'] = '1';
+        $_POST['transition_inventory_fingerprint'] = $this->transitionInventoryFingerprint($application);
+
+        $this->expectSetupFailure($application, 'ungeklärte Exportjobs');
+
+        self::assertFalse($application->config->bool('e_invoice_canary_confirmed'));
+    }
+
+    public function testCancelledVerifiedInvoiceIsVisibleAsPossibleRemoteDuplicate(): void
+    {
+        $application = $this->application();
+        $before = $this->transitionInventory($application);
+        $this->insertItem('cancelled', 'cancelled', 'export_document', 'invoice_xml_verified');
+
+        $after = $this->transitionInventory($application);
+
+        self::assertSame(0, $before['possible_remote_duplicates']);
+        self::assertSame(1, $after['possible_remote_duplicates']);
+        self::assertNotSame($before['fingerprint'], $after['fingerprint']);
+    }
+
+    public function testPublicClientTickboxCannotBeStoredAsEInvoiceOptIn(): void
+    {
+        $application = $this->application();
+        $_POST['e_invoice_client_field_id'] = '3';
+
+        $this->expectSetupFailure($application, 'nur für Administratoren sichtbares Tickbox-Feld');
+
+        self::assertSame('', $application->config->get('e_invoice_client_field_id'));
+    }
+
+    public function testZugferdCannotBeEnabledWithWhmcsAuthority(): void
+    {
+        $application = $this->application();
+        $_POST['export_mode'] = 'invoice_only';
+        $_POST['invoice_canary_confirmed'] = 'on';
+        $_POST['invoice_sev_user_id'] = '5';
+        $_POST['invoice_unity_id'] = '6';
+        $_POST['e_invoice_mode'] = 'zugferd_domestic_b2b';
+        $_POST['e_invoice_canary_confirmed'] = 'on';
+        $_POST['e_invoice_client_field_id'] = '2';
+        $_POST['e_invoice_payment_method_id'] = '7';
+        $_POST['e_invoice_active_from'] = '2030-01-01';
+        $_POST['e_invoice_profile_acknowledged'] = '1';
+
+        $this->expectSetupFailure($application, 'sevdesk-Dokumenthoheit');
+
+        self::assertSame('off', $application->config->get('e_invoice_mode'));
     }
 
     public function testSevdeskDocumentAuthorityRequiresAutomaticInvoiceEnqueue(): void
@@ -364,6 +472,27 @@ final class AdminSetupBehaviorTest extends MariaDbTestCase
         (new ReflectionMethod(AdminController::class, 'saveSetup'))->invoke($controller);
     }
 
+    private function transitionInventoryFingerprint(Application $application): string
+    {
+        return (string) ($this->transitionInventory($application)['fingerprint'] ?? '');
+    }
+
+    /** @return array<string,int|string> */
+    private function transitionInventory(Application $application): array
+    {
+        $csrf = new Csrf();
+        $controller = new AdminController(
+            $application,
+            new View($csrf),
+            $csrf,
+            'addonmodules.php?module=sevdesk',
+        );
+        $inventory = (new ReflectionMethod(AdminController::class, 'transitionInventory'))->invoke($controller);
+        self::assertIsArray($inventory);
+
+        return $inventory;
+    }
+
     private function expectSetupFailure(Application $application, string $messageFragment): void
     {
         try {
@@ -374,8 +503,12 @@ final class AdminSetupBehaviorTest extends MariaDbTestCase
         }
     }
 
-    private function insertItem(string $jobStatus, string $itemStatus, string $action = 'export_document'): void
-    {
+    private function insertItem(
+        string $jobStatus,
+        string $itemStatus,
+        string $action = 'export_document',
+        string $checkpoint = 'queued',
+    ): void {
         $now = (new DateTimeImmutable())->format('Y-m-d H:i:s');
         $jobId = (int) Capsule::table(Migrator::JOBS_TABLE)->insertGetId([
             'type' => 'test',
@@ -395,7 +528,7 @@ final class AdminSetupBehaviorTest extends MariaDbTestCase
             'action' => $action,
             'status' => $itemStatus,
             'dedupe_key' => 'setup-test:' . $jobId,
-            'checkpoint' => 'queued',
+            'checkpoint' => $checkpoint,
             'attempts' => 0,
             'available_at' => $now,
             'lease_token' => null,
@@ -435,6 +568,10 @@ final class AdminSetupBehaviorTest extends MariaDbTestCase
             'oss_profile' => 'blocked',
             'invoice_sev_user_id' => '',
             'invoice_unity_id' => '',
+            'e_invoice_mode' => 'off',
+            'e_invoice_client_field_id' => '',
+            'e_invoice_payment_method_id' => '',
+            'e_invoice_active_from' => '',
             'invoice_delivery_channel' => 'sevdesk',
             'whmcs_invoice_email_template' => '',
             'sevdesk_email_subject' => 'Ihre Rechnung {invoice_number}',

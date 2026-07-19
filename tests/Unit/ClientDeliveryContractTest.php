@@ -100,6 +100,13 @@ final class ClientDeliveryContractTest extends TestCase
                 'requestedOssProfile',
                 'requestedEuB2cMode',
                 'requestedDeliveryChannel',
+                'requestedEInvoiceMode',
+                'requestedEInvoiceClientFieldId',
+                'requestedEInvoicePaymentMethodId',
+                'requestedEInvoiceActiveFrom',
+                'requestedEInvoiceCanaryConfirmed',
+                'requestedEInvoiceSevUserId',
+                'requestedEInvoiceUnityId',
             ] as $field
         ) {
             self::assertStringContainsString("'" . $field . "'", $method);

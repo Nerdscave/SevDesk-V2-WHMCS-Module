@@ -2,9 +2,11 @@
 
 Dieses Repository enthält ein Drop-in-Replacement für ein nicht mehr gepflegtes WHMCS-sevDesk-Modul. Das Addon ist für WHMCS 8.13.4 und PHP 8.3 gebaut. Es übernimmt vorhandene Zuordnungen und verarbeitet Exporte sowie Zahlungsbuchungen in persistenten Cron-Jobs.
 
-Die wählbaren Invoice-Modi gehören zu 2.1.0. Der aktuelle Stand ist `2.1.0-rc.1` und nur für Testsysteme vorgesehen. Der Voucher-, Booking- und Korrekturumfang aus 2.0.0 bleibt erhalten.
+Für den nativen E-Rechnungspfad muss PHP außerdem `XMLReader` bereitstellen. Das Setup und der Worker blockieren ZUGFeRD, wenn die Erweiterung fehlt.
 
-> Der Invoice-API-Canary in einem echten sevDesk-Testmandanten steht noch aus. Bis er bestanden ist, bleibt `invoice_canary_confirmed` ausgeschaltet. Bei neuen Installationen und Freigaberollouts bleibt auch `sync_enabled` aus.
+Die wählbaren Invoice-Modi gehören zu 2.1.0. Der aktuelle Stand ist `2.1.0-rc.2` und nur für Testsysteme vorgesehen. Der Voucher-, Booking- und Korrekturumfang aus 2.0.0 bleibt erhalten. Dieser RC ergänzt außerdem einen eng begrenzten, sevDesk-nativen ZUGFeRD-Pfad.
+
+> Der Invoice-API-Canary und der davon getrennte ZUGFeRD-Canary in einem echten sevDesk-Testmandanten stehen noch aus. Bis sie bestanden sind, bleiben `invoice_canary_confirmed` und `e_invoice_canary_confirmed` ausgeschaltet. Bei neuen Installationen und Freigaberollouts bleibt auch `sync_enabled` aus.
 >
 > Das Upgrade behält `voucher_only` bei, setzt aber einmalig `runtime_review_required=on`. Hooks, Worker und Remote-fähige Adminaktionen bleiben gesperrt, bis der übernommene Bestand im Setup geprüft und freigegeben wurde.
 
@@ -44,6 +46,7 @@ Nicht jede Funktion des bisherigen Moduls wurde unverändert nachgebaut. Vor dem
 | --- | --- |
 | automatischer Belegexport | vorhanden, aber erst nach Canary und bewusstem Aktivieren von `sync_enabled` |
 | Massenimport | vorhanden als persistenter Cron-Job; historische Importe versenden nie automatisch |
+| ZUGFeRD | nur sevDesk-nativ für bestätigte deutsche B2B-Rule-1-Invoices; eigener Canary und Kunden-Opt-in nötig |
 | Kontaktanlage und Wiederverwendung gespeicherter IDs | vorhanden mit den oben beschriebenen fail-closed Regeln |
 | laufende Aktualisierung vorhandener Kontakte | nicht enthalten; vorhandene Stammdaten bleiben unangetastet |
 | automatische Zahlungszuordnung/-buchung | nicht funktionsgleich: nur exakte read-only Vorschau und ausdrückliche Einzelfallbestätigung |
@@ -81,7 +84,9 @@ Die Dokumenthoheit ist davon getrennt:
 - `whmcs`: WHMCS-Rechnung und WHMCS-PDF bleiben kundenseitig maßgeblich. Eine sevDesk-Invoice wird ohne Kundenversand geöffnet.
 - `sevdesk`: nur zusammen mit `invoice_only`. WHMCS bleibt Billing-, Proforma- und Zahlungsplattform; nach Zahlung ist allein die von sevDesk erzeugte Invoice-PDF als Endrechnung sichtbar.
 
-Upgrade-Default und sichere Grundstellung bleiben `whmcs + voucher_only + OSS blocked`; bestehende Mappings werden nicht neu exportiert. Der neue Laufzeitnachweis pausiert automatische Exporte beim ersten 2.1-Upgrade einmalig bis zur Betreiberprüfung. Invoice-Ziele sind immer paid-only und benötigen eine finale WHMCS-Rechnungsnummer.
+Upgrade-Default und sichere Grundstellung bleiben `whmcs + voucher_only + OSS blocked`; E-Rechnungen sind aus. Bestehende Mappings werden nicht neu exportiert. Voucher bleiben Voucher, und die für eine bestehende Invoice gewählte Dokumenthoheit bleibt erhalten. Der neue Laufzeitnachweis pausiert automatische Exporte beim ersten 2.1-Upgrade einmalig bis zur Betreiberprüfung. Invoice-Ziele sind immer paid-only und benötigen eine finale WHMCS-Rechnungsnummer.
+
+Für einen gestuften produktiven Umstieg bietet sich nach bestandenem Invoice-Canary zunächst `invoice_only + whmcs + E-Rechnung aus` an. Das ist kein stiller Upgrade-Default: Der Betreiber wählt den Modus nach der Übergangsinventur bewusst aus. sevDesk-Hoheit und ZUGFeRD folgen erst nach ihren zusätzlichen Liveprüfungen.
 
 OSS-v1 unterstützt ausschließlich Rule 19 für vom Betreiber ausdrücklich als vollständig elektronisch/digital bestätigte EU-B2C-Rechnungen. Beschreibungen werden nicht heuristisch klassifiziert. Rules 18 und 20, gemischte oder unklare Leistungsarten sowie sonstige nicht freigegebene Steuerfälle bleiben blockiert.
 
@@ -92,6 +97,7 @@ Das Modul:
 - verwendet den Modulnamen `sevdesk` und `mod_sevdesk` weiter;
 - wählt vor jedem Remote-Write unveränderlich `voucher` oder `invoice`; ein fehlgeschlagener Voucher wird nie als Fallback zur Invoice;
 - legt Voucher mit der WHMCS-PDF und Invoice-Dokumente über den normalen sevDesk-`Invoice`-Vertrag an;
+- kann ausgewählte neue deutsche B2B-Invoices von sevDesk als ZUGFeRD erzeugen lassen und prüft das zurückgelieferte XML sowie PDF per SHA-256;
 - lässt sevDesk die offizielle Invoice-PDF erzeugen und lädt dafür keine WHMCS-PDF als Ausgangsrechnung hoch;
 - verarbeitet Einzel-, Bulk-, Booking- und Korrekturvorgänge als persistente, wiederaufnehmbare Jobs;
 - verhindert Cross-Type-Duplikate weiterhin mit dem bestehenden Dedupe-Schlüssel `export_voucher:<invoiceId>`;
@@ -101,7 +107,7 @@ Das Modul:
 - hält WHMCS-Hooks kurz: Sie planen Arbeit ein und werfen keine sevDesk-Fehler in den WHMCS-Kern zurück;
 - schützt Token, PDF-Inhalte und personenbezogene Daten vor Job- und Fehlerlogs.
 
-Nicht enthalten sind eine `/api/v2`-Anbindung, sevDesk→WHMCS-Synchronisation, sevDesk-Webhooks, eine externe Queue, automatische Chargebacks, Rules 18/20, E-Rechnungen, Produktklassifikation, dauerhafte PDF-Spiegelung und ein Invoice-`CreditNote`-Pfad.
+Nicht enthalten sind eine `/api/v2`-Anbindung, sevDesk→WHMCS-Synchronisation, sevDesk-Webhooks, eine externe Queue, automatische Chargebacks, Rules 18/20, B2G/XRechnung, eigene XML-Erzeugung, Produktklassifikation, dauerhafte PDF-Spiegelung und ein Invoice-`CreditNote`-Pfad.
 
 ## Warum der Rewrite nötig ist
 
@@ -122,9 +128,17 @@ Für eine kundenseitige Zustellung gibt es zwei explizite Wege:
 
 Bulk- und historische Importe versenden nie automatisch. Nach einem möglicherweise ausgeführten Create-, Open- oder Versand-Write wird ausschließlich lesend reconciliiert; ein nicht beweisbarer Ausgang bleibt `ambiguous` und wird nicht automatisch wiederholt.
 
+### Native ZUGFeRD-Invoices
+
+ZUGFeRD ist kein eigener Dokumenttyp. Das Mapping bleibt vom Typ `invoice`. Der Pfad wird nur gewählt, wenn `invoice_only` und sevDesk-Dokumenthoheit aktiv sind, der separate Canary bestätigt ist und das gewählte, nur für Administratoren sichtbare WHMCS-Kundenfeld gesetzt wurde. Hinzu kommen ein deutscher Organisationskunde, deutsches Rechnungsland, Rule 1, ein gültiges Aktivierungsdatum sowie die in sevDesk benötigten Kontakt-, Adress-, Unity- und PaymentMethod-Daten.
+
+Nach einem Kunden-Opt-in gilt kein stiller Rückfall auf eine normale PDF-Invoice. Fehlen Pflichtdaten oder lehnt sevDesk die E-Rechnung ab, bleibt das Item mit einem verständlichen Fehler stehen. Rule 19 ist immer eine normale Invoice; OSS, Behördenfälle, XRechnung und historische E-Rechnungs-Nachläufe sind ausgeschlossen.
+
+sevDesk erstellt das strukturierte Dokument mit `propertyIsEInvoice=true`. Das Modul liest die Invoice zurück, prüft Kontakt, Zahlungsmethode und Adresshash, ruft `getXml` ab und friert dessen SHA-256 ein. Die ausgelieferte Datei bleibt das von sevDesk erzeugte ZUGFeRD-PDF. XML und PDF werden nicht dauerhaft in WHMCS gespeichert. Technischer Ausgangspunkt sind die [sevDesk-Hinweise zur E-Rechnungs-API](https://tech.sevdesk.com/api_news/posts/2024_11_15-einvoice_changes/); die fachliche Einordnung beschreibt die [BMF-FAQ zur E-Rechnung](https://www.bundesfinanzministerium.de/Content/DE/FAQ/e-rechnung.html).
+
 ## Datenmodell und Zuverlässigkeit
 
-`mod_sevdesk` bleibt die einzige verbindliche Invoice-zu-sevDesk-Zuordnung. Additiv kommen `document_type`, `document_number`, `document_ready_at`, `delivered_at` und `pdf_sha256` hinzu. Alte Mappings behalten zunächst `document_type = NULL`; der Typ darf erst nach read-only Prüfung und Adminbestätigung ergänzt werden. Legacy-Zeilen mit `sevdesk_id = NULL` bleiben Recovery-Fälle.
+`mod_sevdesk` bleibt die einzige verbindliche Invoice-zu-sevDesk-Zuordnung. Additiv kommen `document_type`, `document_number`, `document_ready_at`, `delivered_at`, `pdf_sha256`, `is_e_invoice` und `xml_sha256` hinzu. Alte Mappings behalten zunächst `document_type = NULL`; der Typ darf erst nach read-only Prüfung und Adminbestätigung ergänzt werden. Legacy-Zeilen mit `sevdesk_id = NULL` bleiben Recovery-Fälle.
 
 Neue Exporte verwenden die Jobaktion `export_document`, behalten aber absichtlich den historischen Dedupe-Namensraum. Riskante Writes haben eigene Checkpoints. Nach einem unklaren Create-, Open-, `bookAmount`- oder Versand-Ausgang darf kein zweiter Write blind erfolgen.
 
@@ -133,11 +147,14 @@ Neue Exporte verwenden die Jobaktion `export_document`, behalten aber absichtlic
 1. Datenbank, bisherigen Modulordner und Addon-Settings sichern.
 2. Das noch aktive Alt-Addon nicht deaktivieren, sondern das Verzeichnis `modules/addons/sevdesk` atomar ersetzen und anschließend den Upgrade-/Adminpfad des neuen Codes öffnen.
 3. Auf der geschützten Seite **Einrichtung** die übernommene Kontaktfeld-ID und vorhandene Kontakt-IDs, Mandant/Token, Konten, Steuerprofile, Dokumentmodus sowie offene Jobs prüfen. Abgelaufene Worker-Leases werden dort rein lokal eingeordnet: sichere Fortsetzungen werden `retry_wait`, sichere abgebrochene Schritte `cancelled`, unbekannte Write-Ausgänge oder Abbrüche nach bestätigtem Remote-Effekt `ambiguous`.
-4. Migration, Health Check, Dry-Run sowie Legacy- und `NULL`-Mappings prüfen und anschließend die angezeigte Bestandsfreigabe ausdrücklich bestätigen. Erst dann werden Runner und manuelle Jobaktionen wieder verfügbar; automatische Hooks folgen weiterhin separat `sync_enabled`.
+4. Migration, Health Check, Übergangsinventur, Dry-Run sowie Legacy- und `NULL`-Mappings prüfen und anschließend die angezeigte Bestandsfreigabe ausdrücklich bestätigen. Erst dann werden Runner und manuelle Jobaktionen wieder verfügbar; automatische Hooks folgen weiterhin separat `sync_enabled`.
 5. Den bestehenden Voucher-Canary und anschließend den separaten Invoice-API-Canary aus [docs/operations.md](docs/operations.md) in einem Testmandanten durchführen.
-6. Erst nach dokumentierter Freigabe `invoice_canary_confirmed` setzen, kleine Invoice-Batches testen und danach gegebenenfalls `sync_enabled` aktivieren.
+6. Erst nach dokumentierter Freigabe `invoice_canary_confirmed` setzen, kleine Invoice-Batches testen und danach gegebenenfalls `sync_enabled` aktivieren. Den bezahlten Altbestand anschließend über die gemeinsame Vorschau mailfrei einreihen.
+7. sevDesk-Hoheit und ZUGFeRD erst nach dem separaten End-to-End-Canary aktivieren. Das E-Rechnungsprofil gilt nur für danach entschiedene Invoices ab dem gewählten Datum.
 
 Der Invoice-Canary muss unter anderem Rule 19, unveränderte Rechnungsnummer, Marker, Pflichtreferenzen, `sendBy`, `sendViaEmail`, `getPdf`, `/Invoice/{id}/bookAmount`, PDF-Stabilität und die ID-Eindeutigkeit zwischen Voucher und Invoice bestätigen. Kollidieren Remote-IDs oder sind Rule 19 beziehungsweise Marker nicht sicher abgleichbar, wird der gemischte Modus nicht freigegeben.
+
+Der zusätzliche ZUGFeRD-Canary verwendet einen synthetischen deutschen B2B-Kunden. Er umfasst Create, Readback, `getXml`, ZUGFeRD-PDF, EN-16931-Prüfung, `sendBy`, `sendViaEmail` mit `sendXml=false`, WHMCS-Anhang und Kundendownload. Die Checkbox im Setup dokumentiert dieses externe Ergebnis; sie ersetzt den Test nicht.
 
 Der vollständige Ablauf für Installation, Recovery und Rollback steht in [docs/operations.md](docs/operations.md). Release-Archive werden weiterhin aus einer Positivliste gebaut und enthalten zusätzlich `LICENSE` sowie die eigenständige Moduldatei `UPGRADE.md`; lokale Arbeitsdaten, Tests und `vendor/` gehören nicht in das Paket.
 
@@ -156,6 +173,7 @@ API-Token, WHMCS-Konfiguration, unredigierte Exporte/Dumps, Kundendaten, Rechnun
 | [docs/testing.md](docs/testing.md) | Teststrategie und verbindliche Invoice-Canaries |
 | [docs/operations.md](docs/operations.md) | Einrichtung, Nachlauf, Versand und Recovery |
 | [docs/sevdesk-openapi.yaml](docs/sevdesk-openapi.yaml) | unveränderte lokale sevDesk-OpenAPI-Referenz |
+| [RELEASE_NOTES_2.1.0-rc.2.md](RELEASE_NOTES_2.1.0-rc.2.md) | Text für das GitHub-Prerelease und konkrete Freigabegrenzen |
 
 ## Freigabegrenzen
 
@@ -164,6 +182,6 @@ API-Token, WHMCS-Konfiguration, unredigierte Exporte/Dumps, Kundendaten, Rechnun
 - Der mitgelieferte Twenty-One-Adapter ersetzt die normalen sichtbaren Kundenlinks. Ein direkt erratener WHMCS-Core-PDF-Endpunkt kann ohne Core-Änderung technisch weiter erreichbar sein.
 - Rule 3 bleibt ausschließlich für bestätigte innergemeinschaftliche Warenlieferungen an Organisationen mit USt-ID und `taxexempt` freigegeben; Hosting und andere Dienstleistungen bleiben blockiert.
 - Rechnungen mit Guthaben, negative Positionen, Fremdwährungen und unklare Mischfälle folgen weiterhin ihren dokumentierten Blockierungs- oder Einzelfallregeln.
-- WHMCS 9, Rules 18/20, E-Rechnungen, dauerhafte PDF-Spiegelung und Invoice-CreditNotes sind nicht freigegeben.
+- WHMCS 9, Rules 18/20, B2G/XRechnung, historische E-Rechnungs-Backfills, dauerhafte PDF-Spiegelung und Invoice-CreditNotes sind nicht freigegeben.
 
 Die sevDesk-Prüfung bestätigt technische API-Gültigkeit, nicht die steuerliche Behandlung. Vor Produktivbetrieb muss die fachliche Matrix von Steuerberatung beziehungsweise Buchhaltung bestätigt werden. Nach 401/403 stoppt der Worker mandantenweit, bis eine erfolgreiche read-only Prüfung im Setup die Sperre aufhebt.

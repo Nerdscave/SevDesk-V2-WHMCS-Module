@@ -73,6 +73,95 @@ final class JobRepositoryTest extends MariaDbTestCase
         self::assertSame((int) $owner->id, (int) $claimed->id);
     }
 
+    public function testHistoricalBackfillCannotTakeOverAnAutomaticDeliveryOwner(): void
+    {
+        $ownerJob = $this->jobs->create('automatic_export', [[
+            'invoice_id' => 425,
+            'action' => 'export_document',
+            'dedupe_key' => 'export_voucher:425',
+            'candidate' => [
+                'trigger' => 'InvoicePaid',
+                'delivery_requested' => true,
+            ],
+        ]]);
+        $backfillJob = $this->jobs->create('historical_backfill', [[
+            'invoice_id' => 425,
+            'action' => 'export_document',
+            'dedupe_key' => 'export_voucher:425',
+            'candidate' => [
+                'historicalBackfill' => true,
+                'delivery_requested' => false,
+                'requestedEInvoiceMode' => 'off',
+            ],
+        ]], ['mail_free' => true, 'e_invoice' => false]);
+
+        $owner = Capsule::table(Migrator::ITEMS_TABLE)->where('job_id', $ownerJob)->first();
+        $loser = Capsule::table(Migrator::ITEMS_TABLE)->where('job_id', $backfillJob)->first();
+        $ownerCandidate = json_decode((string) $owner->candidate_json, true, 32, JSON_THROW_ON_ERROR);
+
+        self::assertSame('pending', $owner->status);
+        self::assertTrue($ownerCandidate['delivery_requested']);
+        self::assertSame('InvoicePaid', $ownerCandidate['trigger']);
+        self::assertSame('skipped', $loser->status);
+        self::assertNull($loser->dedupe_key);
+        self::assertSame('completed', $this->jobs->findJob($backfillJob)?->status);
+    }
+
+    public function testHistoricalBackfillCannotTakeOverLegacyRiskyFailedVoucherWrite(): void
+    {
+        $oldJob = $this->jobs->create('legacy_export', [[
+            'invoice_id' => 426,
+            'action' => 'export_voucher',
+            'dedupe_key' => 'export_voucher:426',
+        ]]);
+        $claim = $this->jobs->claimNext();
+        self::assertNotNull($claim);
+        $this->jobs->finish($claim, JobOutcome::permanentFailure(
+            'Synthetic legacy write uncertainty.',
+            errorCode: 'synthetic_legacy_failure',
+            checkpoint: 'voucher_write_requested',
+        ));
+        self::assertSame(
+            'export_voucher:426',
+            Capsule::table(Migrator::ITEMS_TABLE)->where('job_id', $oldJob)->value('dedupe_key'),
+        );
+
+        // Simulate a pre-rc.2 terminal row whose old finish() implementation
+        // released the key despite the unresolved remote-write checkpoint.
+        Capsule::table(Migrator::ITEMS_TABLE)->where('job_id', $oldJob)->update(['dedupe_key' => null]);
+        $backfillJob = $this->jobs->create('historical_backfill', [[
+            'invoice_id' => 426,
+            'action' => 'export_document',
+            'dedupe_key' => 'export_voucher:426',
+            'candidate' => [
+                'historicalBackfill' => true,
+                'delivery_requested' => false,
+                'requestedEInvoiceMode' => 'off',
+            ],
+        ]], ['mail_free' => true, 'e_invoice' => false]);
+
+        $blocked = Capsule::table(Migrator::ITEMS_TABLE)->where('job_id', $backfillJob)->first();
+        self::assertSame('skipped', $blocked->status);
+        self::assertSame('unresolved_export_history', $blocked->error_code);
+        self::assertNull($blocked->dedupe_key);
+        self::assertSame('completed', $this->jobs->findJob($backfillJob)?->status);
+        self::assertNull($this->jobs->claimNext());
+
+        $singleJob = $this->jobs->create('single_export', [[
+            'invoice_id' => 426,
+            'action' => 'export_document',
+            'dedupe_key' => 'export_voucher:426',
+            'candidate' => ['trigger' => 'admin'],
+        ]]);
+        $single = Capsule::table(Migrator::ITEMS_TABLE)->where('job_id', $singleJob)->first();
+
+        self::assertSame('skipped', $single->status);
+        self::assertSame('unresolved_export_history', $single->error_code);
+        self::assertNull($single->dedupe_key);
+        self::assertSame('completed', $this->jobs->findJob($singleJob)?->status);
+        self::assertNull($this->jobs->claimNext());
+    }
+
     public function testPaidHybridTriggerRequeuesOwnerThatObservedUnpaidState(): void
     {
         $createdJob = $this->jobs->create('automatic_export', [[
@@ -357,9 +446,9 @@ final class JobRepositoryTest extends MariaDbTestCase
         self::assertNull($this->jobs->claimNext());
         $job = $this->jobs->findJob($jobId);
         self::assertSame('completed_with_errors', $job?->status);
-        self::assertSame(999, $job?->succeeded_items);
-        self::assertSame(1, $job?->failed_items);
-        self::assertSame(1_000, $job?->processed_items);
+        self::assertSame(999, $job->succeeded_items);
+        self::assertSame(1, $job->failed_items);
+        self::assertSame(1_000, $job->processed_items);
     }
 
     public function testSuccessfulOutcomeReleasesDedupeForHistoricalItems(): void
@@ -536,6 +625,125 @@ final class JobRepositoryTest extends MariaDbTestCase
                 Capsule::table(Migrator::ITEMS_TABLE)->where('job_id', $jobId)->value('status'),
             );
         }
+    }
+
+    public function testStaleVoucherJobRequiresFreshMailFreeDocumentJob(): void
+    {
+        $oldJobId = $this->jobs->create('legacy_export', [[
+            'invoice_id' => 469,
+            'action' => 'export_voucher',
+        ]]);
+        $claim = $this->jobs->claimNext();
+        self::assertNotNull($claim);
+        self::assertTrue($this->jobs->checkpoint(
+            (int) $claim->id,
+            (string) $claim->lease_token,
+            'document_type_selected',
+            [
+                'targetAllowed' => true,
+                'targetDocumentType' => 'voucher',
+                'targetDocumentAuthority' => 'whmcs',
+                'targetExportMode' => 'voucher_only',
+                'targetOssProfile' => 'blocked',
+                'targetEuB2cMode' => 'blocked',
+            ],
+        ));
+        $this->jobs->finish($claim, JobOutcome::permanentFailure(
+            'Synthetic configuration drift.',
+            errorCode: 'stale_export_context_requeue_required',
+            checkpoint: 'document_type_selected',
+        ));
+
+        self::assertFalse($this->jobs->retry((int) $claim->id));
+        $newJobId = $this->jobs->requeueExportDocument((int) $claim->id, [
+            'requestedExportMode' => 'invoice_only',
+            'requestedDocumentAuthority' => 'whmcs',
+            'requestedOssProfile' => 'blocked',
+            'requestedEuB2cMode' => 'blocked',
+            'requestedDeliveryChannel' => null,
+        ], 1);
+
+        self::assertNotNull($newJobId);
+        self::assertNotSame($oldJobId, $newJobId);
+        $old = Capsule::table(Migrator::ITEMS_TABLE)->where('job_id', $oldJobId)->first();
+        $new = Capsule::table(Migrator::ITEMS_TABLE)->where('job_id', $newJobId)->first();
+        self::assertSame('permanent_failed', $old->status);
+        self::assertSame('export_voucher', $old->action);
+        self::assertSame('pending', $new->status);
+        self::assertSame('export_document', $new->action);
+        self::assertSame('export_voucher:469', $new->dedupe_key);
+        $candidate = json_decode((string) $new->candidate_json, true, 32, JSON_THROW_ON_ERROR);
+        self::assertSame('invoice_only', $candidate['requestedExportMode']);
+        self::assertTrue($candidate['historicalBackfill']);
+        self::assertFalse($candidate['delivery_requested']);
+        self::assertSame('off', $candidate['requestedEInvoiceMode']);
+        self::assertArrayNotHasKey('targetDocumentType', $candidate);
+        self::assertNull($this->jobs->requeueExportDocument((int) $claim->id, [
+            'requestedExportMode' => 'invoice_only',
+            'requestedDocumentAuthority' => 'whmcs',
+            'requestedOssProfile' => 'blocked',
+            'requestedEuB2cMode' => 'blocked',
+            'requestedDeliveryChannel' => null,
+        ], 1));
+    }
+
+    public function testDocumentWriteCheckpointCannotBeRequeuedIntoAnotherMode(): void
+    {
+        $jobId = $this->jobs->create('legacy_export', [[
+            'invoice_id' => 470,
+            'action' => 'export_voucher',
+        ]]);
+        $claim = $this->jobs->claimNext();
+        self::assertNotNull($claim);
+        $this->jobs->finish($claim, JobOutcome::permanentFailure(
+            'Synthetic risky terminal state.',
+            errorCode: 'synthetic_failure',
+            checkpoint: 'voucher_write_requested',
+        ));
+
+        self::assertNull($this->jobs->requeueExportDocument((int) $claim->id, [
+            'requestedExportMode' => 'invoice_only',
+            'requestedDocumentAuthority' => 'whmcs',
+            'requestedOssProfile' => 'blocked',
+            'requestedEuB2cMode' => 'blocked',
+            'requestedDeliveryChannel' => null,
+        ], 1));
+        self::assertSame(
+            'permanent_failed',
+            Capsule::table(Migrator::ITEMS_TABLE)->where('job_id', $jobId)->value('status'),
+        );
+    }
+
+    public function testXmlMismatchCannotReplaceTheFirstVerifiedRecoveryHash(): void
+    {
+        $expectedHash = hash('sha256', '<synthetic-original/>');
+        $observedHash = hash('sha256', '<synthetic-changed/>');
+        $jobId = $this->jobs->create('e_invoice_export', [[
+            'invoice_id' => 471,
+            'action' => 'export_document',
+            'dedupe_key' => 'export_voucher:471',
+        ]]);
+        $claim = $this->jobs->claimNext();
+        self::assertNotNull($claim);
+        self::assertTrue($this->jobs->checkpoint(
+            (int) $claim->id,
+            (string) $claim->lease_token,
+            'invoice_xml_verified',
+            ['xmlSha256' => $expectedHash, 'remoteId' => '90471'],
+        ));
+
+        $this->jobs->finish($claim, JobOutcome::ambiguous(
+            'Synthetic XML drift.',
+            'invoice_xml_verified',
+            '90471',
+            errorCode: 'invoice_xml_hash_mismatch',
+            candidate: ['xmlSha256' => $observedHash],
+        ));
+
+        $item = Capsule::table(Migrator::ITEMS_TABLE)->where('job_id', $jobId)->first();
+        $candidate = json_decode((string) $item->candidate_json, true, 32, JSON_THROW_ON_ERROR);
+        self::assertSame($expectedHash, $candidate['xmlSha256']);
+        self::assertSame($observedHash, $candidate['observedXmlSha256']);
     }
 
     public function testCancelledJobKeepsExpiredRiskyLeaseAmbiguous(): void

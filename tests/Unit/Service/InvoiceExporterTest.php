@@ -16,6 +16,7 @@ use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use WHMCS\Module\Addon\SevDesk\Api\SevdeskClient;
 use WHMCS\Module\Addon\SevDesk\Domain\DocumentTargetDecision;
+use WHMCS\Module\Addon\SevDesk\Domain\EInvoiceContext;
 use WHMCS\Module\Addon\SevDesk\Domain\ExportResult;
 use WHMCS\Module\Addon\SevDesk\Domain\InvoiceSnapshot;
 use WHMCS\Module\Addon\SevDesk\Domain\LineItem;
@@ -25,6 +26,40 @@ use WHMCS\Module\Addon\SevDesk\Service\InvoiceExporter;
 
 final class InvoiceExporterTest extends TestCase
 {
+    public function testOneCentLineTotalDifferenceIsRejectedBeforeAnInvoiceWrite(): void
+    {
+        $history = [];
+        $invoice = new InvoiceSnapshot(
+            10,
+            20,
+            'RE-10',
+            new DateTimeImmutable('2026-07-01'),
+            'EUR',
+            '119.01',
+            '0',
+            [new LineItem('Hosting', '100.00', '19', true)],
+        );
+        $exporter = new InvoiceExporter(
+            $this->client([], $history),
+            static fn (): null => null,
+            static fn (): bool => true,
+            '7',
+            '8',
+        );
+
+        $result = $exporter->export(
+            $invoice,
+            '42',
+            $this->taxDecision(),
+            'DE',
+            $this->target(DocumentTargetResolver::AUTHORITY_WHMCS),
+        );
+
+        self::assertSame(ExportResult::FAILED, $result->status);
+        self::assertSame('invoice_total_mismatch', $result->code);
+        self::assertSame([], $history);
+    }
+
     public function testMarkerMatchRejectsMissingOrContradictoryInvoiceMarkers(): void
     {
         self::assertTrue(InvoiceExporter::markerMatches('Reference [WHMCS-INVOICE:10]', 10));
@@ -230,6 +265,39 @@ final class InvoiceExporterTest extends TestCase
     {
         yield 'validation rejection' => [422, 'invoice_create_failed_permanent'];
         yield 'rate limit rejection' => [429, 'api_rate_limited'];
+    }
+
+    public function testDefiniteEInvoiceValidationRejectionNamesRequiredDataWithoutFallback(): void
+    {
+        $history = [];
+        $persistCalls = 0;
+        $exporter = new InvoiceExporter(
+            $this->client([
+                new Response(422, [], '{"error":{"code":"VALIDATION_FAILED"}}'),
+            ], $history),
+            static fn (): null => null,
+            static function () use (&$persistCalls): void {
+                ++$persistCalls;
+            },
+            '7',
+            '8',
+        );
+
+        $result = $exporter->export(
+            $this->invoice(),
+            '42',
+            $this->taxDecision(),
+            'DE',
+            $this->target(DocumentTargetResolver::AUTHORITY_SEVDESK),
+            eInvoiceContext: $this->eInvoiceContext(),
+        );
+
+        self::assertSame(ExportResult::FAILED, $result->status);
+        self::assertSame('e_invoice_required_data_rejected', $result->code);
+        self::assertTrue($result->context['definiteWriteRejected']);
+        self::assertStringContainsString('no normal-Invoice fallback', $result->message);
+        self::assertSame(0, $persistCalls);
+        self::assertCount(1, $history);
     }
 
     public function testTransportFailureDuringCreateRemainsAnUnknownWriteOutcome(): void
@@ -838,6 +906,244 @@ final class InvoiceExporterTest extends TestCase
         self::assertSame(['GET', 'GET'], $this->requestMethods($history));
     }
 
+    public function testNativeZugferdCreateUsesFrozenStructuredDataAndVerifiesXml(): void
+    {
+        $history = [];
+        $mappings = [];
+        $checkpoints = [];
+        $xml = $this->zugferdXml();
+        $exporter = new InvoiceExporter(
+            $this->client([
+                new Response(201, [], '{"objects":{"invoice":{"id":"99"}}}'),
+                $this->eInvoiceResponse(100),
+                $this->positionResponse(),
+                $this->xmlResponse($xml),
+            ], $history),
+            static fn (): null => null,
+            static function (
+                int $invoiceId,
+                string $remoteId,
+                string $type,
+                string $number,
+                bool $isEInvoice,
+                ?string $xmlSha256,
+            ) use (&$mappings): void {
+                $mappings[] = compact(
+                    'invoiceId',
+                    'remoteId',
+                    'type',
+                    'number',
+                    'isEInvoice',
+                    'xmlSha256',
+                );
+            },
+            '7',
+            '8',
+        );
+
+        $result = $exporter->export(
+            $this->invoice(),
+            '42',
+            $this->taxDecision(),
+            'DE',
+            $this->target(DocumentTargetResolver::AUTHORITY_SEVDESK),
+            static function (string $name) use (&$checkpoints): void {
+                $checkpoints[] = $name;
+            },
+            $this->eInvoiceContext(),
+        );
+
+        self::assertSame(ExportResult::SUCCEEDED, $result->status);
+        self::assertTrue($result->context['isEInvoice']);
+        self::assertSame(hash('sha256', $xml), $result->context['xmlSha256']);
+        self::assertSame([[
+            'invoiceId' => 10,
+            'remoteId' => '99',
+            'type' => 'invoice',
+            'number' => 'RE-10',
+            'isEInvoice' => true,
+            'xmlSha256' => hash('sha256', $xml),
+        ]], $mappings);
+        self::assertSame([
+            'invoice_write_requested',
+            'invoice_created',
+            'invoice_xml_verified',
+            'mapping_persisted',
+        ], $checkpoints);
+        self::assertSame(['POST', 'GET', 'GET', 'GET'], $this->requestMethods($history));
+
+        $payload = json_decode(
+            (string) $history[0]['request']->getBody(),
+            true,
+            512,
+            JSON_THROW_ON_ERROR,
+        );
+        self::assertTrue($payload['invoice']['propertyIsEInvoice']);
+        self::assertSame(9, $payload['invoice']['paymentMethod']['id']);
+        self::assertSame('Musterstr. 1', $payload['invoice']['addressStreet']);
+        self::assertSame('12345', $payload['invoice']['addressZip']);
+        self::assertSame('Berlin', $payload['invoice']['addressCity']);
+        self::assertSame(1, $payload['invoice']['addressCountry']['id']);
+        self::assertFalse($payload['takeDefaultAddress']);
+    }
+
+    public function testChangedNativeXmlNeverReplacesTheFrozenRecoveryHash(): void
+    {
+        $history = [];
+        $oldXml = $this->zugferdXml();
+        $newXml = str_replace(
+            '</rsm:CrossIndustryInvoice>',
+            '<!-- changed --></rsm:CrossIndustryInvoice>',
+            $oldXml,
+        );
+        $exporter = new InvoiceExporter(
+            $this->client([
+                new Response(201, [], '{"objects":{"invoice":{"id":"99"}}}'),
+                $this->eInvoiceResponse(100),
+                $this->positionResponse(),
+                $this->xmlResponse($newXml),
+            ], $history),
+            static fn (): null => null,
+            static fn (): bool => true,
+            '7',
+            '8',
+        );
+
+        $result = $exporter->export(
+            $this->invoice(),
+            '42',
+            $this->taxDecision(),
+            'DE',
+            $this->target(DocumentTargetResolver::AUTHORITY_SEVDESK),
+            eInvoiceContext: $this->eInvoiceContext(hash('sha256', $oldXml)),
+        );
+
+        self::assertSame(ExportResult::AMBIGUOUS, $result->status);
+        self::assertSame('invoice_xml_verification_hash_mismatch', $result->code);
+        self::assertSame(hash('sha256', $oldXml), $result->context['xmlSha256']);
+        self::assertSame(hash('sha256', $newXml), $result->context['observedXmlSha256']);
+    }
+
+    public function testZugferdDeliverySuppressesLooseXmlAttachment(): void
+    {
+        $history = [];
+        $xml = $this->zugferdXml();
+        $hash = hash('sha256', $xml);
+        $exporter = new InvoiceExporter(
+            $this->client([
+                $this->eInvoiceResponse(100),
+                $this->positionResponse(),
+                $this->xmlResponse($xml),
+                new Response(201, [], '{"objects":{"id":"501","objectName":"InvoiceLog"}}'),
+                $this->eInvoiceResponse(200, [
+                    'sendType' => 'VM',
+                    'sendDate' => '2026-07-18T14:35:12+02:00',
+                ]),
+                $this->positionResponse(),
+                $this->xmlResponse($xml),
+            ], $history),
+            static fn (): string => '99',
+            static fn (): bool => true,
+            '7',
+            '8',
+        );
+
+        $result = $exporter->deliverViaSevdesk(
+            $this->invoice(),
+            '99',
+            $this->taxDecision(),
+            '42',
+            'DE',
+            'billing@example.test',
+            'Rechnung RE-10',
+            'Ihre Rechnung ist angehängt.',
+            eInvoiceContext: $this->eInvoiceContext($hash),
+        );
+
+        self::assertSame(ExportResult::SUCCEEDED, $result->status);
+        $payload = json_decode(
+            (string) $history[3]['request']->getBody(),
+            true,
+            512,
+            JSON_THROW_ON_ERROR,
+        );
+        self::assertFalse($payload['sendXml']);
+        self::assertSame(['GET', 'GET', 'GET', 'POST', 'GET', 'GET', 'GET'], $this->requestMethods($history));
+    }
+
+    public function testZugferdCanBeFinalisedWithSendByForWhmcsTemplateDelivery(): void
+    {
+        $history = [];
+        $xml = $this->zugferdXml();
+        $context = $this->eInvoiceContext(hash('sha256', $xml));
+        $exporter = new InvoiceExporter(
+            $this->client([
+                $this->eInvoiceResponse(100),
+                $this->positionResponse(),
+                $this->xmlResponse($xml),
+                new Response(200, [], '{"objects":{"id":"501","objectName":"InvoiceLog"}}'),
+                $this->eInvoiceResponse(200),
+                $this->positionResponse(),
+                $this->xmlResponse($xml),
+            ], $history),
+            static fn (): string => '99',
+            static fn (): bool => true,
+            '7',
+            '8',
+        );
+
+        $result = $exporter->openForWhmcsAuthority(
+            $this->invoice(),
+            '99',
+            $this->taxDecision(),
+            '42',
+            'DE',
+            eInvoiceContext: $context,
+        );
+
+        self::assertSame(ExportResult::SUCCEEDED, $result->status);
+        self::assertTrue($result->context['isEInvoice']);
+        self::assertSame(['GET', 'GET', 'GET', 'PUT', 'GET', 'GET', 'GET'], $this->requestMethods($history));
+    }
+
+    public function testZugferdCannotUseRule19AsSilentFallback(): void
+    {
+        $history = [];
+        $invoice = new InvoiceSnapshot(
+            10,
+            20,
+            'RE-10',
+            new DateTimeImmutable('2026-07-01'),
+            'EUR',
+            '120.00',
+            '0',
+            [new LineItem('Digital service', '120.00', '20', false)],
+        );
+        $tax = TaxDecision::allowInvoiceRule19('oss', 'confirmed', ['20']);
+        $target = DocumentTargetDecision::select(
+            DocumentTargetDecision::DOCUMENT_INVOICE,
+            DocumentTargetResolver::AUTHORITY_SEVDESK,
+            DocumentTargetResolver::MODE_INVOICE_ONLY,
+            DocumentTargetResolver::OSS_RULE_19_CONFIRMED,
+            '19',
+            'selected',
+            'selected',
+        );
+        $exporter = new InvoiceExporter(
+            $this->client([], $history),
+            static fn (): null => null,
+            static fn (): bool => true,
+            '7',
+            '8',
+        );
+
+        $result = $exporter->export($invoice, '42', $tax, 'DE', $target, eInvoiceContext: $this->eInvoiceContext());
+
+        self::assertSame(ExportResult::FAILED, $result->status);
+        self::assertSame('e_invoice_tax_rule_not_supported', $result->code);
+        self::assertSame([], $history);
+    }
+
     private function invoice(): InvoiceSnapshot
     {
         return new InvoiceSnapshot(
@@ -864,6 +1170,51 @@ final class InvoiceExporterTest extends TestCase
             $authority,
             DocumentTargetResolver::OSS_BLOCKED,
         ))->resolve($this->taxDecision(), true, true);
+    }
+
+    private function eInvoiceContext(?string $xmlSha256 = null): EInvoiceContext
+    {
+        $hash = EInvoiceContext::addressHash('Example GmbH', 'Musterstr. 1', '12345', 'Berlin', 'DE');
+
+        return EInvoiceContext::zugferd(
+            '42',
+            '9',
+            '8',
+            '1',
+            $hash,
+            'Example GmbH',
+            'Musterstr. 1',
+            '12345',
+            'Berlin',
+            'DE',
+            $xmlSha256,
+        );
+    }
+
+    /** @param array<string, mixed> $overrides */
+    private function eInvoiceResponse(int $status, array $overrides = []): Response
+    {
+        return $this->invoiceResponse($status, array_merge([
+            'propertyIsEInvoice' => true,
+            'paymentMethod' => ['id' => '9', 'objectName' => 'PaymentMethod'],
+            'addressName' => 'Example GmbH',
+            'addressStreet' => 'Musterstr. 1',
+            'addressZip' => '12345',
+            'addressCity' => 'Berlin',
+            'addressCountry' => ['id' => '1', 'objectName' => 'StaticCountry', 'code' => 'DE'],
+        ], $overrides));
+    }
+
+    private function xmlResponse(string $xml): Response
+    {
+        return new Response(200, [], json_encode(['objects' => $xml], JSON_THROW_ON_ERROR));
+    }
+
+    private function zugferdXml(): string
+    {
+        return '<?xml version="1.0" encoding="UTF-8"?>'
+            . '<rsm:CrossIndustryInvoice xmlns:rsm="urn:un:unece:uncefact:data:standard:'
+            . 'CrossIndustryInvoice:100"></rsm:CrossIndustryInvoice>';
     }
 
     /** @param array<string, mixed> $overrides */

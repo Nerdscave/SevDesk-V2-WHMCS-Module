@@ -20,6 +20,44 @@ use WHMCS\Module\Addon\SevDesk\Service\VoucherExporter;
 
 final class VoucherExporterTest extends TestCase
 {
+    public function testOneCentWhmcsRoundingDifferenceRemainsAllowedForVoucher(): void
+    {
+        $history = [];
+        $client = $this->client([
+            new Response(201, [], '{"objects":{"filename":"temporary.pdf"}}'),
+            new Response(201, [], '{"objects":{"voucher":{"id":99,"sumGross":"119.00"}}}'),
+        ], $history);
+        $mappings = [];
+        $exporter = new VoucherExporter(
+            $client,
+            static fn (int $invoiceId): mixed => $mappings[$invoiceId] ?? null,
+            static function (int $invoiceId, string $remoteId) use (&$mappings): void {
+                $mappings[$invoiceId] = $remoteId;
+            },
+        );
+        $invoice = new InvoiceSnapshot(
+            10,
+            20,
+            'RE-10',
+            new DateTimeImmutable('2026-07-01'),
+            'EUR',
+            '119.01',
+            '0',
+            [new LineItem('Hosting', '100.00', '19', true)],
+        );
+
+        $result = $exporter->export(
+            $invoice,
+            '42',
+            $this->taxDecision(),
+            "%PDF-1.7\nfake document",
+        );
+
+        self::assertSame(ExportResult::SUCCEEDED, $result->status);
+        self::assertSame([10 => '99'], $mappings);
+        self::assertCount(2, $history);
+    }
+
     public function testSuccessfulExportWritesMappingAfterRemoteTotalValidation(): void
     {
         $history = [];

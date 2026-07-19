@@ -10,6 +10,7 @@ use WHMCS\Module\Addon\SevDesk\Api\ApiException;
 use WHMCS\Module\Addon\SevDesk\Api\SevdeskClient;
 use WHMCS\Module\Addon\SevDesk\Domain\Decimal;
 use WHMCS\Module\Addon\SevDesk\Domain\DocumentTargetDecision;
+use WHMCS\Module\Addon\SevDesk\Domain\EInvoiceContext;
 use WHMCS\Module\Addon\SevDesk\Domain\ExportResult;
 use WHMCS\Module\Addon\SevDesk\Domain\InvoiceSnapshot;
 use WHMCS\Module\Addon\SevDesk\Domain\LineItem;
@@ -24,16 +25,19 @@ final class InvoiceExporter
     /** @var Closure(int): (int|string|null) */
     private readonly Closure $findMapping;
 
-    /** @var Closure(int, string, string, string): (bool|null) */
+    /** @var Closure(int, string, string, string, bool=, string|null=): (bool|null) */
     private readonly Closure $persistMapping;
 
     private readonly InvoiceRemoteVerifier $remoteVerifier;
+
+    private readonly InvoiceXml $invoiceXml;
 
     /**
      * Collaborator signatures:
      *
      * - $findMapping(int $whmcsInvoiceId): int|string|null
-     * - $persistMapping(int $whmcsInvoiceId, string $remoteId, string $type, string $number): bool|null
+     * - $persistMapping(int $whmcsInvoiceId, string $remoteId, string $type,
+     *   string $number, bool $isEInvoice = false, ?string $xmlSha256 = null): bool|null
      */
     public function __construct(
         private readonly SevdeskClient $client,
@@ -45,6 +49,7 @@ final class InvoiceExporter
         $this->findMapping = Closure::fromCallable($findMapping);
         $this->persistMapping = Closure::fromCallable($persistMapping);
         $this->remoteVerifier = new InvoiceRemoteVerifier($sevUserId, $unityId);
+        $this->invoiceXml = new InvoiceXml($client);
     }
 
     public function withReferences(string $sevUserId, string $unityId): self
@@ -69,6 +74,7 @@ final class InvoiceExporter
         string $deliveryCountryCode,
         DocumentTargetDecision $target,
         ?callable $checkpoint = null,
+        ?EInvoiceContext $eInvoiceContext = null,
     ): ExportResult {
         $checkpoint = $checkpoint === null ? null : Closure::fromCallable($checkpoint);
 
@@ -91,17 +97,21 @@ final class InvoiceExporter
             $taxDecision,
             $deliveryCountryCode,
             $target,
+            $eInvoiceContext,
         );
         if ($preflight !== null) {
             return $preflight;
         }
 
         if (
-            !$this->emitCheckpoint($checkpoint, 'invoice_write_requested', [
-            'invoiceId' => $invoice->invoiceId,
-            'documentType' => DocumentTargetDecision::DOCUMENT_INVOICE,
-            'documentNumber' => $invoice->invoiceNumber,
-            ])
+            !$this->emitCheckpoint($checkpoint, 'invoice_write_requested', array_merge(
+                [
+                    'invoiceId' => $invoice->invoiceId,
+                    'documentType' => DocumentTargetDecision::DOCUMENT_INVOICE,
+                    'documentNumber' => $invoice->invoiceNumber,
+                ],
+                $eInvoiceContext?->frozenContext() ?? ['isEInvoice' => false],
+            ))
         ) {
             return ExportResult::failed(
                 $invoice->invoiceId,
@@ -119,11 +129,29 @@ final class InvoiceExporter
                     $taxDecision,
                     $deliveryCountryCode,
                     $target,
+                    $eInvoiceContext,
                 ),
                 true,
                 [201],
             );
         } catch (ApiException $exception) {
+            if (
+                $eInvoiceContext !== null
+                && $exception->httpStatus === 422
+                && !$exception->outcomeUnknown
+            ) {
+                $context = $exception->context();
+                $context['definiteWriteRejected'] = true;
+
+                return ExportResult::failed(
+                    $invoice->invoiceId,
+                    'e_invoice_required_data_rejected',
+                    'sevdesk rejected required native E-Invoice data. Check the confirmed issuer, recipient, '
+                        . 'payment method and address prerequisites; no normal-Invoice fallback was attempted.',
+                    $context,
+                );
+            }
+
             return $this->apiFailure($invoice->invoiceId, $exception, 'invoice_create_failed');
         }
 
@@ -138,12 +166,15 @@ final class InvoiceExporter
         }
 
         if (
-            !$this->emitCheckpoint($checkpoint, 'invoice_created', [
-            'invoiceId' => $invoice->invoiceId,
-            'remoteId' => $remoteId,
-            'documentType' => DocumentTargetDecision::DOCUMENT_INVOICE,
-            'documentNumber' => $invoice->invoiceNumber,
-            ])
+            !$this->emitCheckpoint($checkpoint, 'invoice_created', array_merge(
+                [
+                    'invoiceId' => $invoice->invoiceId,
+                    'remoteId' => $remoteId,
+                    'documentType' => DocumentTargetDecision::DOCUMENT_INVOICE,
+                    'documentNumber' => $invoice->invoiceNumber,
+                ],
+                $eInvoiceContext?->frozenContext() ?? ['isEInvoice' => false],
+            ))
         ) {
             return ExportResult::ambiguous(
                 $invoice->invoiceId,
@@ -175,6 +206,7 @@ final class InvoiceExporter
             100,
             $remoteId,
             $deliveryCountryCode,
+            $eInvoiceContext,
         );
         if ($verification !== null) {
             return ExportResult::ambiguous(
@@ -208,12 +240,43 @@ final class InvoiceExporter
             );
         }
 
+        $xmlSha256 = $this->verifiedXmlHash(
+            $invoice,
+            $remoteId,
+            $eInvoiceContext,
+            'invoice_xml_verification',
+        );
+        if ($xmlSha256 instanceof ExportResult) {
+            return $xmlSha256;
+        }
+        if (
+            $eInvoiceContext !== null
+            && !$this->emitCheckpoint($checkpoint, 'invoice_xml_verified', array_merge(
+                [
+                    'invoiceId' => $invoice->invoiceId,
+                    'remoteId' => $remoteId,
+                    'documentType' => DocumentTargetDecision::DOCUMENT_INVOICE,
+                ],
+                $eInvoiceContext->frozenContext($xmlSha256),
+            ))
+        ) {
+            return ExportResult::ambiguous(
+                $invoice->invoiceId,
+                'checkpoint_persist_failed_after_xml',
+                'The E-Invoice XML was verified, but its hash checkpoint could not be stored.',
+                $remoteId,
+                $eInvoiceContext->frozenContext($xmlSha256),
+            );
+        }
+
         try {
             $persisted = ($this->persistMapping)(
                 $invoice->invoiceId,
                 $remoteId,
                 DocumentTargetDecision::DOCUMENT_INVOICE,
                 $invoice->invoiceNumber,
+                $eInvoiceContext !== null,
+                $xmlSha256,
             );
             if ($persisted === false) {
                 throw new \RuntimeException('Mapping callback returned false.');
@@ -228,12 +291,18 @@ final class InvoiceExporter
         }
 
         if (
-            !$this->emitCheckpoint($checkpoint, 'mapping_persisted', [
-            'invoiceId' => $invoice->invoiceId,
-            'remoteId' => $remoteId,
-            'documentType' => DocumentTargetDecision::DOCUMENT_INVOICE,
-            'documentNumber' => $invoice->invoiceNumber,
-            ])
+            !$this->emitCheckpoint($checkpoint, 'mapping_persisted', array_merge(
+                [
+                    'invoiceId' => $invoice->invoiceId,
+                    'remoteId' => $remoteId,
+                    'documentType' => DocumentTargetDecision::DOCUMENT_INVOICE,
+                    'documentNumber' => $invoice->invoiceNumber,
+                ],
+                $eInvoiceContext?->frozenContext($xmlSha256) ?? [
+                    'isEInvoice' => false,
+                    'xmlSha256' => null,
+                ],
+            ))
         ) {
             return ExportResult::ambiguous(
                 $invoice->invoiceId,
@@ -251,17 +320,23 @@ final class InvoiceExporter
                 $sevdeskContactId,
                 $deliveryCountryCode,
                 $checkpoint,
+                $eInvoiceContext,
             );
         }
 
         // The job handler immediately continues with the explicitly configured
         // sevdesk delivery path. This core only promises a verified mapped draft.
-        return ExportResult::succeeded($invoice->invoiceId, $remoteId);
+        return ExportResult::succeeded(
+            $invoice->invoiceId,
+            $remoteId,
+            context: $eInvoiceContext?->frozenContext($xmlSha256) ?? ['isEInvoice' => false],
+        );
     }
 
     /**
-     * Resume the non-idempotent open step without ever creating another Invoice.
-     * This method is also used after a known, safely retryable sendBy failure.
+     * Resume the non-idempotent sendBy/open step without creating another Invoice.
+     * The historic method name is retained for callers; sevdesk-authority flows
+     * also use this step before WHMCS-template delivery or a mail-free backfill.
      */
     public function openForWhmcsAuthority(
         InvoiceSnapshot $invoice,
@@ -270,6 +345,7 @@ final class InvoiceExporter
         string $sevdeskContactId,
         string $deliveryCountryCode,
         ?callable $checkpoint = null,
+        ?EInvoiceContext $eInvoiceContext = null,
     ): ExportResult {
         $checkpoint = $checkpoint === null || $checkpoint instanceof Closure
             ? $checkpoint
@@ -289,17 +365,21 @@ final class InvoiceExporter
             $sevdeskContactId,
             $deliveryCountryCode,
             'invoice_open_prewrite',
+            $eInvoiceContext,
         );
         if ($draftVerification !== null) {
             return $draftVerification;
         }
 
         if (
-            !$this->emitCheckpoint($checkpoint, 'invoice_open_write_requested', [
-            'invoiceId' => $invoice->invoiceId,
-            'remoteId' => $remoteId,
-            'documentType' => DocumentTargetDecision::DOCUMENT_INVOICE,
-            ])
+            !$this->emitCheckpoint($checkpoint, 'invoice_open_write_requested', array_merge(
+                [
+                    'invoiceId' => $invoice->invoiceId,
+                    'remoteId' => $remoteId,
+                    'documentType' => DocumentTargetDecision::DOCUMENT_INVOICE,
+                ],
+                $eInvoiceContext?->frozenContext() ?? ['isEInvoice' => false],
+            ))
         ) {
             return ExportResult::failed(
                 $invoice->invoiceId,
@@ -349,6 +429,7 @@ final class InvoiceExporter
             200,
             $remoteId,
             $deliveryCountryCode,
+            $eInvoiceContext,
         );
         if ($verification !== null) {
             return ExportResult::ambiguous(
@@ -382,13 +463,26 @@ final class InvoiceExporter
             );
         }
 
+        $xmlSha256 = $this->verifiedXmlHash(
+            $invoice,
+            $remoteId,
+            $eInvoiceContext,
+            'invoice_open_xml_verification',
+        );
+        if ($xmlSha256 instanceof ExportResult) {
+            return $xmlSha256;
+        }
+
         if (
-            !$this->emitCheckpoint($checkpoint, 'invoice_opened', [
-            'invoiceId' => $invoice->invoiceId,
-            'remoteId' => $remoteId,
-            'documentType' => DocumentTargetDecision::DOCUMENT_INVOICE,
-            'documentNumber' => $invoice->invoiceNumber,
-            ])
+            !$this->emitCheckpoint($checkpoint, 'invoice_opened', array_merge(
+                [
+                    'invoiceId' => $invoice->invoiceId,
+                    'remoteId' => $remoteId,
+                    'documentType' => DocumentTargetDecision::DOCUMENT_INVOICE,
+                    'documentNumber' => $invoice->invoiceNumber,
+                ],
+                $eInvoiceContext?->frozenContext($xmlSha256) ?? ['isEInvoice' => false],
+            ))
         ) {
             return ExportResult::ambiguous(
                 $invoice->invoiceId,
@@ -398,7 +492,11 @@ final class InvoiceExporter
             );
         }
 
-        return ExportResult::succeeded($invoice->invoiceId, $remoteId);
+        return ExportResult::succeeded(
+            $invoice->invoiceId,
+            $remoteId,
+            context: $eInvoiceContext?->frozenContext($xmlSha256) ?? ['isEInvoice' => false],
+        );
     }
 
     /**
@@ -412,6 +510,7 @@ final class InvoiceExporter
         string $sevdeskContactId,
         string $deliveryCountryCode,
         ?callable $checkpoint = null,
+        ?EInvoiceContext $eInvoiceContext = null,
     ): ExportResult {
         $checkpoint = $checkpoint === null || $checkpoint instanceof Closure
             ? $checkpoint
@@ -426,6 +525,7 @@ final class InvoiceExporter
             expectedSendType: 'VPDF',
             requireSendDate: false,
             codePrefix: 'invoice_open_reconciliation',
+            eInvoiceContext: $eInvoiceContext,
         );
         if ($verified !== null) {
             return $verified;
@@ -447,7 +547,11 @@ final class InvoiceExporter
             );
         }
 
-        return ExportResult::succeeded($invoice->invoiceId, $remoteId);
+        return ExportResult::succeeded(
+            $invoice->invoiceId,
+            $remoteId,
+            context: $eInvoiceContext?->frozenContext() ?? ['isEInvoice' => false],
+        );
     }
 
     /** Send a draft Invoice through sevdesk and prove the final remote state. */
@@ -461,6 +565,7 @@ final class InvoiceExporter
         string $subject,
         string $text,
         ?callable $checkpoint = null,
+        ?EInvoiceContext $eInvoiceContext = null,
     ): ExportResult {
         $checkpoint = $checkpoint === null || $checkpoint instanceof Closure
             ? $checkpoint
@@ -489,17 +594,21 @@ final class InvoiceExporter
             $sevdeskContactId,
             $deliveryCountryCode,
             'invoice_delivery_prewrite',
+            $eInvoiceContext,
         );
         if ($draftVerification !== null) {
             return $draftVerification;
         }
 
         if (
-            !$this->emitCheckpoint($checkpoint, 'invoice_delivery_write_requested', [
-                'invoiceId' => $invoice->invoiceId,
-                'remoteId' => $remoteId,
-                'documentType' => DocumentTargetDecision::DOCUMENT_INVOICE,
-            ])
+            !$this->emitCheckpoint($checkpoint, 'invoice_delivery_write_requested', array_merge(
+                [
+                    'invoiceId' => $invoice->invoiceId,
+                    'remoteId' => $remoteId,
+                    'documentType' => DocumentTargetDecision::DOCUMENT_INVOICE,
+                ],
+                $eInvoiceContext?->frozenContext() ?? ['isEInvoice' => false],
+            ))
         ) {
             return ExportResult::failed(
                 $invoice->invoiceId,
@@ -509,14 +618,20 @@ final class InvoiceExporter
         }
 
         try {
+            $payload = [
+                'toEmail' => $toEmail,
+                'subject' => $subject,
+                'text' => $text,
+                'copy' => false,
+            ];
+            if ($eInvoiceContext !== null) {
+                // A ZUGFeRD PDF already embeds the authoritative XML. Sending a
+                // second loose XML file is intentionally disabled.
+                $payload['sendXml'] = false;
+            }
             $this->client->post(
                 '/Invoice/' . rawurlencode($remoteId) . '/sendViaEmail',
-                [
-                    'toEmail' => $toEmail,
-                    'subject' => $subject,
-                    'text' => $text,
-                    'copy' => false,
-                ],
+                $payload,
                 true,
                 [201],
             );
@@ -541,6 +656,7 @@ final class InvoiceExporter
             $sevdeskContactId,
             $deliveryCountryCode,
             $checkpoint,
+            $eInvoiceContext,
         );
     }
 
@@ -552,6 +668,7 @@ final class InvoiceExporter
         string $sevdeskContactId,
         string $deliveryCountryCode,
         ?callable $checkpoint = null,
+        ?EInvoiceContext $eInvoiceContext = null,
     ): ExportResult {
         $checkpoint = $checkpoint === null || $checkpoint instanceof Closure
             ? $checkpoint
@@ -564,6 +681,7 @@ final class InvoiceExporter
             $sevdeskContactId,
             $deliveryCountryCode,
             $checkpoint,
+            $eInvoiceContext,
         );
     }
 
@@ -574,6 +692,7 @@ final class InvoiceExporter
         string $sevdeskContactId,
         string $deliveryCountryCode,
         ?Closure $checkpoint,
+        ?EInvoiceContext $eInvoiceContext,
     ): ExportResult {
         $verified = $this->readAndVerifyFinalState(
             $invoice,
@@ -584,18 +703,22 @@ final class InvoiceExporter
             expectedSendType: 'VM',
             requireSendDate: true,
             codePrefix: 'invoice_delivery_reconciliation',
+            eInvoiceContext: $eInvoiceContext,
         );
         if ($verified !== null) {
             return $verified;
         }
 
         if (
-            !$this->emitCheckpoint($checkpoint, 'invoice_delivered', [
-                'invoiceId' => $invoice->invoiceId,
-                'remoteId' => $remoteId,
-                'documentType' => DocumentTargetDecision::DOCUMENT_INVOICE,
-                'documentNumber' => $invoice->invoiceNumber,
-            ])
+            !$this->emitCheckpoint($checkpoint, 'invoice_delivered', array_merge(
+                [
+                    'invoiceId' => $invoice->invoiceId,
+                    'remoteId' => $remoteId,
+                    'documentType' => DocumentTargetDecision::DOCUMENT_INVOICE,
+                    'documentNumber' => $invoice->invoiceNumber,
+                ],
+                $eInvoiceContext?->frozenContext() ?? ['isEInvoice' => false],
+            ))
         ) {
             return ExportResult::ambiguous(
                 $invoice->invoiceId,
@@ -605,7 +728,11 @@ final class InvoiceExporter
             );
         }
 
-        return ExportResult::succeeded($invoice->invoiceId, $remoteId);
+        return ExportResult::succeeded(
+            $invoice->invoiceId,
+            $remoteId,
+            context: $eInvoiceContext?->frozenContext() ?? ['isEInvoice' => false],
+        );
     }
 
     private function verifyDraftBeforeWrite(
@@ -615,6 +742,7 @@ final class InvoiceExporter
         string $sevdeskContactId,
         string $deliveryCountryCode,
         string $codePrefix,
+        ?EInvoiceContext $eInvoiceContext = null,
     ): ?ExportResult {
         try {
             $remote = self::oneInvoice($this->client->get('/Invoice/' . rawurlencode($remoteId)));
@@ -641,6 +769,7 @@ final class InvoiceExporter
             100,
             $remoteId,
             $deliveryCountryCode,
+            $eInvoiceContext,
         );
         if ($verification !== null) {
             return ExportResult::ambiguous(
@@ -661,6 +790,11 @@ final class InvoiceExporter
             );
         }
 
+        $xmlSha256 = $this->verifiedXmlHash($invoice, $remoteId, $eInvoiceContext, $codePrefix . '_xml');
+        if ($xmlSha256 instanceof ExportResult) {
+            return $xmlSha256;
+        }
+
         return null;
     }
 
@@ -673,6 +807,7 @@ final class InvoiceExporter
         string $expectedSendType,
         bool $requireSendDate,
         string $codePrefix,
+        ?EInvoiceContext $eInvoiceContext = null,
     ): ?ExportResult {
         if (self::numericId($remoteId) === null) {
             return ExportResult::ambiguous(
@@ -707,6 +842,7 @@ final class InvoiceExporter
             200,
             $remoteId,
             $deliveryCountryCode,
+            $eInvoiceContext,
         );
         if ($verification !== null) {
             return ExportResult::ambiguous(
@@ -754,6 +890,11 @@ final class InvoiceExporter
             );
         }
 
+        $xmlSha256 = $this->verifiedXmlHash($invoice, $remoteId, $eInvoiceContext, $codePrefix . '_xml');
+        if ($xmlSha256 instanceof ExportResult) {
+            return $xmlSha256;
+        }
+
         return null;
     }
 
@@ -790,6 +931,7 @@ final class InvoiceExporter
         TaxDecision $taxDecision,
         string $deliveryCountryCode,
         DocumentTargetDecision $target,
+        ?EInvoiceContext $eInvoiceContext = null,
     ): array {
         $preflight = $this->preflight(
             $invoice,
@@ -797,6 +939,7 @@ final class InvoiceExporter
             $taxDecision,
             $deliveryCountryCode,
             $target,
+            $eInvoiceContext,
         );
         if ($preflight !== null) {
             throw new \InvalidArgumentException($preflight->code . ': ' . $preflight->message);
@@ -822,8 +965,7 @@ final class InvoiceExporter
             ];
         }
 
-        return [
-            'invoice' => [
+        $invoicePayload = [
                 'objectName' => 'Invoice',
                 'mapAll' => true,
                 'invoiceNumber' => $invoice->invoiceNumber,
@@ -856,14 +998,20 @@ final class InvoiceExporter
                 'customerInternalNote' => self::marker($invoice->invoiceId),
                 'deliveryAddressCountry' => strtoupper($deliveryCountryCode),
                 'propertyIsEInvoice' => false,
-            ],
+        ];
+        if ($eInvoiceContext !== null) {
+            $invoicePayload = array_merge($invoicePayload, $eInvoiceContext->invoicePayloadFields());
+        }
+
+        return [
+            'invoice' => $invoicePayload,
             'invoicePosSave' => $positions,
             // sevdesk documents that these four members must be present and in
             // this order even when a new Invoice has nothing to delete.
             'invoicePosDelete' => null,
             'discountSave' => null,
             'discountDelete' => null,
-            'takeDefaultAddress' => true,
+            'takeDefaultAddress' => $eInvoiceContext === null,
         ];
     }
 
@@ -883,6 +1031,7 @@ final class InvoiceExporter
         TaxDecision $taxDecision,
         string $deliveryCountryCode,
         DocumentTargetDecision $target,
+        ?EInvoiceContext $eInvoiceContext = null,
     ): ?ExportResult {
         if (!$target->allowed || $target->documentType !== DocumentTargetDecision::DOCUMENT_INVOICE) {
             return ExportResult::failed(
@@ -974,6 +1123,36 @@ final class InvoiceExporter
                 'The Invoice tax rule is unsupported or differs from the frozen document target.',
             );
         }
+        if ($eInvoiceContext !== null) {
+            if (
+                $target->exportMode !== DocumentTargetResolver::MODE_INVOICE_ONLY
+                || $target->documentAuthority !== DocumentTargetResolver::AUTHORITY_SEVDESK
+            ) {
+                return ExportResult::failed(
+                    $invoice->invoiceId,
+                    'e_invoice_requires_invoice_only_sevdesk_authority',
+                    'ZUGFeRD requires invoice_only with sevdesk document authority.',
+                );
+            }
+            if ($taxDecision->taxRuleId !== '1') {
+                return ExportResult::failed(
+                    $invoice->invoiceId,
+                    'e_invoice_tax_rule_not_supported',
+                    'ZUGFeRD v1 only supports domestic Tax Rule 1.',
+                );
+            }
+            if (
+                $deliveryCountryCode !== 'DE'
+                || $sevdeskContactId !== $eInvoiceContext->contactId
+                || $this->unityId !== $eInvoiceContext->unityId
+            ) {
+                return ExportResult::failed(
+                    $invoice->invoiceId,
+                    'e_invoice_frozen_context_mismatch',
+                    'The current Invoice references differ from the frozen E-Invoice decision.',
+                );
+            }
+        }
         if ($taxDecision->taxRuleId === '19') {
             if ($target->ossProfile !== DocumentTargetResolver::OSS_RULE_19_CONFIRMED) {
                 return ExportResult::failed(
@@ -1005,6 +1184,7 @@ final class InvoiceExporter
         int $expectedStatus,
         ?string $expectedRemoteId = null,
         ?string $deliveryCountryCode = null,
+        ?EInvoiceContext $eInvoiceContext = null,
     ): ?string {
         $mismatch = $this->remoteVerifier->invoiceMismatch(
             $remote,
@@ -1014,9 +1194,62 @@ final class InvoiceExporter
             $expectedStatus,
             $expectedRemoteId,
             $deliveryCountryCode,
+            $eInvoiceContext,
         );
 
         return $mismatch === null ? null : 'remote_' . $mismatch;
+    }
+
+    /** @return ExportResult|string|null */
+    private function verifiedXmlHash(
+        InvoiceSnapshot $invoice,
+        string $remoteId,
+        ?EInvoiceContext $eInvoiceContext,
+        string $codePrefix,
+    ): ExportResult|string|null {
+        if ($eInvoiceContext === null) {
+            return null;
+        }
+
+        try {
+            $xml = $this->invoiceXml->fetch($remoteId);
+        } catch (ApiException $exception) {
+            return ExportResult::ambiguous(
+                $invoice->invoiceId,
+                $exception->isAuthenticationFailure()
+                    ? 'api_authentication_failed'
+                    : $codePrefix . '_failed',
+                'The native sevdesk E-Invoice XML could not be verified safely.',
+                $remoteId,
+                $exception->context(),
+            );
+        } catch (Throwable) {
+            return ExportResult::ambiguous(
+                $invoice->invoiceId,
+                $codePrefix . '_invalid',
+                'sevdesk did not return a structurally valid native E-Invoice XML.',
+                $remoteId,
+            );
+        }
+
+        $sha256 = $xml['sha256'];
+        if (
+            $eInvoiceContext->expectedXmlSha256 !== null
+            && !hash_equals($eInvoiceContext->expectedXmlSha256, $sha256)
+        ) {
+            return ExportResult::ambiguous(
+                $invoice->invoiceId,
+                $codePrefix . '_hash_mismatch',
+                'The native E-Invoice XML differs from the previously verified document.',
+                $remoteId,
+                array_merge(
+                    $eInvoiceContext->frozenContext(),
+                    ['observedXmlSha256' => $sha256],
+                ),
+            );
+        }
+
+        return $sha256;
     }
 
     /** @param array<array-key, mixed> $positions */

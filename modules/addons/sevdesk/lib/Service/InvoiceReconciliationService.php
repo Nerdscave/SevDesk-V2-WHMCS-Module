@@ -5,10 +5,13 @@ declare(strict_types=1);
 namespace WHMCS\Module\Addon\SevDesk\Service;
 
 use Closure;
+use DateTimeImmutable;
 use Throwable;
 use WHMCS\Module\Addon\SevDesk\Api\ApiException;
 use WHMCS\Module\Addon\SevDesk\Api\SevdeskClient;
 use WHMCS\Module\Addon\SevDesk\Domain\DocumentTargetDecision;
+use WHMCS\Module\Addon\SevDesk\Domain\Decimal;
+use WHMCS\Module\Addon\SevDesk\Domain\EInvoiceContext;
 use WHMCS\Module\Addon\SevDesk\Domain\ExportResult;
 use WHMCS\Module\Addon\SevDesk\Domain\InvoiceSnapshot;
 use WHMCS\Module\Addon\SevDesk\Domain\TaxDecision;
@@ -19,10 +22,12 @@ final class InvoiceReconciliationService
     /** @var Closure(int): (int|string|null) */
     private readonly Closure $findMapping;
 
-    /** @var Closure(int, string, string, string): (bool|null) */
+    /** @var Closure(int, string, string, string, bool=, string|null=): (bool|null) */
     private readonly Closure $persistMapping;
 
     private readonly InvoiceRemoteVerifier $remoteVerifier;
+
+    private readonly InvoiceXml $invoiceXml;
 
     public function __construct(
         private readonly SevdeskClient $client,
@@ -34,6 +39,7 @@ final class InvoiceReconciliationService
         $this->findMapping = Closure::fromCallable($findMapping);
         $this->persistMapping = Closure::fromCallable($persistMapping);
         $this->remoteVerifier = new InvoiceRemoteVerifier($sevUserId, $unityId);
+        $this->invoiceXml = new InvoiceXml($client);
     }
 
     public function withReferences(string $sevUserId, string $unityId): self
@@ -51,6 +57,166 @@ final class InvoiceReconciliationService
         );
     }
 
+    /**
+     * Conservative read-only guard for historical backfills.
+     *
+     * Any object returned for the final Invoice number, the same date/contact/
+     * amount tuple, a markerless Voucher candidate using the Invoice number or
+     * the WHMCS Voucher marker blocks creation. The guard does not attempt to
+     * turn a possible duplicate into a local mapping.
+     */
+    public function historicalDuplicateRisk(
+        InvoiceSnapshot $invoice,
+        string $sevdeskContactId,
+        TaxDecision $taxDecision,
+        string $deliveryCountryCode,
+    ): ExportResult {
+        $deliveryCountryCode = strtoupper(trim($deliveryCountryCode));
+        if (
+            self::numericId($sevdeskContactId) === null
+            || !$taxDecision->allowed
+            || $taxDecision->taxRuleId === null
+            || preg_match('/^[A-Z]{2}$/', $deliveryCountryCode) !== 1
+        ) {
+            return ExportResult::failed(
+                $invoice->invoiceId,
+                'historical_duplicate_guard_input_invalid',
+                'The historical duplicate guard requires a frozen valid Invoice context.',
+            );
+        }
+
+        try {
+            $invoiceCandidates = $this->client->get('/Invoice', [
+                'invoiceNumber' => $invoice->invoiceNumber,
+                'limit' => 1000,
+                'offset' => 0,
+            ]);
+            if ($invoiceCandidates !== []) {
+                return ExportResult::ambiguous(
+                    $invoice->invoiceId,
+                    'historical_remote_duplicate_possible',
+                    'A sevdesk Invoice already uses the final WHMCS Invoice number.',
+                    context: [
+                        'invoiceCandidateCount' => self::responseCount($invoiceCandidates),
+                        'contextCandidateCount' => 0,
+                        'voucherCandidateCount' => 0,
+                    ],
+                );
+            }
+
+            $contextCandidates = $this->client->get('/Invoice', [
+                'contact[id]' => $sevdeskContactId,
+                'contact[objectName]' => 'Contact',
+                'startDate' => $invoice->invoiceDate->setTime(0, 0)->getTimestamp(),
+                'endDate' => $invoice->invoiceDate->setTime(23, 59, 59)->getTimestamp(),
+                'limit' => 1000,
+                'offset' => 0,
+            ]);
+            $contextRows = self::normaliseCandidates($contextCandidates);
+            $contextMatches = array_values(array_filter(
+                $contextRows,
+                static fn (array $candidate): bool => self::matchesHistoricalContext(
+                    $candidate,
+                    $invoice,
+                    $sevdeskContactId,
+                ),
+            ));
+            if (count($contextRows) >= 1000 || $contextMatches !== []) {
+                return ExportResult::ambiguous(
+                    $invoice->invoiceId,
+                    'historical_remote_duplicate_possible',
+                    count($contextRows) >= 1000
+                        ? 'The sevdesk Invoice duplicate search reached its safety limit.'
+                        : 'A sevdesk Invoice has the same date, contact and amount as the WHMCS Invoice.',
+                    context: [
+                        'invoiceCandidateCount' => 0,
+                        'contextCandidateCount' => count($contextMatches),
+                        'contextSearchTruncated' => count($contextRows) >= 1000,
+                        'voucherCandidateCount' => 0,
+                    ],
+                );
+            }
+
+            $amountWindow = self::amountWindow($invoice->total);
+            $markerlessVoucherCandidates = $this->client->get('/Voucher', [
+                'descriptionLike' => $invoice->invoiceNumber,
+                'contact[id]' => $sevdeskContactId,
+                'contact[objectName]' => 'Contact',
+                'startDate' => $invoice->invoiceDate->setTime(0, 0)->getTimestamp(),
+                'endDate' => $invoice->invoiceDate->setTime(23, 59, 59)->getTimestamp(),
+                'startAmount' => $amountWindow['lower'],
+                'endAmount' => $amountWindow['upper'],
+                'limit' => 1000,
+                'offset' => 0,
+            ]);
+            if ($markerlessVoucherCandidates !== []) {
+                return ExportResult::ambiguous(
+                    $invoice->invoiceId,
+                    'historical_remote_duplicate_possible',
+                    'A markerless sevdesk Voucher may already represent this WHMCS Invoice.',
+                    context: [
+                        'invoiceCandidateCount' => 0,
+                        'contextCandidateCount' => 0,
+                        'markerlessVoucherCandidateCount' => self::responseCount($markerlessVoucherCandidates),
+                        'voucherCandidateCount' => 0,
+                    ],
+                );
+            }
+
+            $voucherCandidates = $this->client->get('/Voucher', [
+                'descriptionLike' => VoucherExporter::marker($invoice->invoiceId),
+                'limit' => 1000,
+                'offset' => 0,
+            ]);
+        } catch (ApiException $exception) {
+            return ExportResult::failed(
+                $invoice->invoiceId,
+                $exception->isAuthenticationFailure()
+                    ? 'api_authentication_failed'
+                    : 'historical_duplicate_guard_lookup_failed',
+                'The read-only historical duplicate check could not be completed.',
+                $exception->context(),
+            );
+        }
+
+        if ($voucherCandidates !== []) {
+            return ExportResult::ambiguous(
+                $invoice->invoiceId,
+                'historical_remote_duplicate_possible',
+                'A sevdesk Voucher already carries the WHMCS Invoice marker.',
+                context: [
+                    'invoiceCandidateCount' => 0,
+                    'contextCandidateCount' => 0,
+                    'voucherCandidateCount' => self::responseCount($voucherCandidates),
+                ],
+            );
+        }
+
+        return ExportResult::succeeded(
+            $invoice->invoiceId,
+            null,
+            'invoice_duplicate_guard_clear',
+            'No Invoice-number or Voucher-marker collision was found.',
+            [
+                'invoiceCandidateCount' => 0,
+                'contextCandidateCount' => 0,
+                'markerlessVoucherCandidateCount' => 0,
+                'voucherCandidateCount' => 0,
+            ],
+        );
+    }
+
+    /** @return array{lower:string,upper:string} */
+    private static function amountWindow(string $amount): array
+    {
+        $numeric = (float) $amount;
+
+        return [
+            'lower' => number_format(max(0.0, $numeric - 0.005), 3, '.', ''),
+            'upper' => number_format($numeric + 0.005, 3, '.', ''),
+        ];
+    }
+
     public function reconcile(
         InvoiceSnapshot $invoice,
         string $sevdeskContactId,
@@ -58,6 +224,7 @@ final class InvoiceReconciliationService
         string $deliveryCountryCode,
         ?string $knownRemoteId = null,
         ?callable $checkpoint = null,
+        ?EInvoiceContext $eInvoiceContext = null,
     ): ExportResult {
         $checkpoint = $checkpoint === null ? null : Closure::fromCallable($checkpoint);
 
@@ -102,6 +269,21 @@ final class InvoiceReconciliationService
                 $invoice->invoiceId,
                 'invalid_tax_decision',
                 'A valid allowed tax decision is required for Invoice reconciliation.',
+            );
+        }
+        if (
+            $eInvoiceContext !== null
+            && (
+                $taxDecision->taxRuleId !== '1'
+                || $deliveryCountryCode !== 'DE'
+                || $sevdeskContactId !== $eInvoiceContext->contactId
+                || $this->unityId !== $eInvoiceContext->unityId
+            )
+        ) {
+            return ExportResult::failed(
+                $invoice->invoiceId,
+                'e_invoice_frozen_context_mismatch',
+                'The current references differ from the frozen E-Invoice recovery context.',
             );
         }
 
@@ -158,6 +340,7 @@ final class InvoiceReconciliationService
                 $sevdeskContactId,
                 $taxDecision->taxRuleId ?? '',
                 $deliveryCountryCode,
+                $eInvoiceContext,
             ),
         ));
 
@@ -214,12 +397,59 @@ final class InvoiceReconciliationService
             );
         }
 
+        $xmlSha256 = null;
+        if ($eInvoiceContext !== null) {
+            try {
+                $xml = $this->invoiceXml->fetch($remoteId);
+                $xmlSha256 = $xml['sha256'];
+            } catch (ApiException $exception) {
+                return $exception->isAuthenticationFailure()
+                    ? ExportResult::failed(
+                        $invoice->invoiceId,
+                        'api_authentication_failed',
+                        'sevdesk rejected the credentials during read-only E-Invoice XML reconciliation.',
+                        $exception->context(),
+                    )
+                    : ExportResult::ambiguous(
+                        $invoice->invoiceId,
+                        'invoice_reconciliation_xml_lookup_failed',
+                        'The matching E-Invoice was found, but its XML could not be proven by reads.',
+                        $remoteId,
+                        $exception->context(),
+                    );
+            } catch (Throwable) {
+                return ExportResult::ambiguous(
+                    $invoice->invoiceId,
+                    'invoice_reconciliation_xml_invalid',
+                    'The matching Invoice does not expose a structurally valid native E-Invoice XML.',
+                    $remoteId,
+                );
+            }
+            if (
+                $eInvoiceContext->expectedXmlSha256 !== null
+                && !hash_equals($eInvoiceContext->expectedXmlSha256, $xmlSha256)
+            ) {
+                return ExportResult::ambiguous(
+                    $invoice->invoiceId,
+                    'invoice_reconciliation_xml_hash_mismatch',
+                    'The native E-Invoice XML differs from the frozen recovery hash.',
+                    $remoteId,
+                    array_merge(
+                        $eInvoiceContext->frozenContext(),
+                        ['observedXmlSha256' => $xmlSha256],
+                    ),
+                );
+            }
+        }
+
         try {
             $persisted = ($this->persistMapping)(
                 $invoice->invoiceId,
                 $remoteId,
                 DocumentTargetDecision::DOCUMENT_INVOICE,
                 $invoice->invoiceNumber,
+                $eInvoiceContext !== null,
+                $xmlSha256,
             );
             if ($persisted === false) {
                 throw new \RuntimeException('Mapping callback returned false.');
@@ -234,12 +464,18 @@ final class InvoiceReconciliationService
         }
 
         if (
-            !$this->emitCheckpoint($checkpoint, 'mapping_persisted', [
-            'invoiceId' => $invoice->invoiceId,
-            'remoteId' => $remoteId,
-            'documentType' => DocumentTargetDecision::DOCUMENT_INVOICE,
-            'documentNumber' => $invoice->invoiceNumber,
-            ])
+            !$this->emitCheckpoint($checkpoint, 'mapping_persisted', array_merge(
+                [
+                    'invoiceId' => $invoice->invoiceId,
+                    'remoteId' => $remoteId,
+                    'documentType' => DocumentTargetDecision::DOCUMENT_INVOICE,
+                    'documentNumber' => $invoice->invoiceNumber,
+                ],
+                $eInvoiceContext?->frozenContext($xmlSha256) ?? [
+                    'isEInvoice' => false,
+                    'xmlSha256' => null,
+                ],
+            ))
         ) {
             return ExportResult::ambiguous(
                 $invoice->invoiceId,
@@ -249,7 +485,11 @@ final class InvoiceReconciliationService
             );
         }
 
-        return ExportResult::succeeded($invoice->invoiceId, $remoteId);
+        return ExportResult::succeeded(
+            $invoice->invoiceId,
+            $remoteId,
+            context: $eInvoiceContext?->frozenContext($xmlSha256) ?? ['isEInvoice' => false],
+        );
     }
 
     /**
@@ -271,6 +511,59 @@ final class InvoiceReconciliationService
         ));
     }
 
+    /** @param array<array-key, mixed> $response */
+    private static function responseCount(array $response): int
+    {
+        return array_is_list($response) ? count($response) : 1;
+    }
+
+    /** @param array<array-key, mixed> $candidate */
+    private static function matchesHistoricalContext(
+        array $candidate,
+        InvoiceSnapshot $invoice,
+        string $sevdeskContactId,
+    ): bool {
+        $candidate = self::unwrapInvoice($candidate);
+        if (
+            (string) ($candidate['contact']['id'] ?? '') !== $sevdeskContactId
+            || strtoupper(trim((string) ($candidate['currency'] ?? ''))) !== $invoice->currency
+            || !self::sameHistoricalDate($candidate['invoiceDate'] ?? null, $invoice->invoiceDate)
+        ) {
+            return false;
+        }
+
+        $sumGross = $candidate['sumGross'] ?? null;
+        if (!is_string($sumGross) && !is_int($sumGross) && !is_float($sumGross)) {
+            return false;
+        }
+
+        try {
+            return Decimal::toMinorUnits((string) $sumGross) === $invoice->totalMinorUnits();
+        } catch (\InvalidArgumentException) {
+            return false;
+        }
+    }
+
+    private static function sameHistoricalDate(mixed $value, DateTimeImmutable $expected): bool
+    {
+        if (!is_string($value) && !is_int($value)) {
+            return false;
+        }
+        $value = trim((string) $value);
+        if ($value === '') {
+            return false;
+        }
+        if (preg_match('/^(\d{2})\.(\d{2})\.(\d{4})$/', $value, $parts) === 1) {
+            return $parts[3] . '-' . $parts[2] . '-' . $parts[1] === $expected->format('Y-m-d');
+        }
+
+        try {
+            return (new DateTimeImmutable($value))->format('Y-m-d') === $expected->format('Y-m-d');
+        } catch (\Exception) {
+            return false;
+        }
+    }
+
     /** @param array<array-key, mixed> $candidate */
     private function matches(
         array $candidate,
@@ -278,6 +571,7 @@ final class InvoiceReconciliationService
         string $sevdeskContactId,
         string $taxRuleId,
         string $deliveryCountryCode,
+        ?EInvoiceContext $eInvoiceContext = null,
     ): bool {
         return $this->remoteVerifier->invoiceMismatch(
             $candidate,
@@ -286,6 +580,7 @@ final class InvoiceReconciliationService
             $taxRuleId,
             100,
             deliveryCountryCode: $deliveryCountryCode,
+            eInvoiceContext: $eInvoiceContext,
         ) === null;
     }
 

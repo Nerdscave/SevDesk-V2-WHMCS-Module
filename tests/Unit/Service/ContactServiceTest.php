@@ -67,6 +67,10 @@ final class ContactServiceTest extends TestCase
         self::assertSame(['contact_write_requested', 'contact_linked'], $checkpoints);
         self::assertSame(1, $addressCategoryCalls);
         self::assertSame(1, $emailKeyCalls);
+        $contactPayload = json_decode((string) $history[1]['request']->getBody(), true);
+        self::assertSame('7', $contactPayload['customerNumber'] ?? null);
+        self::assertSame('7', $contactPayload['buyerReference'] ?? null);
+        self::assertFalse($contactPayload['governmentAgency'] ?? true);
         self::assertSame('/api/v1/ContactAddress', $history[2]['request']->getUri()->getPath());
         self::assertSame('/api/v1/CommunicationWay', $history[3]['request']->getUri()->getPath());
     }
@@ -199,6 +203,42 @@ final class ContactServiceTest extends TestCase
         self::assertSame('contact_conflict', $result->errorCode());
         self::assertSame(2, $result->context()['matchCount']);
         self::assertCount(1, $history);
+    }
+
+    public function testFullCustomerNumberSearchPageBlocksBeforeLinkingOrCreate(): void
+    {
+        $history = [];
+        $objects = [];
+        for ($id = 1; $id <= 1000; ++$id) {
+            $objects[] = ['id' => $id, 'customerNumber' => $id === 1 ? '7' : 'other-' . $id];
+        }
+        $client = $this->client([
+            new Response(200, [], (string) json_encode(['objects' => $objects], JSON_THROW_ON_ERROR)),
+        ], $history);
+        $persistCalls = 0;
+        $service = new ContactService(
+            $client,
+            static function () use (&$persistCalls): bool {
+                ++$persistCalls;
+
+                return true;
+            },
+            static fn (): int => 1,
+            allowCustomerNumberContactCreate: true,
+        );
+
+        $result = $service->resolve($this->contact());
+
+        self::assertTrue($result->isFailure());
+        self::assertSame('contact_search_truncated', $result->errorCode());
+        self::assertSame(1000, $result->context()['pageSize']);
+        self::assertSame(0, $persistCalls);
+        self::assertCount(1, $history);
+        self::assertSame('GET', $history[0]['request']->getMethod());
+        parse_str($history[0]['request']->getUri()->getQuery(), $query);
+        self::assertSame('7', $query['customerNumber'] ?? null);
+        self::assertSame('1000', $query['limit'] ?? null);
+        self::assertSame('0', $query['offset'] ?? null);
     }
 
     public function testSearchCandidateWithoutCustomerNumberIsVerifiedByIdBeforeLinking(): void

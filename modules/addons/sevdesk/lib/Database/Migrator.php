@@ -29,6 +29,8 @@ final class Migrator
                 $table->dateTime('document_ready_at')->nullable();
                 $table->dateTime('delivered_at')->nullable();
                 $table->string('pdf_sha256', 64)->nullable();
+                $table->boolean('is_e_invoice')->nullable();
+                $table->string('xml_sha256', 64)->nullable();
                 $table->unique('invoice_id', 'mod_sevdesk_invoice_id_unique');
                 $table->unique('sevdesk_id', 'mod_sevdesk_sevdesk_id_unique');
             });
@@ -93,7 +95,10 @@ final class Migrator
         $schema = Capsule::schema();
         $missing = [];
         foreach (
-            ['document_type', 'document_number', 'document_ready_at', 'delivered_at', 'pdf_sha256'] as $column
+            [
+                'document_type', 'document_number', 'document_ready_at', 'delivered_at',
+                'pdf_sha256', 'is_e_invoice', 'xml_sha256',
+            ] as $column
         ) {
             if (!$schema->hasColumn(self::MAPPING_TABLE, $column)) {
                 $missing[] = $column;
@@ -118,6 +123,12 @@ final class Migrator
             }
             if (in_array('pdf_sha256', $missing, true)) {
                 $table->string('pdf_sha256', 64)->nullable();
+            }
+            if (in_array('is_e_invoice', $missing, true)) {
+                $table->boolean('is_e_invoice')->nullable();
+            }
+            if (in_array('xml_sha256', $missing, true)) {
+                $table->string('xml_sha256', 64)->nullable();
             }
         });
     }
@@ -172,7 +183,8 @@ final class Migrator
         $required = [
             self::MAPPING_TABLE => [
                 'id', 'invoice_id', 'sevdesk_id', 'document_type', 'document_number',
-                'document_ready_at', 'delivered_at', 'pdf_sha256',
+                'document_ready_at', 'delivered_at', 'pdf_sha256', 'is_e_invoice',
+                'xml_sha256',
             ],
             self::JOBS_TABLE => [
                 'id', 'type', 'status', 'filters_json', 'requested_by_admin_id',

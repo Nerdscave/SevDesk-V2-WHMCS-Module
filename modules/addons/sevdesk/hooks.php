@@ -41,6 +41,12 @@ function sevdesk_automatic_enqueue_enabled(Application $application): bool
     if ($mode !== 'voucher_only' && !$application->config->bool('invoice_canary_confirmed')) {
         return false;
     }
+    if (
+        (string) $application->config->get('e_invoice_mode', 'off') !== 'off'
+        && !$application->config->bool('e_invoice_canary_confirmed')
+    ) {
+        return false;
+    }
 
     return true;
 }
@@ -77,6 +83,13 @@ function sevdesk_enqueue_invoice(array $vars, string $event): void
         $documentAuthority = (string) $application->config->get('document_authority', 'whmcs');
         $ossProfile = (string) $application->config->get('oss_profile', 'blocked');
         $euB2cMode = (string) $application->config->get('eu_b2c_mode', 'blocked');
+        $eInvoiceMode = (string) $application->config->get('e_invoice_mode', 'off');
+        $storedEInvoiceActiveFrom = (string) $application->config->get('e_invoice_active_from', '');
+        $eInvoiceActiveFrom = DateTimeImmutable::createFromFormat('!d-m-Y', $storedEInvoiceActiveFrom);
+        $requestedEInvoiceActiveFrom = $eInvoiceActiveFrom instanceof DateTimeImmutable
+            && $eInvoiceActiveFrom->format('d-m-Y') === $storedEInvoiceActiveFrom
+                ? $eInvoiceActiveFrom->format('Y-m-d')
+                : '';
         $deliveryChannel = $documentAuthority === 'sevdesk'
             ? (string) $application->config->get('invoice_delivery_channel', 'sevdesk')
             : null;
@@ -107,6 +120,26 @@ function sevdesk_enqueue_invoice(array $vars, string $event): void
                 'requestedOssProfile' => $ossProfile,
                 'requestedEuB2cMode' => $euB2cMode,
                 'requestedDeliveryChannel' => $deliveryChannel,
+                'requestedEInvoiceMode' => $eInvoiceMode,
+                'requestedEInvoiceClientFieldId' => $application->config->int(
+                    'e_invoice_client_field_id',
+                ),
+                'requestedEInvoicePaymentMethodId' => trim((string) $application->config->get(
+                    'e_invoice_payment_method_id',
+                    '',
+                )),
+                'requestedEInvoiceActiveFrom' => $requestedEInvoiceActiveFrom,
+                'requestedEInvoiceCanaryConfirmed' => $application->config->bool(
+                    'e_invoice_canary_confirmed',
+                ),
+                'requestedEInvoiceSevUserId' => trim((string) $application->config->get(
+                    'invoice_sev_user_id',
+                    '',
+                )),
+                'requestedEInvoiceUnityId' => trim((string) $application->config->get(
+                    'invoice_unity_id',
+                    '',
+                )),
                 'delivery_requested' => $event === 'InvoicePaid'
                     && $documentAuthority === 'sevdesk',
             ],
@@ -137,21 +170,35 @@ function sevdesk_prepare_paid_invoice_email_guard(array $vars): void
             !$application->config->bool('module_active')
             || (string) $application->config->get(Config::RUNTIME_SIGNATURE_SETTING, '')
                 !== Config::RUNTIME_SIGNATURE
-            || (string) $application->config->get('export_mode', 'voucher_only') !== 'invoice_only'
-            || (string) $application->config->get('document_authority', 'whmcs') !== 'sevdesk'
         ) {
             return;
         }
 
+        $currentModeOwnsNewInvoice =
+            (string) $application->config->get('export_mode', 'voucher_only') === 'invoice_only'
+            && (string) $application->config->get('document_authority', 'whmcs') === 'sevdesk';
         // Request-local and idempotent: no job, remote call or PDF operation is
         // allowed before WHMCS has completed the payment-email phase. The
         // authority guard deliberately survives review, authentication and
         // sync pauses; those states must not silently restore a WHMCS final PDF.
-        InvoiceEmailGuardContext::register($invoiceId);
-        if ($application->mappings->findByInvoice($invoiceId) !== null) {
+        if ($currentModeOwnsNewInvoice) {
+            InvoiceEmailGuardContext::register($invoiceId);
+        }
+        $mapping = $application->mappings->findByInvoice($invoiceId);
+        if ($mapping !== null) {
             // Existing mappings keep their frozen/legacy document authority;
-            // a later global mode change must not reclassify their email.
-            InvoiceEmailGuardContext::discard($invoiceId);
+            // a later global mode change must not reclassify their email. A
+            // proven sevdesk-owned Invoice keeps the fail-closed guard so a
+            // later local read failure cannot leak WHMCS' final document.
+            $documentContext = $application->jobs->latestDocumentContextForInvoice(
+                $invoiceId,
+                true,
+            );
+            if (DocumentDeliveryContext::usesSevdeskInvoiceAuthority($documentContext, $mapping)) {
+                InvoiceEmailGuardContext::register($invoiceId);
+            } else {
+                InvoiceEmailGuardContext::discard($invoiceId);
+            }
         }
     } catch (Throwable $error) {
         if (function_exists('logActivity')) {

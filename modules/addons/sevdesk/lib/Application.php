@@ -18,6 +18,7 @@ use WHMCS\Module\Addon\SevDesk\Service\ContactService;
 use WHMCS\Module\Addon\SevDesk\Service\BookingService;
 use WHMCS\Module\Addon\SevDesk\Service\CorrectionService;
 use WHMCS\Module\Addon\SevDesk\Service\DocumentTargetResolver;
+use WHMCS\Module\Addon\SevDesk\Service\EInvoiceEligibilityService;
 use WHMCS\Module\Addon\SevDesk\Service\InvoiceExporter;
 use WHMCS\Module\Addon\SevDesk\Service\InvoicePdf;
 use WHMCS\Module\Addon\SevDesk\Service\InvoiceReconciliationService;
@@ -61,6 +62,8 @@ final class Application
     private ?InvoiceReconciliationService $invoiceReconciliation = null;
 
     private ?InvoicePdf $invoicePdf = null;
+
+    private ?EInvoiceEligibilityService $eInvoiceEligibility = null;
 
     private ?LegacyMappingTypeService $legacyMappingType = null;
 
@@ -106,7 +109,7 @@ final class Application
             new Client(),
             $token,
             'https://my.sevdesk.de/api/v1',
-            'Nerdscave WHMCS-sevdesk/2.1.0-rc.1',
+            'Nerdscave WHMCS-sevdesk/2.1.0-rc.2',
         );
     }
 
@@ -152,8 +155,21 @@ final class Application
         return $this->invoiceExporter ??= new InvoiceExporter(
             $this->client(),
             fn (int $invoiceId): ?string => $this->mappingId($invoiceId),
-            fn (int $invoiceId, string $remoteId, string $type, string $number): bool =>
-                $this->storeTypedMapping($invoiceId, $remoteId, $type, $number),
+            fn (
+                int $invoiceId,
+                string $remoteId,
+                string $type,
+                string $number,
+                bool $isEInvoice = false,
+                ?string $xmlSha256 = null,
+            ): bool => $this->storeTypedMapping(
+                $invoiceId,
+                $remoteId,
+                $type,
+                $number,
+                $isEInvoice,
+                $xmlSha256,
+            ),
             (string) $this->config->get('invoice_sev_user_id', ''),
             (string) $this->config->get('invoice_unity_id', ''),
         );
@@ -164,8 +180,21 @@ final class Application
         return $this->invoiceReconciliation ??= new InvoiceReconciliationService(
             $this->client(),
             fn (int $invoiceId): ?string => $this->mappingId($invoiceId),
-            fn (int $invoiceId, string $remoteId, string $type, string $number): bool =>
-                $this->storeTypedMapping($invoiceId, $remoteId, $type, $number),
+            fn (
+                int $invoiceId,
+                string $remoteId,
+                string $type,
+                string $number,
+                bool $isEInvoice = false,
+                ?string $xmlSha256 = null,
+            ): bool => $this->storeTypedMapping(
+                $invoiceId,
+                $remoteId,
+                $type,
+                $number,
+                $isEInvoice,
+                $xmlSha256,
+            ),
             (string) $this->config->get('invoice_sev_user_id', ''),
             (string) $this->config->get('invoice_unity_id', ''),
         );
@@ -174,6 +203,16 @@ final class Application
     public function invoicePdf(): InvoicePdf
     {
         return $this->invoicePdf ??= new InvoicePdf($this->client());
+    }
+
+    public function eInvoiceEligibility(): EInvoiceEligibilityService
+    {
+        return $this->eInvoiceEligibility ??= new EInvoiceEligibilityService(
+            $this->config,
+            $this->whmcs,
+            $this->client(),
+            $this->referenceData(),
+        );
     }
 
     public function legacyMappingType(): LegacyMappingTypeService
@@ -329,6 +368,7 @@ final class Application
             $this->invoiceReconciliation(),
             $this->invoicePdf(),
             fn (): DocumentTargetResolver => $this->documentTargetResolver(),
+            $this->eInvoiceEligibility(),
         );
     }
 
@@ -367,14 +407,28 @@ final class Application
             $invoiceId,
             $remoteId,
             MappingRepository::DOCUMENT_TYPE_VOUCHER,
+            isEInvoice: false,
         );
 
         return true;
     }
 
-    private function storeTypedMapping(int $invoiceId, string $remoteId, string $type, string $number): bool
-    {
-        $this->mappings->linkDocument($invoiceId, $remoteId, $type, $number);
+    private function storeTypedMapping(
+        int $invoiceId,
+        string $remoteId,
+        string $type,
+        string $number,
+        bool $isEInvoice = false,
+        ?string $xmlSha256 = null,
+    ): bool {
+        $this->mappings->linkDocument(
+            $invoiceId,
+            $remoteId,
+            $type,
+            $number,
+            $isEInvoice,
+            $xmlSha256,
+        );
 
         return true;
     }

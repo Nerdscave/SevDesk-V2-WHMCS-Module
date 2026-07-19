@@ -45,7 +45,7 @@
                 <h3 class="panel-title">Exportumfang prüfen</h3>
             </div>
             <div class="panel-body">
-                <p class="text-muted">{$invoices|@count|escape:'html':'UTF-8'} Rechnungen gefunden. Bereits zugeordnete oder nicht zulässige Einträge werden nicht erneut exportiert.</p>
+                <p class="text-muted">{$invoices|@count|escape:'html':'UTF-8'} Rechnungen gefunden. Der Altbestandsjob versendet keine E-Mails und erzeugt keine E-Rechnungen. Vor jeder neuen Invoice prüft der Worker zusätzlich mögliche Remote-Dubletten.</p>
             </div>
             <div class="table-responsive">
                 <table class="table table-striped">
@@ -98,8 +98,8 @@
                 </table>
             </div>
             <div class="panel-footer text-right">
-                <button type="submit" name="import" value="1" class="btn btn-primary" data-requires-selection data-confirm="Ausgewählte Rechnungen jetzt als Exportjob einreihen? Bereits vorhandene vollständige Zuordnungen werden weiterhin übersprungen.">
-                    <i class="fas fa-play" aria-hidden="true"></i> Ausgewählte Rechnungen einreihen
+                <button type="submit" name="import" value="1" class="btn btn-primary" data-requires-selection data-confirm="Ausgewählte Rechnungen jetzt mailfrei als Altbestandsjob einreihen? Bereits vorhandene vollständige Zuordnungen werden weiterhin übersprungen.">
+                    <i class="fas fa-play" aria-hidden="true"></i> Mailfreien Altbestandsjob anlegen
                 </button>
             </div>
         </div>

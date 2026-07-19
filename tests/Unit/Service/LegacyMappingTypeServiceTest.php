@@ -160,12 +160,12 @@ final class LegacyMappingTypeServiceTest extends TestCase
         self::assertCount(2, $history);
     }
 
-    public function testVoucher400DoesNotHideAPossibleCrossTypeIdCollision(): void
+    public function testDocumentedVoucherNotFound400IsAlsoAnAbsenceResult(): void
     {
         $history = new ArrayObject();
         $service = new LegacyMappingTypeService(
             $this->client([
-                new Response(400, [], '{"error":{"code":"BAD_REQUEST"}}'),
+                new Response(400, [], '{"error":{"code":"NOT_FOUND"}}'),
                 $this->invoiceResponse(),
             ], $history),
             static fn (): bool => true,
@@ -173,10 +173,8 @@ final class LegacyMappingTypeServiceTest extends TestCase
 
         $result = $service->inspect(42, 'INV-42', '88');
 
-        self::assertSame('failed', $result['status']);
-        self::assertSame('legacy_mapping_type_check_failed', $result['code']);
-        self::assertSame(400, $result['context']['httpStatus']);
-        self::assertArrayNotHasKey('suggestedType', $result);
+        self::assertSame('suggested', $result['status']);
+        self::assertSame('invoice', $result['suggestedType']);
         self::assertCount(2, $history);
         self::assertSame('/api/v1/Voucher/88', self::requestPath($history, 0));
         self::assertSame('/api/v1/Invoice/88', self::requestPath($history, 1));
@@ -326,6 +324,44 @@ final class LegacyMappingTypeServiceTest extends TestCase
         self::assertSame('failed', $result['status']);
         self::assertSame('legacy_mapping_type_check_failed', $result['code']);
         self::assertSame(503, $result['context']['httpStatus']);
+        self::assertArrayNotHasKey('suggestedType', $result);
+        self::assertCount(2, $history);
+    }
+
+    public function testEmptySuccessfulVoucherResponseInvalidatesMatchingInvoice(): void
+    {
+        $history = new ArrayObject();
+        $service = new LegacyMappingTypeService(
+            $this->client([
+                new Response(200, [], '{"objects":[]}'),
+                $this->invoiceResponse(),
+            ], $history),
+            static fn (): bool => true,
+        );
+
+        $result = $service->inspect(42, 'INV-42', '88');
+
+        self::assertSame('failed', $result['status']);
+        self::assertSame('legacy_mapping_type_check_failed', $result['code']);
+        self::assertArrayNotHasKey('suggestedType', $result);
+        self::assertCount(2, $history);
+    }
+
+    public function testEmptySuccessfulInvoiceResponseInvalidatesMatchingVoucher(): void
+    {
+        $history = new ArrayObject();
+        $service = new LegacyMappingTypeService(
+            $this->client([
+                $this->voucherResponse(),
+                new Response(200, [], '{"objects":[]}'),
+            ], $history),
+            static fn (): bool => true,
+        );
+
+        $result = $service->inspect(42, 'INV-42', '88');
+
+        self::assertSame('failed', $result['status']);
+        self::assertSame('legacy_mapping_type_check_failed', $result['code']);
         self::assertArrayNotHasKey('suggestedType', $result);
         self::assertCount(2, $history);
     }

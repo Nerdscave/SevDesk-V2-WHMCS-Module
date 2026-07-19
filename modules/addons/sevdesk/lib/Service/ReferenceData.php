@@ -89,6 +89,12 @@ final class ReferenceData
         return self::namedReferences($this->client->get('/Unity'));
     }
 
+    /** @return list<array{id:string,name:string}> */
+    public function paymentMethods(): array
+    {
+        return self::namedReferences($this->client->get('/PaymentMethod'));
+    }
+
     public function hasSevUser(string $id): bool
     {
         return self::containsReference($this->sevUsers(), $id);
@@ -97,6 +103,11 @@ final class ReferenceData
     public function hasUnity(string $id): bool
     {
         return self::containsReference($this->unities(), $id);
+    }
+
+    public function hasPaymentMethod(string $id): bool
+    {
+        return self::containsReference($this->paymentMethods(), $id);
     }
 
     public function countryId(string $countryCode): ?string

@@ -143,6 +143,13 @@
                         <button type="submit" name="retry" value="1" class="btn btn-primary btn-sm"><i class="fas fa-redo-alt" aria-hidden="true"></i> Erneut versuchen</button>
                     </form>
                 {/if}
+                {if $item.can_requeue_current_mode}
+                    <form method="post" action="{$moduleLink|escape:'html':'UTF-8'}&amp;a=corrections" data-confirm="Neuen mailfreien Export im aktuell bestätigten Modus anlegen? Der alte Job bleibt unverändert erhalten.">
+                        <input type="hidden" name="token" value="{$csrfToken|escape:'html':'UTF-8'}"><input type="hidden" name="item_id" value="{$item.id|escape:'html':'UTF-8'}">
+                        <div class="checkbox"><label><input type="checkbox" name="confirm_mail_free_requeue" value="yes" required> Ich habe die Übergangsinventur geprüft. Dieser neue Job darf keine Mail und keine historische E-Rechnung erzeugen.</label></div>
+                        <button type="submit" name="requeue_current_mode" value="1" class="btn btn-primary btn-sm"><i class="fas fa-random" aria-hidden="true"></i> Im aktuellen Modus neu einreihen</button>
+                    </form>
+                {/if}
                 {if $item.status === 'ambiguous' || $item.can_reconcile}
                     {if $item.can_confirm_email_retry}
                         <form method="post" action="{$moduleLink|escape:'html':'UTF-8'}&amp;a=corrections" data-confirm="Der frühere Versand kann bereits erfolgt sein. Wirklich eine mögliche Doppelmail riskieren?">

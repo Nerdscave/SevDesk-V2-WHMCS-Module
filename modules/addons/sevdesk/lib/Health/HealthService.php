@@ -64,6 +64,7 @@ final class HealthService
         $documentAuthority = (string) $this->application->config->get('document_authority', 'whmcs');
         $ossProfile = (string) $this->application->config->get('oss_profile', 'blocked');
         $euB2cMode = (string) $this->application->config->get('eu_b2c_mode', 'blocked');
+        $eInvoiceMode = (string) $this->application->config->get('e_invoice_mode', 'off');
         $invoiceCapable = in_array($exportMode, ['invoice_for_oss', 'invoice_only'], true);
         $pdfRequired = in_array($exportMode, ['voucher_only', 'invoice_for_oss'], true);
         $pdfFunctions = defined('ROOTDIR') ? ROOTDIR . '/includes/invoicefunctions.php' : '';
@@ -190,6 +191,38 @@ final class HealthService
                 'Invoice-Gate prüfen',
             );
         }
+
+        $eInvoiceConfigurationReady = $eInvoiceMode === 'off';
+        if ($eInvoiceMode === 'zugferd_domestic_b2b') {
+            $eInvoiceFieldId = $this->application->config->int('e_invoice_client_field_id');
+            $paymentMethodId = trim((string) $this->application->config->get(
+                'e_invoice_payment_method_id',
+                '',
+            ));
+            $activeFromValue = (string) $this->application->config->get('e_invoice_active_from', '');
+            $activeFrom = DateTimeImmutable::createFromFormat('!d-m-Y', $activeFromValue);
+            $eInvoiceConfigurationReady = $exportMode === 'invoice_only'
+                && $documentAuthority === 'sevdesk'
+                && class_exists(\XMLReader::class)
+                && $this->application->config->bool('e_invoice_canary_confirmed')
+                && $this->application->whmcs->isEInvoiceOptInField($eInvoiceFieldId)
+                && preg_match('/^[1-9]\d*$/', $paymentMethodId) === 1
+                && $activeFrom instanceof DateTimeImmutable
+                && $activeFrom->format('d-m-Y') === $activeFromValue;
+        }
+        $this->add(
+            $checks,
+            'ZUGFeRD-Konfiguration',
+            $eInvoiceConfigurationReady,
+            $eInvoiceMode === 'off'
+                ? 'Native E-Rechnungen sind ausgeschaltet.'
+                : ($eInvoiceConfigurationReady
+                    ? 'ZUGFeRD ist für bestätigte deutsche B2B-Kunden hinter eigenem Canary und Admin-Opt-in vorbereitet.'
+                    : 'ZUGFeRD benötigt Invoice only, sevdesk-Hoheit, PHP XMLReader, Canary, Admin-Tickbox, Zahlungsmethode und Aktivierungsdatum.'),
+            'error',
+            'addonmodules.php?module=sevdesk&a=setup',
+            'E-Rechnungsprofil prüfen',
+        );
 
         if ($documentAuthority === 'sevdesk') {
             $deliveryChannel = (string) $this->application->config->get('invoice_delivery_channel', 'sevdesk');
@@ -360,6 +393,24 @@ final class HealthService
                         'error',
                     );
                 }
+                if ($eInvoiceMode === 'zugferd_domestic_b2b') {
+                    $paymentMethodId = (string) $this->application->config->get(
+                        'e_invoice_payment_method_id',
+                        '',
+                    );
+                    $paymentMethodExists = $this->application->referenceData()->hasPaymentMethod(
+                        $paymentMethodId,
+                    );
+                    $this->add(
+                        $checks,
+                        'E-Rechnungs-Zahlungsmethode im Mandanten',
+                        $paymentMethodExists,
+                        $paymentMethodExists
+                            ? 'Die konfigurierte PaymentMethod wurde read-only im aktuellen Mandanten bestätigt.'
+                            : 'Die konfigurierte PaymentMethod wurde im aktuellen Mandanten nicht gefunden.',
+                        'error',
+                    );
+                }
             } catch (ApiException $error) {
                 $details = array_filter([
                     $error->httpStatus === null ? null : 'HTTP ' . $error->httpStatus,
@@ -399,7 +450,7 @@ final class HealthService
             'stats' => [
                 'health_status' => $hasError ? 'error' : ($hasWarning ? 'warning' : 'healthy'),
                 'healthy' => $healthy,
-                'module_version' => '2.1.0-rc.1',
+                'module_version' => '2.1.0-rc.2',
                 'whmcs_version' => $whmcsVersion,
                 'php_version' => PHP_VERSION,
                 'bookkeeping_version' => $bookkeepingVersion,
