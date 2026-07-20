@@ -18,7 +18,7 @@ final class SevdeskEntrypointTest extends TestCase
     {
         $configuration = \sevdesk_config();
 
-        self::assertSame('2.1.0-rc.3', $configuration['version']);
+        self::assertSame('2.1.0-rc.4', $configuration['version']);
         self::assertArrayHasKey('fields', $configuration);
         self::assertSame([], $configuration['fields']);
         self::assertStringContainsString('Modul-Seite „Einrichtung“', (string) $configuration['description']);

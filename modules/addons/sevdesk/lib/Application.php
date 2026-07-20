@@ -109,7 +109,7 @@ final class Application
             new Client(),
             $token,
             'https://my.sevdesk.de/api/v1',
-            'Nerdscave WHMCS-sevdesk/2.1.0-rc.3',
+            'Nerdscave WHMCS-sevdesk/2.1.0-rc.4',
         );
     }
 

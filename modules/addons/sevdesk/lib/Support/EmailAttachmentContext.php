@@ -52,7 +52,6 @@ final class EmailAttachmentContext
         }
 
         $context = self::$contexts[$token] ?? null;
-        unset(self::$contexts[$token]);
         if (
             $context === null
             || $context['invoiceId'] !== $invoiceId
@@ -60,13 +59,17 @@ final class EmailAttachmentContext
         ) {
             return null;
         }
+        unset(self::$contexts[$token]);
 
         return ['filename' => $context['filename'], 'data' => $context['contents']];
     }
 
-    public static function discard(string $token): void
+    public static function discard(string $token): bool
     {
+        $existed = isset(self::$contexts[$token]);
         unset(self::$contexts[$token]);
+
+        return $existed;
     }
 
     public static function hasActiveContext(int $invoiceId, string $template): bool

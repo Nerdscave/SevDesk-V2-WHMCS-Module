@@ -20,7 +20,7 @@ Die Tests verwenden ausschließlich synthetische Kunden, Invoices und API-Fixtur
 
 MariaDB und PHP 8.3 bleiben eigene Release-Gates. Ein übersprungener Datenbanktest oder ein Lauf unter einer anderen PHP-Version ersetzt diese Nachweise nicht.
 
-Der Invoice-API-Canary und der davon getrennte ZUGFeRD-Canary sind eigene externe Gates. Mocks, OpenAPI-Fixtures und gesetzte Konfigurationswerte beweisen nicht, dass sie stattgefunden haben. Mit synthetischen Daten bestätigt sind inzwischen Rule 19, ZUGFeRD-Create und -Readback, `getXml`, `getPdf`, `sendBy`, beide technischen Versandwege, die Übergabe des geprüften PDF-Inhalts an den WHMCS-Mailpfad, die externe EN-16931-Prüfung und echte Kundensitzungen. Der eigene Kunde erhielt beim Download exakt die geprüften PDF-Bytes; ein fremder Kunde und ein delegierter Benutzer ohne `invoices`-Recht erhielten keinen Dokumentzugriff. Im aktiven Custom Theme blieb außerdem kein normaler WHMCS-PDF-Link sichtbar. Offen sind noch die Bestätigung des Postfacheingangs samt Anhang, Invoice-`bookAmount`, die Voucher-Canaries der tatsächlich verwendeten Steuerfälle und die fachliche Abnahme. Beide Setup-Gates bleiben deshalb aus.
+Der Invoice-API-Canary und der davon getrennte ZUGFeRD-Canary sind eigene externe Gates. Mocks, OpenAPI-Fixtures und gesetzte Konfigurationswerte beweisen nicht, dass sie stattgefunden haben. Mit synthetischen Daten bestätigt sind inzwischen Rule 19, ZUGFeRD-Create und -Readback, `getXml`, `getPdf`, `sendBy`, der direkte sevDesk-Versand, die externe EN-16931-Prüfung und echte Kundensitzungen. Der eigene Kunde erhielt beim Download exakt die geprüften PDF-Bytes; ein fremder Kunde und ein delegierter Benutzer ohne `invoices`-Recht erhielten keinen Dokumentzugriff. Im aktiven Custom Theme blieb außerdem kein normaler WHMCS-PDF-Link sichtbar. Der erste echte Anhang aus dem WHMCS-Kanal war dagegen die WHMCS-Core-PDF. rc.4 lädt den Hook nun auch im CLI-Worker und prüft nach `SendEmail`, dass der vorbereitete Kontext verbraucht wurde. Der Wiederholungslauf wurde technisch angenommen; für seinen Anhang fehlt noch der SHA-256-/XML-Abgleich. Invoice-`bookAmount`, die Voucher-Canaries der tatsächlich verwendeten Steuerfälle und die fachliche Abnahme sind ebenfalls offen. Beide Setup-Gates bleiben deshalb aus.
 
 ## Testebenen
 
@@ -175,7 +175,7 @@ In einer Testinstallation mit WHMCS 8.13.4 und PHP 8.3:
 - Twenty-One-Adapter und Custom-Adaptervertrag prüfen; der Nachweis in der Zielumgebung umfasst auch den aktiven Hostiko-Adapter und das Entfernen des sichtbaren Core-PDF-Links;
 - den echten Hookablauf ausführen: Bei `invoice_only`, sevDesk-Hoheit, aktivem Modul und gültiger Laufzeitsignatur blockiert `InvoicePaidPreEmail` bereits die erste WHMCS-Zahlungs-Mail ohne Job oder Remote-Aufruf. Das gilt auch während Review-, Authentifizierungs-, Canary- und Sync-Pausen;
 - bei aktivem Sync und Canary erzeugt `InvoicePaid` genau einen Delivery-Job. Trotz alarmbedingt ausgeschaltetem Sync entsteht ein dedupliziertes Pending-Item nur bei `InvoicePaid`, Review aus, gültiger Signatur, bestätigtem Canary, `invoice_only`/sevDesk und bereits gesetztem Authentifizierungsalarm. Normales Sync-off sowie falsche Signatur, Review oder Canary erzeugen kein Item;
-- `EmailPreSend` gibt nur die exakt vorregistrierte Kombination aus Invoice, Vorlage und Token frei und konsumiert den Binäranhang einmal;
+- `EmailPreSend` gibt nur die exakt vorregistrierte Kombination aus Invoice, Vorlage und Token frei und konsumiert den Binäranhang einmal. Ein falscher Token darf den echten Kontext nicht als verbraucht markieren;
 - spätere Invoice-Mail ohne request-lokalen Guard: Template-, Mapping- oder
   Kontext-Lesefehler werden protokolliert, dürfen aber weder eine aktuelle
   globale Hoheit als Ersatz für den eingefrorenen Snapshot verwenden noch alle
@@ -185,7 +185,7 @@ In einer Testinstallation mit WHMCS 8.13.4 und PHP 8.3:
   InvoicePaid, InvoiceRefunded, InvoiceCancelled und AddTransaction keine Jobs
   anlegen, während ein leerer oder manuell befüllter Runner weiterhin läuft;
 - sicherstellen, dass Hook-Fehler niemals den WHMCS-Ablauf abbrechen.
-- sicherstellen, dass der Mail-Hook keine sevDesk-Abfrage ausführt und in CLI-/Cron-Ausführung funktioniert.
+- sicherstellen, dass der Mail-Hook keine sevDesk-Abfrage ausführt und in CLI-/Cron-Ausführung funktioniert. Der eigenständige Worker muss `hooks.php` vor dem Runner laden. Ohne Hook darf er keinen WHMCS-Versand starten; ein nicht verbrauchter Kontext muss in `whmcs_email_attachment_not_consumed` enden.
 
 ### 5. End-to-End im sevDesk-Testmandanten
 
@@ -492,6 +492,6 @@ Ein Release darf erst freigegeben werden, wenn:
 13. für einen Drop-in-Wechsel die Funktionsmatrix gegen den realen Altbetrieb geprüft und ein Dateirückwechsel sowohl vor als auch nach einem synthetischen Invoice-Mapping geprobt beziehungsweise nach Invoice-Beginn nachweislich blockiert wurde.
 14. das Positivlisten-Releasearchiv die eigenständige `UPGRADE.md` und die GPL-Lizenz enthält, aber weder Tests, `vendor/` noch lokale Arbeitsdaten. Die Release Notes werden separat am GitHub-Pre-Release veröffentlicht.
 
-`2.1.0-rc.3` darf als klar gekennzeichnete GitHub-Vorabversion veröffentlicht werden, sobald die automatisierten Repository-Checks und der Archivscan grün sind. Das ist keine Produktivfreigabe. Die finale `2.1.0` und jeder Einsatz mit echten Buchhaltungsdaten bleiben bis zu allen oben genannten Zielumgebungs- und Canary-Nachweisen gesperrt.
+`2.1.0-rc.4` darf als klar gekennzeichnete GitHub-Vorabversion veröffentlicht werden, sobald die automatisierten Repository-Checks und der Archivscan grün sind. Das ist keine Produktivfreigabe. Die finale `2.1.0` und jeder Einsatz mit echten Buchhaltungsdaten bleiben bis zu allen oben genannten Zielumgebungs- und Canary-Nachweisen gesperrt.
 
 Offene Punkte in Steuerlogik, Idempotenz oder Mappingmigration blockieren auch eine Vorabversion.

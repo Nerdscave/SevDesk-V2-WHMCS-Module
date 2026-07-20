@@ -17,7 +17,12 @@ use Psr\Http\Message\RequestInterface;
 use WHMCS\Database\Capsule;
 use WHMCS\Module\Addon\SevDesk\Api\SevdeskClient;
 use WHMCS\Module\Addon\SevDesk\Config;
+use WHMCS\Module\Addon\SevDesk\Domain\ContactData;
+use WHMCS\Module\Addon\SevDesk\Domain\InvoiceSnapshot;
+use WHMCS\Module\Addon\SevDesk\Domain\LineItem;
+use WHMCS\Module\Addon\SevDesk\Domain\TaxDecision;
 use WHMCS\Module\Addon\SevDesk\Jobs\ExportJobHandler;
+use WHMCS\Module\Addon\SevDesk\Jobs\JobOutcome;
 use WHMCS\Module\Addon\SevDesk\Repository\JobRepository;
 use WHMCS\Module\Addon\SevDesk\Repository\MappingRepository;
 use WHMCS\Module\Addon\SevDesk\Service\ContactService;
@@ -30,6 +35,9 @@ use WHMCS\Module\Addon\SevDesk\Service\ReconciliationService;
 use WHMCS\Module\Addon\SevDesk\Service\TaxPolicy;
 use WHMCS\Module\Addon\SevDesk\Service\VoucherExporter;
 use WHMCS\Module\Addon\SevDesk\Service\WhmcsGateway;
+use WHMCS\Module\Addon\SevDesk\Support\EmailAttachmentContext;
+
+require_once dirname(__DIR__) . '/Fixtures/loaded-email-hook.php';
 
 #[RunClassInSeparateProcess]
 #[PreserveGlobalState(false)]
@@ -58,6 +66,7 @@ final class ExportJobHandlerFlowTest extends TestCase
         Capsule::schema()->dropIfExists('tbladdonmodules');
         Capsule::schema()->dropIfExists('tblconfiguration');
         Capsule::schema()->dropIfExists('tblcustomfields');
+        Capsule::schema()->dropIfExists('tblemailtemplates');
         Capsule::schema()->create('mod_sevdesk', static function ($table): void {
             $table->increments('id');
             $table->unsignedInteger('invoice_id')->unique();
@@ -85,6 +94,13 @@ final class ExportJobHandlerFlowTest extends TestCase
             $table->increments('id');
             $table->string('type');
             $table->string('fieldname');
+        });
+        Capsule::schema()->create('tblemailtemplates', static function ($table): void {
+            $table->increments('id');
+            $table->string('type');
+            $table->string('name');
+            $table->boolean('custom')->default(false);
+            $table->boolean('disabled')->default(false);
         });
         Capsule::table('tblcustomfields')->insert([
             'id' => 123,
@@ -472,6 +488,25 @@ final class ExportJobHandlerFlowTest extends TestCase
         self::assertSame([], $localCommands, 'Confirmed handoff recovery must be local-only.');
         self::assertNotContains('SendEmail', $localCommands);
         self::assertCount(0, $history, 'Handoff recovery must not call sevdesk or fetch the PDF again.');
+    }
+
+    public function testWhmcsMailHandoffSucceedsOnlyAfterTheAttachmentContextWasConsumed(): void
+    {
+        $outcome = $this->invokeWhmcsMailHandoff(true);
+
+        self::assertSame('succeeded', $outcome->status);
+        self::assertSame('99', $outcome->sevdeskId);
+        self::assertNotNull((new MappingRepository())->findCompleteByInvoice(10)?->delivered_at);
+    }
+
+    public function testWhmcsMailHandoffRemainsAmbiguousWhenTheAttachmentContextWasNotConsumed(): void
+    {
+        $outcome = $this->invokeWhmcsMailHandoff(false);
+
+        self::assertSame('ambiguous', $outcome->status);
+        self::assertSame('whmcs_email_attachment_not_consumed', $outcome->errorCode);
+        self::assertSame('whmcs_email_write_requested', $outcome->checkpoint);
+        self::assertNull((new MappingRepository())->findCompleteByInvoice(10)?->delivered_at);
     }
 
     public function testFrozenInvoiceTargetThatIsNoLongerPaidStopsBeforeRemoteWrites(): void
@@ -1224,6 +1259,141 @@ SQL);
                 'allowedTaxRules' => [['id' => 1, 'taxRates' => ['NINETEEN']]],
             ]],
         );
+    }
+
+    private function invokeWhmcsMailHandoff(bool $consumeAttachment): JobOutcome
+    {
+        $pdf = "%PDF-1.7\nsynthetic sevdesk invoice\n%%EOF";
+        $history = [];
+        $client = $this->client([
+            new Response(200, [], json_encode([
+                'filename' => 'RE-10.pdf',
+                'mimeType' => 'application/pdf',
+                'base64encoded' => true,
+                'content' => base64_encode($pdf),
+            ], JSON_THROW_ON_ERROR)),
+        ], $history);
+        $config = new Config();
+        $config->set('whmcs_invoice_email_template', 'Final sevdesk Invoice');
+        Capsule::table('tblemailtemplates')->insert([
+            'type' => 'invoice',
+            'name' => 'Final sevdesk Invoice',
+            'custom' => 1,
+            'disabled' => 0,
+        ]);
+        $mappings = new MappingRepository();
+        $mappings->linkDocument(10, '99', MappingRepository::DOCUMENT_TYPE_INVOICE, 'RE-10');
+        $whmcs = new WhmcsGateway(
+            $config,
+            static function (string $command, array $parameters) use ($consumeAttachment): array {
+                self::assertSame('SendEmail', $command);
+                self::assertIsString($parameters['customvars'] ?? null);
+                $variables = unserialize(
+                    base64_decode((string) $parameters['customvars'], true),
+                    ['allowed_classes' => false],
+                );
+                self::assertIsArray($variables);
+                $token = (string) ($variables['sevdesk_attachment_token'] ?? '');
+                if ($consumeAttachment) {
+                    self::assertNotNull(EmailAttachmentContext::consume(
+                        $token,
+                        10,
+                        'Final sevdesk Invoice',
+                    ));
+                }
+
+                return ['result' => 'success'];
+            },
+        );
+        $invoiceExporter = new InvoiceExporter(
+            $client,
+            static fn (): string => '99',
+            static fn (): bool => true,
+            '7',
+            '8',
+        );
+        $handler = new ExportJobHandler(
+            $config,
+            $whmcs,
+            $mappings,
+            new JobRepository(),
+            new ContactService($client, static fn (): bool => true, static fn (): string => '1'),
+            new PdfRenderer(static fn (): string => "%PDF-1.7\nnot expected"),
+            new VoucherExporter($client, static fn (): null => null, static fn (): bool => true),
+            new ReconciliationService($client, $mappings),
+            fn (): TaxPolicy => $this->domesticTaxPolicy(),
+            $invoiceExporter,
+            new InvoiceReconciliationService(
+                $client,
+                static fn (): string => '99',
+                static fn (): bool => true,
+                '7',
+                '8',
+            ),
+            new InvoicePdf($client),
+        );
+        $item = (object) [
+            'invoice_id' => 10,
+            'checkpoint' => 'invoice_opened',
+        ];
+        $candidate = [
+            'delivery_requested' => true,
+            'targetDeliveryChannel' => 'whmcs_template',
+        ];
+        $invoice = new InvoiceSnapshot(
+            10,
+            20,
+            'RE-10',
+            new \DateTimeImmutable('2026-07-01'),
+            'EUR',
+            '119.00',
+            '0.00',
+            [new LineItem('Synthetic hosting item', '100.00', '19', true)],
+        );
+        $contact = new ContactData(
+            20,
+            '42',
+            'Synthetic Company',
+            'Synthetic',
+            'Customer',
+            'synthetic@example.invalid',
+            'Example Street 1',
+            '',
+            '12345',
+            'Example City',
+            'DE',
+            null,
+            false,
+        );
+        $checkpoints = [];
+        $method = new \ReflectionMethod($handler, 'completeSevdeskAuthority');
+        $outcome = $method->invoke(
+            $handler,
+            $item,
+            $candidate,
+            $invoice,
+            $contact,
+            '42',
+            TaxDecision::allowInvoice('domestic', '1', 'Synthetic domestic tax.', ['19']),
+            '99',
+            static function (string $checkpoint) use (&$checkpoints): bool {
+                $checkpoints[] = $checkpoint;
+
+                return true;
+            },
+            $invoiceExporter,
+            null,
+        );
+        self::assertInstanceOf(JobOutcome::class, $outcome);
+        self::assertSame(['whmcs_email_write_requested'], array_slice($checkpoints, 0, 1));
+        if ($consumeAttachment) {
+            self::assertContains('whmcs_email_handed_off', $checkpoints);
+        } else {
+            self::assertNotContains('whmcs_email_handed_off', $checkpoints);
+        }
+        self::assertCount(1, $history);
+
+        return $outcome;
     }
 
     private function invoiceResponse(int $status): Response

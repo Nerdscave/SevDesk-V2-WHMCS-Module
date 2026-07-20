@@ -16,6 +16,10 @@ if (!is_file($bootstrap)) {
 
 require_once $bootstrap;
 require_once dirname(__DIR__) . '/lib/Autoloader.php';
+// The standalone worker does not pass through WHMCS' normal addon-hook loader.
+// Load the module hooks explicitly so EmailPreSend can replace the final
+// customer attachment during a WHMCS-template delivery.
+require_once dirname(__DIR__) . '/hooks.php';
 
 use WHMCS\Module\Addon\SevDesk\Application;
 use WHMCS\Module\Addon\SevDesk\Config;

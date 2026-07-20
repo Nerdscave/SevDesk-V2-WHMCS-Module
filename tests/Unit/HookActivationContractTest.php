@@ -66,7 +66,16 @@ final class HookActivationContractTest extends TestCase
         self::assertStringContainsString('RUNTIME_SIGNATURE', $worker);
         self::assertStringContainsString('RUNTIME_REVIEW_SETTING', $worker);
         self::assertStringContainsString('Migrator::prepareWorkerRuntime($config)', $worker);
+        self::assertStringContainsString("require_once dirname(__DIR__) . '/hooks.php';", $worker);
         self::assertStringContainsString('runner()->run($maxItems, $maxSeconds)', $worker);
+        self::assertLessThan(
+            strpos($worker, "require_once dirname(__DIR__) . '/hooks.php';"),
+            strpos($worker, "require_once dirname(__DIR__) . '/lib/Autoloader.php';"),
+        );
+        self::assertLessThan(
+            strpos($worker, 'Application::instance()'),
+            strpos($worker, "require_once dirname(__DIR__) . '/hooks.php';"),
+        );
     }
 
     public function testInvoiceQuickActionIsHiddenDuringRuntimeReview(): void

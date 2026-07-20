@@ -281,6 +281,7 @@ namespace {
     use WHMCS\Module\Addon\SevDesk\Repository\JobRepository;
     use WHMCS\Module\Addon\SevDesk\Support\ClientDocumentPresenter;
     use WHMCS\Module\Addon\SevDesk\Support\DocumentDeliveryContext;
+    use WHMCS\Module\Addon\SevDesk\Support\EmailAttachmentContext;
     use WHMCS\Module\Addon\SevDesk\Support\InvoiceEmailGuardContext;
     use WHMCS\Module\Addon\SevDesk\Tests\Unit\Fixtures\HookState;
 
@@ -545,6 +546,72 @@ namespace {
         $result = hook_callback('EmailPreSend')(['relid' => 42, 'messagename' => 'Support Message']);
 
         emit_result(['mailResult' => $result, 'remoteCalls' => HookState::$remoteCalls]);
+    }
+
+    if ($scenario === 'active_attachment_context') {
+        HookState::$mapping = (object) ['sevdesk_id' => '99', 'document_type' => 'invoice'];
+        HookState::$documentContext = [
+            'itemId' => 1,
+            'itemStatus' => 'running',
+            'checkpoint' => 'whmcs_email_write_requested',
+            'source' => 'frozen',
+            'allowed' => true,
+            'documentType' => 'invoice',
+            'documentAuthority' => 'sevdesk',
+            'exportMode' => 'invoice_only',
+            'ossProfile' => 'blocked',
+            'euB2cMode' => 'blocked',
+            'deliveryChannel' => 'whmcs_template',
+        ];
+        $template = 'Final sevdesk Invoice';
+        $pdf = "%PDF-1.7\nsynthetic sevdesk invoice";
+        $token = EmailAttachmentContext::register(42, $template, 'sevdesk-invoice.pdf', $pdf);
+        $result = hook_callback('EmailPreSend')([
+            'relid' => 42,
+            'messagename' => $template,
+            'mergefields' => ['sevdesk_attachment_token' => $token],
+        ]);
+
+        emit_result([
+            'mailResult' => $result,
+            'contextRemaining' => EmailAttachmentContext::discard($token),
+            'remoteCalls' => HookState::$remoteCalls,
+        ]);
+    }
+
+    if ($scenario === 'wrong_attachment_token') {
+        HookState::$mapping = (object) ['sevdesk_id' => '99', 'document_type' => 'invoice'];
+        HookState::$documentContext = [
+            'itemId' => 1,
+            'itemStatus' => 'running',
+            'checkpoint' => 'whmcs_email_write_requested',
+            'source' => 'frozen',
+            'allowed' => true,
+            'documentType' => 'invoice',
+            'documentAuthority' => 'sevdesk',
+            'exportMode' => 'invoice_only',
+            'ossProfile' => 'blocked',
+            'euB2cMode' => 'blocked',
+            'deliveryChannel' => 'whmcs_template',
+        ];
+        $template = 'Final sevdesk Invoice';
+        $token = EmailAttachmentContext::register(
+            42,
+            $template,
+            'sevdesk-invoice.pdf',
+            "%PDF-1.7\nsynthetic sevdesk invoice",
+        );
+        $result = hook_callback('EmailPreSend')([
+            'relid' => 42,
+            'messagename' => $template,
+            'mergefields' => ['sevdesk_attachment_token' => str_repeat('0', 64)],
+        ]);
+
+        emit_result([
+            'mailResult' => $result,
+            'contextRemaining' => EmailAttachmentContext::discard($token),
+            'remoteCalls' => HookState::$remoteCalls,
+        ]);
     }
 
     if ($scenario === 'existing_legacy_mapping') {

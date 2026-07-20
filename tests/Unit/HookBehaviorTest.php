@@ -139,6 +139,29 @@ final class HookBehaviorTest extends TestCase
         self::assertSame(0, $result['remoteCalls']);
     }
 
+    public function testActiveAttachmentContextHandsTheVerifiedPdfToWhmcsExactlyOnce(): void
+    {
+        $result = $this->runScenario('active_attachment_context');
+
+        self::assertSame([
+            'attachments' => [[
+                'filename' => 'sevdesk-invoice.pdf',
+                'data' => "%PDF-1.7\nsynthetic sevdesk invoice",
+            ]],
+        ], $result['mailResult']);
+        self::assertFalse($result['contextRemaining']);
+        self::assertSame(0, $result['remoteCalls']);
+    }
+
+    public function testWrongAttachmentTokenAbortsMailWithoutForgingAConsumptionReceipt(): void
+    {
+        $result = $this->runScenario('wrong_attachment_token');
+
+        self::assertSame(['abortsend' => true], $result['mailResult']);
+        self::assertTrue($result['contextRemaining']);
+        self::assertSame(0, $result['remoteCalls']);
+    }
+
     public function testGlobalModeChangeDoesNotReclassifyAnExistingLegacyMapping(): void
     {
         $result = $this->runScenario('existing_legacy_mapping');

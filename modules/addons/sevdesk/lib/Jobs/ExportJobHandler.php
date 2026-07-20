@@ -798,6 +798,13 @@ final class ExportJobHandler
 
         $template = '';
         if ($channel === 'whmcs_template' && $deliveryRequested) {
+            if (!function_exists('sevdesk_email_pre_send')) {
+                return JobOutcome::permanentFailure(
+                    'Der WHMCS-Mail-Hook für den geprüften sevdesk-PDF-Anhang ist nicht geladen.',
+                    errorCode: 'invoice_email_hook_unavailable',
+                    checkpoint: $current !== '' ? $current : 'mapping_persisted',
+                );
+            }
             $template = trim((string) $this->config->get('whmcs_invoice_email_template', ''));
             if (!$this->whmcs->isActiveCustomInvoiceTemplate($template)) {
                 return JobOutcome::permanentFailure(
@@ -952,7 +959,14 @@ final class ExportJobHandler
                 errorCode: 'whmcs_email_handoff_ambiguous',
             );
         }
-        EmailAttachmentContext::discard($token);
+        if (EmailAttachmentContext::discard($token)) {
+            return JobOutcome::ambiguous(
+                'WHMCS hat den Versand angenommen, aber der sevdesk-PDF-Anhang wurde vom Mail-Hook nicht nachweislich übernommen.',
+                'whmcs_email_write_requested',
+                $remoteId,
+                errorCode: 'whmcs_email_attachment_not_consumed',
+            );
+        }
 
         if (
             !$checkpoint('whmcs_email_handed_off', [

@@ -69,11 +69,11 @@ Die lokale OpenAPI beschreibt Invoice-Erstellung, PDF, Öffnen, Versand und Buch
 - Verhalten von `sendBy`, `sendViaEmail`, `getPdf` und `/Invoice/{id}/bookAmount`;
 - stabile finale PDF und ID-Eindeutigkeit zwischen Voucher und Invoice.
 
-Dieses Gate kann nicht durch Mocks oder die eingecheckte OpenAPI ersetzt werden. Der technische Live-Lauf hat Rule-19-Create und -Readback, Marker, Nummer, Pflichtreferenzen, Steuersatz, fehlendes `accountDatev`, PDF sowie `sendBy` und `sendViaEmail` bestätigt. Die geprüften Remote-IDs hatten stichprobenweise keinen Treffer beim jeweils anderen Dokumenttyp. Offen bleiben Invoice-`bookAmount`, der bestätigte Postfacheingang und die fachliche Abnahme. `invoice_canary_confirmed` ist eine dokumentierte Betreiberbestätigung des vollständig ausgeführten Canarys, keine automatisierte Behauptung des Moduls.
+Dieses Gate kann nicht durch Mocks oder die eingecheckte OpenAPI ersetzt werden. Der technische Live-Lauf hat Rule-19-Create und -Readback, Marker, Nummer, Pflichtreferenzen, Steuersatz, fehlendes `accountDatev`, PDF sowie `sendBy` und `sendViaEmail` bestätigt. Die geprüften Remote-IDs hatten stichprobenweise keinen Treffer beim jeweils anderen Dokumenttyp. Offen bleiben Invoice-`bookAmount`, der Hash-/XML-Abgleich des Anhangs aus dem WHMCS-Wiederholungsversand und die fachliche Abnahme. `invoice_canary_confirmed` ist eine dokumentierte Betreiberbestätigung des vollständig ausgeführten Canarys, keine automatisierte Behauptung des Moduls.
 
 ## Architekturentscheidung: sevDesk-natives ZUGFeRD
 
-**Status:** implementiert. Create, XML/PDF, EN-16931-Prüfung, beide technischen Versandwege, WHMCS-Anhang und der authentifizierte Kundendownload wurden mit synthetischen Daten live geprüft. Die Produktivfreigabe bleibt bis zur Bestätigung des Postfacheingangs und zur fachlichen Abnahme gesperrt.
+**Status:** implementiert. Create, XML/PDF, EN-16931-Prüfung, direkter sevDesk-Versand und der authentifizierte Kundendownload wurden mit synthetischen Daten live geprüft. Der erste Postfachabgleich des WHMCS-Kanals enthielt jedoch die WHMCS-Core-PDF statt der sevDesk-PDF. Der korrigierte Pfad wurde erneut technisch ausgeführt; für den Anhang aus dem Wiederholungsversand fehlt noch der SHA-256-/XML-Abgleich. Die Produktivfreigabe bleibt bis dahin und bis zur fachlichen Abnahme gesperrt.
 
 Das Modul erzeugt kein eigenes XML. Eine ZUGFeRD-Rechnung bleibt eine normale sevDesk-`Invoice`; das Payload setzt zusätzlich `propertyIsEInvoice=true`, eine bestätigte `PaymentMethod`, eine strukturierte Empfängeradresse und `takeDefaultAddress=false`.
 
@@ -275,7 +275,7 @@ Ein 401/403 beim PDF-Abruf setzt wie die Workerpfade den mandantenweiten Authent
 ### Versandkanäle
 
 1. `sevdesk`: `sendViaEmail` öffnet und versendet mit konfiguriertem Betreff/Text; erlaubt sind nur `{invoice_number}` und `{company_name}`.
-2. `whmcs_template`: Der Worker öffnet über `sendBy`, lädt die finale PDF und ruft WHMCS `SendEmail` mit einer aktiven benutzerdefinierten Invoice-Vorlage auf. `EmailPreSend` verbraucht einen zufälligen, einmaligen, invoice- und templategebundenen In-Memory-Kontext und hängt genau diese PDF an.
+2. `whmcs_template`: Der Worker öffnet über `sendBy`, lädt die finale PDF und ruft WHMCS `SendEmail` mit einer aktiven benutzerdefinierten Invoice-Vorlage auf. `EmailPreSend` verbraucht einen zufälligen, einmaligen, invoice- und templategebundenen In-Memory-Kontext und hängt genau diese PDF an. Der eigenständige CLI-Worker lädt die Modul-Hooks ausdrücklich vor dem Runner. Fehlt der Hook, wird vor `SendEmail` abgebrochen. Ist der Kontext nach dem Aufruf noch vorhanden, gilt der Mailausgang als unklar und kann nicht automatisch wiederholt werden.
 
 Der Mail-Hook fragt sevDesk nicht ab. Bei `invoice_only` und sevDesk-Hoheit registriert `InvoicePaidPreEmail` vor der ersten WHMCS-Zahlungs-Mail einen lokalen Schutzkontext, sobald `module_active` und die Laufzeitsignatur das aktive Rewrite belegen. Dabei wird noch kein Job angelegt. `InvoicePaid` bleibt der einzige Auslöser für Queue und Zustellung.
 

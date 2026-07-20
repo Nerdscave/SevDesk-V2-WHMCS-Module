@@ -4,9 +4,9 @@ Dieses Repository enthält ein Drop-in-Replacement für ein nicht mehr gepflegte
 
 Für den nativen E-Rechnungspfad muss PHP außerdem `XMLReader` bereitstellen. Das Setup und der Worker blockieren ZUGFeRD, wenn die Erweiterung fehlt.
 
-Die wählbaren Invoice-Modi gehören zu 2.1.0. Der aktuelle Stand ist `2.1.0-rc.3` und nur für Testsysteme vorgesehen. Der Voucher-, Booking- und Korrekturumfang aus 2.0.0 bleibt erhalten. Dieser RC ergänzt außerdem einen eng begrenzten, sevDesk-nativen ZUGFeRD-Pfad.
+Die wählbaren Invoice-Modi gehören zu 2.1.0. Der aktuelle Stand ist `2.1.0-rc.4` und nur für Testsysteme vorgesehen. Der Voucher-, Booking- und Korrekturumfang aus 2.0.0 bleibt erhalten. Dieser RC ergänzt außerdem einen eng begrenzten, sevDesk-nativen ZUGFeRD-Pfad.
 
-> Die technischen Invoice- und ZUGFeRD-Pfade wurden mit synthetischen Daten unter WHMCS 8.13.4 und PHP 8.3 geprüft. Dazu gehören Rule 19, `getXml`, `getPdf`, `sendBy`, beide Versandwege, der WHMCS-PDF-Anhang sowie eigene und fremde Kundensitzungen. Offen sind noch die Bestätigung des tatsächlichen Postfacheingangs, Invoice-`bookAmount`, die Voucher-Canaries der produktiv genutzten Steuerfälle und die fachliche Abnahme. Deshalb bleiben `invoice_canary_confirmed` und `e_invoice_canary_confirmed` ausgeschaltet. Bei neuen Installationen und Freigaberollouts bleibt auch `sync_enabled` aus.
+> Die technischen Invoice- und ZUGFeRD-Pfade wurden mit synthetischen Daten unter WHMCS 8.13.4 und PHP 8.3 geprüft. Rule 19, `getXml`, `getPdf`, `sendBy`, der direkte sevDesk-Versand sowie eigene und fremde Kundensitzungen waren erfolgreich. Beim ersten Postfachabgleich des WHMCS-Kanals kam dagegen die normale WHMCS-PDF an. rc.4 lädt den Mail-Hook deshalb auch im eigenständigen CLI-Worker und akzeptiert eine Übergabe nur noch, wenn der Hook den geprüften sevDesk-Anhang nachweislich verbraucht hat. Für den Anhang aus dem Wiederholungsversand fehlt noch der SHA-256-/XML-Abgleich. Invoice-`bookAmount`, die Voucher-Canaries der produktiv genutzten Steuerfälle und die fachliche Abnahme sind ebenfalls offen. Deshalb bleiben `invoice_canary_confirmed` und `e_invoice_canary_confirmed` ausgeschaltet. Bei neuen Installationen und Freigaberollouts bleibt auch `sync_enabled` aus.
 >
 > Das Upgrade behält `voucher_only` bei, setzt aber einmalig `runtime_review_required=on`. Hooks, Worker und Remote-fähige Adminaktionen bleiben gesperrt, bis der übernommene Bestand im Setup geprüft und freigegeben wurde.
 
@@ -124,7 +124,7 @@ Während einer Review-, Authentifizierungs- oder Sync-Pause wird in diesem Modus
 Für eine kundenseitige Zustellung gibt es zwei explizite Wege:
 
 - `sevdesk`: sevDesk öffnet und versendet die Invoice mit konfiguriertem Betreff und Text.
-- `whmcs_template`: Das Modul öffnet die Invoice, lädt die geprüfte PDF und übergibt sie über eine aktive benutzerdefinierte WHMCS-Invoice-Mailvorlage. Der Binäranhang existiert nur in einem zufälligen, einmaligen In-Memory-Kontext.
+- `whmcs_template`: Das Modul öffnet die Invoice, lädt die geprüfte PDF und übergibt sie über eine aktive benutzerdefinierte WHMCS-Invoice-Mailvorlage. Der Binäranhang existiert nur in einem zufälligen, einmaligen In-Memory-Kontext. Der eigenständige CLI-Worker lädt dafür denselben `EmailPreSend`-Hook wie der WHMCS-Cron. Bleibt der Kontext nach `SendEmail` unverbraucht, wird der Ausgang als `ambiguous` gespeichert und nicht als erfolgreiche Zustellung ausgegeben.
 
 Bulk- und historische Importe versenden nie automatisch. Nach einem möglicherweise ausgeführten Create-, Open- oder Versand-Write wird ausschließlich lesend reconciliiert; ein nicht beweisbarer Ausgang bleibt `ambiguous` und wird nicht automatisch wiederholt.
 
@@ -173,11 +173,11 @@ API-Token, WHMCS-Konfiguration, unredigierte Exporte/Dumps, Kundendaten, Rechnun
 | [docs/testing.md](docs/testing.md) | Teststrategie und verbindliche Invoice-Canaries |
 | [docs/operations.md](docs/operations.md) | Einrichtung, Nachlauf, Versand und Recovery |
 | [docs/sevdesk-openapi.yaml](docs/sevdesk-openapi.yaml) | unveränderte lokale sevDesk-OpenAPI-Referenz |
-| [RELEASE_NOTES_2.1.0-rc.3.md](RELEASE_NOTES_2.1.0-rc.3.md) | Text für das aktuelle GitHub-Prerelease und konkrete Freigabegrenzen |
+| [RELEASE_NOTES_2.1.0-rc.4.md](RELEASE_NOTES_2.1.0-rc.4.md) | Text für das aktuelle GitHub-Prerelease und konkrete Freigabegrenzen |
 
 ## Freigabegrenzen
 
-- Der technische Teil des Invoice-API-Canarys wurde mit synthetischen Daten ausgeführt. Postfacheingang, Invoice-`bookAmount`, die produktiven Voucher-Steuerfälle und die fachliche Abnahme bleiben harte Gates.
+- Der technische Teil des Invoice-API-Canarys wurde mit synthetischen Daten ausgeführt. Der erste WHMCS-Postfachabgleich hat einen Fehler im CLI-Mailpfad offengelegt; rc.4 enthält die Korrektur, der Anhang des Wiederholungslaufs muss aber noch im Postfach bestätigt werden. Invoice-`bookAmount`, die produktiven Voucher-Steuerfälle und die fachliche Abnahme bleiben ebenfalls harte Gates.
 - sevDesk-Dokumenthoheit verlangt `invoice_only`, WHMCS-Proforma, installierten Theme-Adapter und eine ausdrückliche Betreiberbestätigung.
 - Der mitgelieferte Twenty-One-Adapter ersetzt die normalen sichtbaren Kundenlinks. Ein direkt erratener WHMCS-Core-PDF-Endpunkt kann ohne Core-Änderung technisch weiter erreichbar sein.
 - Rule 3 bleibt ausschließlich für bestätigte innergemeinschaftliche Warenlieferungen an Organisationen mit USt-ID und `taxexempt` freigegeben; Hosting und andere Dienstleistungen bleiben blockiert.
