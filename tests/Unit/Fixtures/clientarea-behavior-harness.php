@@ -16,9 +16,13 @@ namespace WHMCS\Module\Addon\SevDesk\Tests\Unit\Fixtures {
 
         public static int $ownerId = 20;
 
+        public static bool $invoicePermission = true;
+
         public static bool $moduleActive = true;
 
         public static int $pdfCalls = 0;
+
+        public static int $mappingCalls = 0;
 
         public static bool $authenticationFailure = false;
 
@@ -124,6 +128,8 @@ namespace WHMCS\Module\Addon\SevDesk\Tests\Unit\Fixtures {
     {
         public function findByInvoice(int $invoiceId): ?object
         {
+            ++ClientAreaState::$mappingCalls;
+
             return ClientAreaState::$mapping;
         }
     }
@@ -157,10 +163,23 @@ namespace WHMCS\Module\Addon\SevDesk\Tests\Unit\Fixtures {
 }
 
 namespace WHMCS\User {
+    use WHMCS\Module\Addon\SevDesk\Tests\Unit\Fixtures\ClientAreaState;
+
     final class Client
     {
         public function __construct(public int $id)
         {
+        }
+    }
+
+    final class User
+    {
+        /** @return list<Client> */
+        public function getClientsByPermission(string|int $permission): array
+        {
+            return $permission === 'invoices' && ClientAreaState::$invoicePermission
+                ? [new Client(ClientAreaState::$clientId)]
+                : [];
         }
     }
 }
@@ -168,12 +187,18 @@ namespace WHMCS\User {
 namespace WHMCS\Authentication {
     use WHMCS\Module\Addon\SevDesk\Tests\Unit\Fixtures\ClientAreaState;
     use WHMCS\User\Client;
+    use WHMCS\User\User;
 
     final class CurrentUser
     {
         public function client(): ?Client
         {
             return ClientAreaState::$clientId > 0 ? new Client(ClientAreaState::$clientId) : null;
+        }
+
+        public function user(): ?User
+        {
+            return ClientAreaState::$clientId > 0 ? new User() : null;
         }
     }
 }
@@ -234,6 +259,8 @@ namespace {
     $scenario = $argv[1] ?? '';
     if ($scenario === 'foreign_owner') {
         ClientAreaState::$ownerId = 21;
+    } elseif ($scenario === 'missing_invoice_permission') {
+        ClientAreaState::$invoicePermission = false;
     } elseif ($scenario === 'wrong_type') {
         ClientAreaState::$mapping->document_type = 'voucher';
     } elseif ($scenario === 'not_ready') {
@@ -258,6 +285,7 @@ namespace {
         'httpStatus' => http_response_code(),
         'result' => $result,
         'pdfCalls' => ClientAreaState::$pdfCalls,
+        'mappingCalls' => ClientAreaState::$mappingCalls,
         'storedConfig' => ClientAreaState::$storedConfig,
         'logs' => ClientAreaState::$logs,
     ], JSON_THROW_ON_ERROR);

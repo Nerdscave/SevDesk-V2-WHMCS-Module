@@ -2,7 +2,7 @@
 
 ## Freigabestatus
 
-Dieses Runbook gilt für `2.1.0-rc.2`. Der RC ist für Testinstallationen gedacht, nicht für Produktivdaten. Die automatisierten Prüfungen unter PHP 8.3 mit XMLReader und MariaDB sowie ein kleiner mailfreier Rule-1-Live-Lauf unter WHMCS-Hoheit sind abgeschlossen. Beim ZUGFeRD-Pfad ist auch der technische Live-Kern mit synthetischen Daten geprüft. Vor der Freigabe stehen noch die bisherigen Voucher-Canaries, der vollständige Invoice-API-Canary mit Rule 19, Versand und Zahlungsbuchung sowie beim ZUGFeRD-Canary beide Mailwege und der reine Kundenlogin aus.
+Dieses Runbook gilt für `2.1.0-rc.3`. Der RC ist für Testinstallationen gedacht, nicht für Produktivdaten. Die automatisierten Prüfungen unter PHP 8.3 mit XMLReader und MariaDB sowie die technischen Live-Läufe für normale Invoices, Rule 19 und ZUGFeRD sind mit synthetischen Daten abgeschlossen. Beide Versandaufrufe, die Übergabe des geprüften PDF-Inhalts an den WHMCS-Mailpfad, echte Kundensitzungen und die Rechteprüfung wurden ebenfalls getestet. Vor der Freigabe stehen noch die Bestätigung des Postfacheingangs, Invoice-`bookAmount`, die Voucher-Canaries der produktiv verwendeten Steuerfälle und die fachliche Abnahme aus.
 
 Bis dahin bleiben `invoice_canary_confirmed`, `e_invoice_canary_confirmed` und bei neuen Rollouts auch `sync_enabled` deaktiviert. Ein 2.0-Bestand behält beim Upgrade den Modus `voucher_only` und erhält `runtime_review_required=on`. Diese Quarantäne stoppt automatische und manuelle Verarbeitung. Sie endet erst nach einer erfolgreichen read-only Prüfung und der Bestätigung im Setup.
 
@@ -261,7 +261,7 @@ Numerische Account-Datev-IDs müssen aus dem aktuellen Mandanten stammen und wer
 
 Der Canary wird in einem getrennten sevDesk-Testmandanten mit synthetischen Daten durchgeführt. Er muss vor dem Setzen von `invoice_canary_confirmed` mindestens folgende Punkte beweisen:
 
-1. Eine normale `RE` lässt sich im Draft-Status 100 mit Rule 19, `deliveryAddressCountry`, tatsächlichem WHMCS-Steuersatz und ohne `accountDatev` erstellen.
+1. Eine normale `RE` lässt sich im Draft-Status 100 mit Rule 19, kleingeschriebenem `deliveryAddressCountry`, exakt passender `StaticCountry`-Referenz, tatsächlichem WHMCS-Steuersatz und ohne `accountDatev` erstellen. Der Readback erfolgt mit `embed=addressCountry`.
 2. Die finale WHMCS-Rechnungsnummer bleibt als `invoiceNumber` unverändert.
 3. `[WHMCS-INVOICE:<id>]` bleibt lesbar und erlaubt einen eindeutigen Remote-Abgleich.
 4. `SevUser`, `Unity`, Kontakt, Positionen und Adressen sind in genau der verwendeten Form gültig.
@@ -272,6 +272,8 @@ Der Canary wird in einem getrennten sevDesk-Testmandanten mit synthetischen Date
 Das vollständige Protokoll mit Datum, Mandant, synthetischen WHMCS-/Remote-IDs, Payloadvariante, Resultat und Prüfer bleibt außerhalb von Git. Im Repository wird nur das pseudonymisierte Gate-Ergebnis festgehalten. Token, E-Mail-Adressen, PDFs und Rohpayloads werden dort nicht abgelegt.
 
 Scheitert die ID-Eindeutigkeit, Rule 19 oder der Markerabgleich, bleiben mindestens `invoice_for_oss` und alle davon abhängigen Rolloutschritte gesperrt. Es darf nicht durch manuelles Setzen der Checkbox „freigegeben“ werden; zuerst ist eine neue Architekturentscheidung nötig.
+
+Teilstand vom 20.07.2026: Eine synthetische Rule-19-Invoice wurde erstellt und über den Recovery-Pfad ohne zweiten Create vollständig abgeschlossen. Nummer, Marker, Kontakt, `SevUser`, Rule, Steuersatz, Positionen, fehlendes `accountDatev`, eingebettetes Rechnungsland und PDF stimmten mit dem eingefrorenen Snapshot überein. `sendBy` und `sendViaEmail` wurden technisch ausgeführt. Die geprüften Remote-IDs hatten beim jeweils anderen Dokumenttyp keinen Treffer. Invoice-`bookAmount` wurde nicht ausgeführt; dieser Teil und die Bestätigung des Postfacheingangs bleiben offen.
 
 ## ZUGFeRD-Canary
 
@@ -287,7 +289,7 @@ Der ZUGFeRD-Canary ist vom normalen Invoice-Canary getrennt. Er verwendet einen 
 
 Das Protokoll bleibt wie beim Invoice-Canary außerhalb von Git. Im Repository stehen weder Testadressen noch PDFs, XML-Dateien, IDs oder Rohpayloads. Ein gesetzter Setup-Schalter ersetzt den Canary nicht.
 
-Teilstand vom 20.07.2026: Mit einem synthetischen deutschen B2B-Konto wurden Create, Readback, `getXml`, `getPdf`, `sendBy`, die WHMCS-Kundenansicht und ein erneuter idempotenter Worker-Lauf geprüft. [Mustangproject 2.24.0](https://github.com/ZUGFeRD/mustangproject/releases/tag/core-2.24.0) meldete PDF/A und eingebettetes XML als gültig; das extrahierte XML war bytegleich zur `getXml`-Antwort. sevDesk ließ `propertyIsEInvoice` beim Readback aus. Außerdem lieferte die kombinierte `CommunicationWay`-Abfrage mit Kontakt, Typ und Hauptkennzeichen keine Zeile, während die kontaktgebundene Liste den korrekten Haupt-Mail-Eintrag enthielt. Beide Fälle sind im Modul jetzt explizit und fail-closed behandelt. `sendViaEmail(sendXml=false)`, der WHMCS-Mailanhang und der Eigentümertest in einer reinen Kundensitzung wurden nicht ausgeführt. `e_invoice_canary_confirmed` bleibt daher aus.
+Teilstand vom 20.07.2026: Mit synthetischen deutschen B2B-Konten wurden Create, Readback, `getXml`, `getPdf`, `sendBy`, `sendViaEmail(sendXml=false)`, der WHMCS-Mailkanal und ein erneuter idempotenter Worker-Lauf geprüft. [Mustangproject 2.24.0](https://github.com/ZUGFeRD/mustangproject/releases/tag/core-2.24.0) meldete PDF/A und eingebettetes XML als gültig; das extrahierte XML war bytegleich zur `getXml`-Antwort. Der geprüfte PDF-Inhalt wurde dem WHMCS-Anhang-Hook übergeben. Eigene Kundensitzungen erhielten die erwarteten Download-Bytes, ein fremder Kunde und ein delegierter Benutzer ohne `invoices`-Recht erhielten keinen Dokumentzugriff. sevDesk ließ `propertyIsEInvoice` beim Readback aus. Außerdem lieferte die kombinierte `CommunicationWay`-Abfrage mit Kontakt, Typ und Hauptkennzeichen keine Zeile, während die kontaktgebundene Liste den korrekten Haupt-Mail-Eintrag enthielt. Beide Fälle sind im Modul jetzt explizit und fail-closed behandelt. Die Bestätigung des tatsächlichen Postfacheingangs samt dort angekommenem Anhang steht noch aus; `e_invoice_canary_confirmed` bleibt daher aus.
 
 ## Twenty-One-Adapter installieren
 
@@ -295,10 +297,10 @@ Teilstand vom 20.07.2026: Mit einem synthetischen deutschen B2B-Konto wurden Cre
 2. `modules/addons/sevdesk/theme-adapters/twenty-one/manifest.json` ebenfalls dorthin kopieren und die Kopie exakt `sevdesk-invoice-authority.json` nennen. Die Setupseite akzeptiert nur dieses Manifest im aktiven Theme und die darin benannte Partial-Datei.
 3. Die Partial am Anfang von `viewinvoice.tpl` einbinden.
 4. Mit einem synthetischen Kundenkonto die Zustände `proforma`, `pending`, `ready` und `failure` prüfen.
-5. Bei `ready` sicherstellen, dass kein normaler sichtbarer WHMCS-PDF-Link verbleibt und der sevDesk-Download nur dem Eigentümer funktioniert.
+5. Bei `ready` sicherstellen, dass kein normaler sichtbarer WHMCS-PDF-Link verbleibt und der sevDesk-Download nur dem Eigentümer mit WHMCS-Benutzerrecht `invoices` funktioniert. Fremde Clients und delegierte Benutzer ohne dieses Recht müssen abgewiesen werden.
 6. Erst wenn die Setupseite das installierte Manifest erkennt, `theme_adapter_confirmed` bestätigen.
 
-Custom Themes implementieren denselben Vertrag über `sevdeskDocument.authority`, `.state`, `.invoiceNumber` und `.downloadUrl`. Ihr Manifest nennt `module: "sevdesk"`, `contractVersion: 1`, das aktive Theme oder `*`, exakt diese vier Vertragsfelder und eine sichere `.tpl`-Datei im Theme-Wurzelverzeichnis. Das Manifest bestätigt den installierten Adaptervertrag, kopiert aber keine Theme-Datei automatisch. Ein direkt erratener WHMCS-Core-PDF-Endpunkt kann ohne Core-Änderung weiter existieren; die Betriebszusage umfasst normale Kundenoberfläche und E-Mail-Auslieferung.
+Custom Themes implementieren denselben Vertrag über `sevdeskDocument.authority`, `.state`, `.invoiceNumber` und `.downloadUrl`. Ihr Manifest nennt `module: "sevdesk"`, `contractVersion: 1`, das aktive Theme oder `*`, exakt diese vier Vertragsfelder und eine sichere `.tpl`-Datei im Theme-Wurzelverzeichnis. Das Manifest bestätigt den installierten Adaptervertrag, kopiert aber keine Theme-Datei automatisch. Der Custom-Adapter der Zielumgebung wurde mit Ready-Invoices geprüft; der normale Core-PDF-Link war dort nicht sichtbar. Ein direkt erratener WHMCS-Core-PDF-Endpunkt kann ohne Core-Änderung weiter existieren; die Betriebszusage umfasst normale Kundenoberfläche und E-Mail-Auslieferung.
 
 ## Health Check vor Writes
 
@@ -485,8 +487,8 @@ Der Checkpoint bestimmt die einzig zulässige Aktion:
 - nach `invoice_created` vor `mapping_persisted`: bekannte Invoice-ID lesen, exakt prüfen und erst dann Typ/ID mappen; bei ZUGFeRD zusätzlich `getXml` prüfen und den ersten XML-Hash einfrieren;
 - nach `invoice_xml_verified`: bekannte Invoice-ID, PaymentMethod, Kontakt, Adresshash und gespeicherten XML-Hash erneut lesen. Ein vorhandenes E-Rechnungsflag muss wahr sein; ein fehlendes Flag ist nur zusammen mit gültigem, unverändertem XML zulässig. Fehlendes oder abweichendes XML bleibt `ambiguous`;
 - nach `mapping_persisted` ohne auffindbares lokales Mapping: nur den exakten Draft lesend suchen und typisiert wiederherstellen; niemals neu erstellen;
-- nach `invoice_open_write_requested`: Status, `sendType`, Kontakt, einen von sevDesk gemeldeten Ländercode und Positionen lesen; `sendBy` nicht automatisch wiederholen. Bei Rule 19 ist ein lesbar bestätigtes Lieferland Pflicht;
-- nach `invoice_delivery_write_requested`: Status, `sendType`, `sendDate`, Kontakt, einen von sevDesk gemeldeten Ländercode und Positionen lesen; `sendViaEmail` nicht automatisch wiederholen. Bei Rule 19 ist ein lesbar bestätigtes Lieferland Pflicht;
+- nach `invoice_open_write_requested`: Status, `sendType`, Kontakt, Länderfelder und Positionen lesen; `sendBy` nicht automatisch wiederholen. Bei Rule 19 ist ein vorhandenes `deliveryAddressCountry` maßgeblich und darf von der Rechnungsadresse abweichen. Nur wenn es fehlt, muss das eingebettete `addressCountry` zum eingefrorenen Zielland passen;
+- nach `invoice_delivery_write_requested`: Status, `sendType`, `sendDate`, Kontakt, Länderfelder und Positionen lesen; `sendViaEmail` nicht automatisch wiederholen. Für Rule 19 gilt derselbe strenge Länderabgleich wie nach dem Öffnen;
 - nach `whmcs_email_write_requested`: der Providerübergang kann unbekannt sein. Item bleibt `ambiguous`; manueller Resend nur nach Bestätigung des Doppelversandrisikos;
 - nach `whmcs_email_handed_off`: ausschließlich lokale Ready-/Delivery-Metadaten vervollständigen; weder `SendEmail` noch PDF-/sevDesk-Endpunkte erneut aufrufen; als an WHMCS-Mailprovider übergeben markieren, nicht als im Empfängerpostfach zugestellt.
 
@@ -601,7 +603,7 @@ erfolgter Versand wird anschließend einzeln geprüft.
 2. Mapping muss `document_type=invoice` und für Ready `document_ready_at` besitzen.
 3. Bei Pending zuerst Job/checkpoint prüfen; keinen parallelen Export oder Versand starten.
 4. Bei Failure die WHMCS-Proforma erhalten und keine ungeprüfte WHMCS-Endrechnung versenden.
-5. Eigentümer- oder PDF-Proxyfehler nicht durch direkte Remote-ID-URLs umgehen.
+5. Bei PDF-404 neben Eigentümer und Mapping auch die aktive Clientzuordnung und das WHMCS-Benutzerrecht `invoices` prüfen. Proxyfehler nicht durch direkte Remote-ID-URLs umgehen.
 
 ### Mapping vorhanden, Remote-Objekt fehlt
 

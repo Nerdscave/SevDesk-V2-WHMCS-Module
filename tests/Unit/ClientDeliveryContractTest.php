@@ -73,6 +73,8 @@ final class ClientDeliveryContractTest extends TestCase
 
         self::assertStringContainsString('new CurrentUser()', $method);
         self::assertStringContainsString('->client()', $method);
+        self::assertStringContainsString('->user()', $method);
+        self::assertStringContainsString("getClientsByPermission('invoices')", $method);
         self::assertStringContainsString('invoiceOwnerId($invoiceId)', $method);
         self::assertStringContainsString('findByInvoice($invoiceId)', $method);
         self::assertStringContainsString('latestDocumentContextForInvoice(', $method);

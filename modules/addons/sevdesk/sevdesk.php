@@ -38,7 +38,7 @@ function sevdesk_config(): array
         'name' => 'sevdesk Integration',
         'description' => 'Fortsetzbarer WHMCS→sevdesk Voucher-/Invoice-Export. '
             . 'Die betriebliche Konfiguration erfolgt ausschließlich auf der Modul-Seite „Einrichtung“.',
-        'version' => '2.1.0-rc.2',
+        'version' => '2.1.0-rc.3',
         'author' => 'Nerdscave',
         'language' => 'german',
         // WHMCS persists fields declared here without passing through the guarded
@@ -349,7 +349,18 @@ function sevdesk_clientarea(array $vars): array
     try {
         $currentUser = new CurrentUser();
         $client = $currentUser->client();
-        if ($client === null || (int) $client->id < 1) {
+        $user = $currentUser->user();
+        if ($client === null || $user === null || (int) $client->id < 1) {
+            return $page('Das Rechnungsdokument ist nicht verfügbar.', 404);
+        }
+        $hasInvoicePermission = false;
+        foreach ($user->getClientsByPermission('invoices') as $permittedClient) {
+            if ((int) ($permittedClient->id ?? 0) === (int) $client->id) {
+                $hasInvoicePermission = true;
+                break;
+            }
+        }
+        if (!$hasInvoicePermission) {
             return $page('Das Rechnungsdokument ist nicht verfügbar.', 404);
         }
 

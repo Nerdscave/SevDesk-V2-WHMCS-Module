@@ -298,7 +298,10 @@ final class InvoiceReconciliationService
                     );
                 }
                 $candidates = self::normaliseCandidates(
-                    $this->client->get('/Invoice/' . rawurlencode($knownRemoteId)),
+                    $this->client->get(
+                        '/Invoice/' . rawurlencode($knownRemoteId),
+                        ['embed' => 'addressCountry'],
+                    ),
                 );
             } else {
                 $candidates = self::normaliseCandidates($this->client->get('/Invoice', [
@@ -307,6 +310,7 @@ final class InvoiceReconciliationService
                     'contact[objectName]' => 'Contact',
                     'startDate' => $invoice->invoiceDate->setTime(0, 0)->getTimestamp(),
                     'endDate' => $invoice->invoiceDate->setTime(23, 59, 59)->getTimestamp(),
+                    'embed' => 'addressCountry',
                     'limit' => 1000,
                     'offset' => 0,
                 ]));

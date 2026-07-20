@@ -28,6 +28,9 @@ final class InvoiceExporter
     /** @var Closure(int, string, string, string, bool=, string|null=): (bool|null) */
     private readonly Closure $persistMapping;
 
+    /** @var Closure(string): (int|string|null) */
+    private readonly Closure $resolveCountryId;
+
     private readonly InvoiceRemoteVerifier $remoteVerifier;
 
     private readonly InvoiceXml $invoiceXml;
@@ -38,6 +41,7 @@ final class InvoiceExporter
      * - $findMapping(int $whmcsInvoiceId): int|string|null
      * - $persistMapping(int $whmcsInvoiceId, string $remoteId, string $type,
      *   string $number, bool $isEInvoice = false, ?string $xmlSha256 = null): bool|null
+     * - $resolveCountryId(string $isoCountryCode): int|string|null
      */
     public function __construct(
         private readonly SevdeskClient $client,
@@ -45,9 +49,13 @@ final class InvoiceExporter
         callable $persistMapping,
         private readonly string $sevUserId,
         private readonly string $unityId,
+        ?callable $resolveCountryId = null,
     ) {
         $this->findMapping = Closure::fromCallable($findMapping);
         $this->persistMapping = Closure::fromCallable($persistMapping);
+        $this->resolveCountryId = $resolveCountryId === null
+            ? static fn (): null => null
+            : Closure::fromCallable($resolveCountryId);
         $this->remoteVerifier = new InvoiceRemoteVerifier($sevUserId, $unityId);
         $this->invoiceXml = new InvoiceXml($client);
     }
@@ -64,6 +72,7 @@ final class InvoiceExporter
             $this->persistMapping,
             $sevUserId,
             $unityId,
+            $this->resolveCountryId,
         );
     }
 
@@ -103,6 +112,29 @@ final class InvoiceExporter
             return $preflight;
         }
 
+        $deliveryCountryId = null;
+        if ($taxDecision->taxRuleId === '19') {
+            try {
+                $resolvedCountryId = ($this->resolveCountryId)($deliveryCountryCode);
+            } catch (ApiException $exception) {
+                return $this->readApiFailure($invoice->invoiceId, $exception, 'invoice_country_reference_failed');
+            } catch (Throwable) {
+                return ExportResult::failed(
+                    $invoice->invoiceId,
+                    'invoice_country_reference_failed',
+                    'The sevdesk destination-country reference could not be resolved before the Invoice write.',
+                );
+            }
+            $deliveryCountryId = self::numericId($resolvedCountryId);
+            if ($deliveryCountryId === null) {
+                return ExportResult::failed(
+                    $invoice->invoiceId,
+                    'invoice_country_reference_missing',
+                    'The sevdesk destination-country reference required for Rule 19 is missing.',
+                );
+            }
+        }
+
         if (
             !$this->emitCheckpoint($checkpoint, 'invoice_write_requested', array_merge(
                 [
@@ -130,6 +162,7 @@ final class InvoiceExporter
                     $deliveryCountryCode,
                     $target,
                     $eInvoiceContext,
+                    $deliveryCountryId,
                 ),
                 true,
                 [201],
@@ -187,7 +220,10 @@ final class InvoiceExporter
         // The create response is not the recovery source of truth. Read the
         // object back and verify the fields which define the accounting document.
         try {
-            $remote = self::oneInvoice($this->client->get('/Invoice/' . rawurlencode($remoteId)));
+            $remote = self::oneInvoice($this->client->get(
+                '/Invoice/' . rawurlencode($remoteId),
+                ['embed' => 'addressCountry'],
+            ));
         } catch (ApiException $exception) {
             return ExportResult::ambiguous(
                 $invoice->invoiceId,
@@ -410,7 +446,10 @@ final class InvoiceExporter
         }
 
         try {
-            $remote = self::oneInvoice($this->client->get('/Invoice/' . rawurlencode($remoteId)));
+            $remote = self::oneInvoice($this->client->get(
+                '/Invoice/' . rawurlencode($remoteId),
+                ['embed' => 'addressCountry'],
+            ));
         } catch (ApiException $exception) {
             return ExportResult::ambiguous(
                 $invoice->invoiceId,
@@ -745,7 +784,10 @@ final class InvoiceExporter
         ?EInvoiceContext $eInvoiceContext = null,
     ): ?ExportResult {
         try {
-            $remote = self::oneInvoice($this->client->get('/Invoice/' . rawurlencode($remoteId)));
+            $remote = self::oneInvoice($this->client->get(
+                '/Invoice/' . rawurlencode($remoteId),
+                ['embed' => 'addressCountry'],
+            ));
             $remotePositions = $this->client->get(
                 '/Invoice/' . rawurlencode($remoteId) . '/getPositions',
                 ['limit' => 1000, 'offset' => 0],
@@ -819,7 +861,10 @@ final class InvoiceExporter
         }
 
         try {
-            $remote = self::oneInvoice($this->client->get('/Invoice/' . rawurlencode($remoteId)));
+            $remote = self::oneInvoice($this->client->get(
+                '/Invoice/' . rawurlencode($remoteId),
+                ['embed' => 'addressCountry'],
+            ));
             $remotePositions = $this->client->get(
                 '/Invoice/' . rawurlencode($remoteId) . '/getPositions',
                 ['limit' => 1000, 'offset' => 0],
@@ -932,6 +977,7 @@ final class InvoiceExporter
         string $deliveryCountryCode,
         DocumentTargetDecision $target,
         ?EInvoiceContext $eInvoiceContext = null,
+        ?string $deliveryCountryId = null,
     ): array {
         $preflight = $this->preflight(
             $invoice,
@@ -996,11 +1042,30 @@ final class InvoiceExporter
                 'taxText' => self::taxText($taxRuleId),
                 'smallSettlement' => $taxRuleId === '11',
                 'customerInternalNote' => self::marker($invoice->invoiceId),
-                'deliveryAddressCountry' => strtoupper($deliveryCountryCode),
+                // sevdesk validates OSS destinations against the lower-case
+                // codes exposed by StaticCountry (for example `cy`). Keep the
+                // domain decision normalised as ISO upper-case and translate
+                // only at the API boundary.
+                'deliveryAddressCountry' => in_array($taxRuleId, ['18', '19', '20'], true)
+                    ? strtolower($deliveryCountryCode)
+                    : strtoupper($deliveryCountryCode),
                 'propertyIsEInvoice' => false,
         ];
         if ($eInvoiceContext !== null) {
             $invoicePayload = array_merge($invoicePayload, $eInvoiceContext->invoicePayloadFields());
+        } elseif ($taxRuleId === '19') {
+            $deliveryCountryId = self::numericId($deliveryCountryId);
+            if ($deliveryCountryId === null) {
+                throw new \InvalidArgumentException('A StaticCountry reference is required for Rule 19.');
+            }
+            // sevdesk's Factory validator currently checks addressCountry
+            // before it applies takeDefaultAddress. Supplying the same country
+            // explicitly keeps the documented OSS destination field and makes
+            // the draft independently valid at that validation stage.
+            $invoicePayload['addressCountry'] = [
+                'id' => self::payloadId($deliveryCountryId),
+                'objectName' => 'StaticCountry',
+            ];
         }
 
         return [
@@ -1287,6 +1352,30 @@ final class InvoiceExporter
             $invoiceId,
             $code,
             'The sevdesk API operation failed.',
+            $context,
+        );
+    }
+
+    private function readApiFailure(int $invoiceId, ApiException $exception, string $code): ExportResult
+    {
+        if ($exception->isAuthenticationFailure()) {
+            $code = 'api_authentication_failed';
+        } elseif ($exception->isRateLimit()) {
+            $code = 'api_rate_limited';
+        } elseif ($exception->isPermanentClientFailure()) {
+            $code .= '_permanent';
+        }
+
+        $context = $exception->context();
+        // This failure came from a GET before invoice_write_requested. Even if
+        // a transport layer marks its outcome as unknown, no remote document
+        // could have been created by this request.
+        $context['outcomeUnknown'] = false;
+
+        return ExportResult::failed(
+            $invoiceId,
+            $code,
+            'The sevdesk reference lookup failed before the Invoice write.',
             $context,
         );
     }

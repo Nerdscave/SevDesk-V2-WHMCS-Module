@@ -17,6 +17,16 @@ final class ClientAreaBehaviorTest extends TestCase
         self::assertSame('Das Rechnungsdokument ist nicht verfügbar.', $result['result']['vars']['message']);
     }
 
+    public function testDelegatedUserWithoutInvoicePermissionCannotReachMappingOrRemotePdf(): void
+    {
+        $result = $this->runJsonScenario('missing_invoice_permission');
+
+        self::assertSame(404, $result['httpStatus']);
+        self::assertSame(0, $result['mappingCalls']);
+        self::assertSame(0, $result['pdfCalls']);
+        self::assertSame('Das Rechnungsdokument ist nicht verfügbar.', $result['result']['vars']['message']);
+    }
+
     public function testWrongDocumentTypeIsNotExposed(): void
     {
         $result = $this->runJsonScenario('wrong_type');

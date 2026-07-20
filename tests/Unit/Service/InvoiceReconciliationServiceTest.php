@@ -10,6 +10,7 @@ use GuzzleHttp\Handler\MockHandler;
 use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Middleware;
 use GuzzleHttp\Psr7\Response;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use WHMCS\Module\Addon\SevDesk\Api\SevdeskClient;
 use WHMCS\Module\Addon\SevDesk\Domain\EInvoiceContext;
@@ -60,6 +61,7 @@ final class InvoiceReconciliationServiceTest extends TestCase
         $query = $history[0]['request']->getUri()->getQuery();
         self::assertStringContainsString('invoiceNumber=RE-10', $query);
         self::assertStringContainsString('contact%5Bid%5D=42', $query);
+        self::assertStringContainsString('embed=addressCountry', $query);
     }
 
     public function testKnownRemoteRecoveryAfterAnUncertainCreateNeverPostsAgain(): void
@@ -88,7 +90,61 @@ final class InvoiceReconciliationServiceTest extends TestCase
         self::assertCount(2, $history);
         self::assertSame('GET', $history[0]['request']->getMethod());
         self::assertSame('/api/v1/Invoice/99', $history[0]['request']->getUri()->getPath());
+        self::assertStringContainsString(
+            'embed=addressCountry',
+            (string) $history[0]['request']->getUri()->getQuery(),
+        );
         self::assertSame('/api/v1/Invoice/99/getPositions', $history[1]['request']->getUri()->getPath());
+    }
+
+    #[DataProvider('rule19RecoveryProvider')]
+    public function testRule19RecoveryUsesEmbeddedBillingCountryForKnownAndFilteredCandidates(
+        ?string $knownRemoteId,
+        string $expectedPath,
+    ): void {
+        $history = [];
+        $mappings = [];
+        $service = new InvoiceReconciliationService(
+            $this->client([
+                new Response(200, [], json_encode([
+                    'objects' => [$this->rule19Candidate('99')],
+                ], JSON_THROW_ON_ERROR)),
+                $this->rule19PositionResponse(),
+            ], $history),
+            static fn (): null => null,
+            static function (int $invoiceId, string $remoteId) use (&$mappings): void {
+                $mappings[$invoiceId] = $remoteId;
+            },
+            '7',
+            '8',
+        );
+
+        $result = $service->reconcile(
+            $this->rule19Invoice(),
+            '42',
+            $this->rule19TaxDecision(),
+            'CY',
+            $knownRemoteId,
+        );
+
+        self::assertSame(ExportResult::SUCCEEDED, $result->status);
+        self::assertSame([10 => '99'], $mappings);
+        self::assertSame($expectedPath, $history[0]['request']->getUri()->getPath());
+        self::assertStringContainsString(
+            'embed=addressCountry',
+            (string) $history[0]['request']->getUri()->getQuery(),
+        );
+        self::assertSame(['GET', 'GET'], array_map(
+            static fn (array $entry): string => $entry['request']->getMethod(),
+            $history,
+        ));
+    }
+
+    /** @return iterable<string,array{string|null,string}> */
+    public static function rule19RecoveryProvider(): iterable
+    {
+        yield 'known remote id' => ['99', '/api/v1/Invoice/99'];
+        yield 'filtered candidate search' => [null, '/api/v1/Invoice'];
     }
 
     public function testAssociativeSinglePositionResponseCanRestoreTheMapping(): void
@@ -615,6 +671,29 @@ final class InvoiceReconciliationServiceTest extends TestCase
         return TaxDecision::allow('domestic', '1000', '1', 'Domestic profile.');
     }
 
+    private function rule19Invoice(): InvoiceSnapshot
+    {
+        return new InvoiceSnapshot(
+            10,
+            20,
+            'RE-10',
+            new DateTimeImmutable('2026-07-01'),
+            'EUR',
+            '120.00',
+            '0',
+            [new LineItem('Digital service', '120.00', '20', false)],
+        );
+    }
+
+    private function rule19TaxDecision(): TaxDecision
+    {
+        return TaxDecision::allowInvoiceRule19(
+            'eu_b2c_oss_rule19',
+            'Confirmed digital service.',
+            ['20'],
+        );
+    }
+
     private function eInvoiceContext(?string $xmlSha256 = null): EInvoiceContext
     {
         $hash = EInvoiceContext::addressHash('Example GmbH', 'Musterstr. 1', '12345', 'Berlin', 'DE');
@@ -674,6 +753,39 @@ final class InvoiceReconciliationServiceTest extends TestCase
             'customerInternalNote' => '[WHMCS-INVOICE:10]',
             'sumGross' => '119.00',
         ];
+    }
+
+    /** @return array<string, mixed> */
+    private function rule19Candidate(string $id): array
+    {
+        $candidate = $this->candidate($id);
+        $candidate['taxRule'] = ['id' => '19', 'objectName' => 'TaxRule'];
+        $candidate['showNet'] = false;
+        unset($candidate['deliveryAddressCountry']);
+        $candidate['addressCountry'] = [
+            'id' => '1490',
+            'objectName' => 'StaticCountry',
+            'code' => 'cy',
+        ];
+        $candidate['sumGross'] = '120.00';
+
+        return $candidate;
+    }
+
+    private function rule19PositionResponse(): Response
+    {
+        return new Response(200, [], json_encode(['objects' => [[
+            'id' => '901',
+            'objectName' => 'InvoicePos',
+            'invoice' => ['id' => '99', 'objectName' => 'Invoice'],
+            'unity' => ['id' => '8', 'objectName' => 'Unity'],
+            'positionNumber' => '1',
+            'quantity' => '1',
+            'name' => 'Digital service',
+            'text' => 'Digital service',
+            'price' => '120.00',
+            'taxRate' => '20',
+        ]]], JSON_THROW_ON_ERROR));
     }
 
     private function positionResponse(string $price = '100.00'): Response

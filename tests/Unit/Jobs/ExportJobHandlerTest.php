@@ -86,6 +86,37 @@ final class ExportJobHandlerTest extends TestCase
         self::assertSame('invoice_write_requested', $outcome->checkpoint);
     }
 
+    public function testTransientCountryReferenceReadCanRetryBeforeInvoiceWrite(): void
+    {
+        foreach (
+            [
+                ['httpStatus' => 503, 'sevdeskCode' => 'SERVER_ERROR'],
+                ['httpStatus' => null, 'sevdeskCode' => 'transport_error'],
+            ] as $context
+        ) {
+            $outcome = $this->invokeFailureOutcome(
+                'invoice_country_reference_failed',
+                $context + ['outcomeUnknown' => false],
+                'document_type_selected',
+            );
+
+            self::assertSame('retry_wait', $outcome->status);
+            self::assertSame('document_type_selected', $outcome->checkpoint);
+        }
+    }
+
+    public function testPermanentCountryReferenceReadFailureDoesNotRetry(): void
+    {
+        $outcome = $this->invokeFailureOutcome(
+            'invoice_country_reference_failed_permanent',
+            ['httpStatus' => 422, 'outcomeUnknown' => false],
+            'document_type_selected',
+        );
+
+        self::assertSame('permanent_failed', $outcome->status);
+        self::assertSame('document_type_selected', $outcome->checkpoint);
+    }
+
     public function testUnknownInvoiceWriteOutcomeNeverRewindsToCreate(): void
     {
         $handler = (new \ReflectionClass(ExportJobHandler::class))->newInstanceWithoutConstructor();
@@ -148,6 +179,24 @@ final class ExportJobHandlerTest extends TestCase
                 'definiteWriteRejected' => $definiteWriteRejected,
                 'retryAfterSeconds' => 60,
             ],
+            (object) ['checkpoint' => $checkpoint, 'attempts' => 1],
+        );
+
+        return $outcome;
+    }
+
+    /** @param array<string,scalar|null> $context */
+    private function invokeFailureOutcome(string $code, array $context, string $checkpoint): JobOutcome
+    {
+        $handler = (new \ReflectionClass(ExportJobHandler::class))->newInstanceWithoutConstructor();
+        $method = new \ReflectionMethod(ExportJobHandler::class, 'failureResultToOutcome');
+
+        /** @var JobOutcome $outcome */
+        $outcome = $method->invoke(
+            $handler,
+            $code,
+            'Synthetic read failure.',
+            $context,
             (object) ['checkpoint' => $checkpoint, 'attempts' => 1],
         );
 

@@ -20,7 +20,7 @@ Die Tests verwenden ausschließlich synthetische Kunden, Invoices und API-Fixtur
 
 MariaDB und PHP 8.3 bleiben eigene Release-Gates. Ein übersprungener Datenbanktest oder ein Lauf unter einer anderen PHP-Version ersetzt diese Nachweise nicht.
 
-Der Invoice-API-Canary und der davon getrennte ZUGFeRD-Canary sind eigene externe Gates. Mocks, OpenAPI-Fixtures und gesetzte Konfigurationswerte beweisen nicht, dass sie stattgefunden haben. Beim ZUGFeRD-Pfad sind Create, Readback, `getXml`, `getPdf`, `sendBy`, Kundenansicht, PDF/XML-Hash und die externe EN-16931-Prüfung mit synthetischen Daten bestätigt. Die Mailwege und der Eigentümertest mit einer reinen Kundensitzung fehlen noch. Der normale Invoice-Canary ist ebenfalls nicht vollständig. Beide Setup-Gates bleiben deshalb aus.
+Der Invoice-API-Canary und der davon getrennte ZUGFeRD-Canary sind eigene externe Gates. Mocks, OpenAPI-Fixtures und gesetzte Konfigurationswerte beweisen nicht, dass sie stattgefunden haben. Mit synthetischen Daten bestätigt sind inzwischen Rule 19, ZUGFeRD-Create und -Readback, `getXml`, `getPdf`, `sendBy`, beide technischen Versandwege, die Übergabe des geprüften PDF-Inhalts an den WHMCS-Mailpfad, die externe EN-16931-Prüfung und echte Kundensitzungen. Der eigene Kunde erhielt beim Download exakt die geprüften PDF-Bytes; ein fremder Kunde und ein delegierter Benutzer ohne `invoices`-Recht erhielten keinen Dokumentzugriff. Im aktiven Custom Theme blieb außerdem kein normaler WHMCS-PDF-Link sichtbar. Offen sind noch die Bestätigung des Postfacheingangs samt Anhang, Invoice-`bookAmount`, die Voucher-Canaries der tatsächlich verwendeten Steuerfälle und die fachliche Abnahme. Beide Setup-Gates bleiben deshalb aus.
 
 ## Testebenen
 
@@ -36,6 +36,8 @@ Schnelle Tests ohne WHMCS-Datenbank oder Netzwerk für:
 - vollständige `voucher_only`-/`invoice_for_oss`-/`invoice_only`-Matrix mit beiden Dokumenthoheiten;
 - gefrorene Dokumentzielentscheidung einschließlich paid-only, finaler Rechnungsnummer und fehlendem Fallback;
 - Invoice-/InvoicePos-Payload, Pflichtreferenzen, Menge 1 und bewusst fehlendes `accountDatev`;
+- exakte `StaticCountry`-Auflösung für Rule 19 einschließlich leerer, unbeschrifteter, mehrdeutiger und fehlerhafter Antworten; jeder Fehler muss vor `invoice_write_requested` enden;
+- kleingeschriebenes OSS-Land im Payload, passende `addressCountry`-Referenz und Readback über `embed=addressCountry`;
 - exakte Invoice-/Positionsrückprüfung und typabhängige Booking-Endpunkte;
 - PDF-MIME, Signatur, EOF, Größenlimit, Dateiname und SHA-256;
 - ZUGFeRD-Auswahl nur für `invoice_only` mit sevDesk-Hoheit, deutschem Organisationskunden, Rule 1, gültigem Aktivierungsdatum, gesetztem Admin-Tickbox-Feld und bestätigtem Canary;
@@ -156,7 +158,7 @@ In einer Testinstallation mit WHMCS 8.13.4 und PHP 8.3:
 - Moduswechsel bei aktiven oder ungeklärten Exportitems blockieren und bestehende Mappings unverändert lassen;
 - Invoice und Client über die vorgesehenen WHMCS-Schnittstellen laden;
 - WHMCS-PDF mit synthetischen Rechnungsdaten erzeugen;
-- sevDesk-PDF über die authentifizierte Addon-Route als Eigentümer streamen und fremde Invoice-/Remote-IDs ablehnen;
+- sevDesk-PDF über die authentifizierte Addon-Route als Eigentümer mit Benutzerrecht `invoices` streamen und fremde Invoice-/Remote-IDs sowie delegierte Benutzer ohne dieses Recht vor Mapping- und Remote-I/O ablehnen;
 - Adminrollen und CSRF prüfen;
 - Single- und Bulk-Job starten;
 - gemeinsame Altbestandsvorschau und mailfreien `historical_backfill` starten; jeder mögliche Invoice-/Voucher-Dublettenhinweis muss das Create blockieren und darf kein Mapping raten;
@@ -170,7 +172,7 @@ In einer Testinstallation mit WHMCS 8.13.4 und PHP 8.3:
 - relevante Invoice-, Paid- und Checkout-Hooks auslösen;
 - mit sevDesk-Hoheit prüfen, dass bezahlte Invoice-only-Fälle zunächst Pending und anschließend Ready/Failure zeigen und keine sichtbaren WHMCS-Endrechnungslinks behalten;
 - mit gesetztem ZUGFeRD-Kundenfeld prüfen, dass fehlende Pflichtdaten ohne normale Invoice als Fallback blockieren und der fertige Kundenpfad ausschließlich die geprüfte ZUGFeRD-PDF liefert;
-- Twenty-One-Adapter und Custom-Adaptervertrag prüfen;
+- Twenty-One-Adapter und Custom-Adaptervertrag prüfen; der Nachweis in der Zielumgebung umfasst auch den aktiven Hostiko-Adapter und das Entfernen des sichtbaren Core-PDF-Links;
 - den echten Hookablauf ausführen: Bei `invoice_only`, sevDesk-Hoheit, aktivem Modul und gültiger Laufzeitsignatur blockiert `InvoicePaidPreEmail` bereits die erste WHMCS-Zahlungs-Mail ohne Job oder Remote-Aufruf. Das gilt auch während Review-, Authentifizierungs-, Canary- und Sync-Pausen;
 - bei aktivem Sync und Canary erzeugt `InvoicePaid` genau einen Delivery-Job. Trotz alarmbedingt ausgeschaltetem Sync entsteht ein dedupliziertes Pending-Item nur bei `InvoicePaid`, Review aus, gültiger Signatur, bestätigtem Canary, `invoice_only`/sevDesk und bereits gesetztem Authentifizierungsalarm. Normales Sync-off sowie falsche Signatur, Review oder Canary erzeugen kein Item;
 - `EmailPreSend` gibt nur die exakt vorregistrierte Kombination aus Invoice, Vorlage und Token frei und konsumiert den Binäranhang einmal;
@@ -192,8 +194,8 @@ Für diese Tests ist ein separater Mandant mit sevDesk-Update 2.0 erforderlich. 
 Geprüft werden:
 
 - Voucher: Kontakt, WHMCS-PDF, Datum, Marker, Währung, Status, Positionen, `taxRule`, `accountDatev`, Mapping und zweiter Lauf ohne Duplikat;
-- Invoice: normale `RE` im Draft-Status 100, unveränderte WHMCS-Nummer, Marker, Kontakt, `SevUser`, `Unity`, `deliveryAddressCountry`, Netto/Brutto, Rule und WHMCS-Steuersatz;
-- bei normalen Nicht-OSS-Invoices akzeptiert der Readback ein von sevDesk ausgelassenes Länderfeld, aber nie einen abweichenden gemeldeten Ländercode; Rule 19 bleibt ohne lesbar bestätigtes Lieferland blockiert;
+- Invoice: normale `RE` im Draft-Status 100, unveränderte WHMCS-Nummer, Marker, Kontakt, `SevUser`, `Unity`, kleingeschriebenes `deliveryAddressCountry`, passende `StaticCountry`-Referenz, Netto/Brutto, Rule und WHMCS-Steuersatz;
+- bei normalen Nicht-OSS-Invoices akzeptiert der Readback ein von sevDesk ausgelassenes Länderfeld, aber nie einen abweichenden gemeldeten Ländercode; Rule 19 liest `addressCountry` eingebettet zurück und bleibt ohne mindestens einen passenden Ländercode blockiert;
 - Invoice-Positionen ohne frei konfiguriertes `accountDatev`;
 - `sendBy`, `sendViaEmail`, finale `getPdf`-Antwort und `/Invoice/{id}/bookAmount`;
 - erneute exakte Draft-Prüfung direkt vor `sendBy` und `sendViaEmail`; eine zwischenzeitliche Header- oder Positionsänderung verhindert jeden Write;
@@ -209,6 +211,7 @@ Der getrennte ZUGFeRD-Canary prüft zusätzlich:
 - `getXml`, lokale CII-Strukturprüfung und externe EN-16931-Validierung;
 - stabile PDF-/XML-Hashes über Create, Open, `sendBy` und Download;
 - `sendViaEmail(sendXml=false)`, geprüfter sevDesk-/ZUGFeRD-PDF-Anhang über WHMCS und authentifizierter Kundendownload;
+- zwei eigene Kundendownloads mit erwartetem SHA-256, abgewiesener Cross-Client-Zugriff und ein delegierter Benutzer ohne Rechnungsrecht;
 - Recovery nach Create, XML-/PDF-Abruf, Öffnung und Versand ohne zweiten Write.
 
 Das vollständige Canary-Protokoll mit Mandant, Zeitpunkt, Testobjekten und Ergebnis bleibt außerhalb von Git. Im Repository wird nur das pseudonymisierte Gate-Ergebnis festgehalten. Token und Kundendaten werden dort nicht abgelegt.
@@ -355,12 +358,12 @@ Diese Punkte werden manuell oder mit passenden Browsertests geprüft:
 - Die Sammelvorschau übernimmt höchstens 25 sichtbare, markerbestätigte Legacy-Typen. Vor der Bestätigung geänderte Remote-Daten, markerlose Belege und Kollisionen bleiben unangetastet.
 - „Aufheben“ entfernt eine vollständige Zuordnung nur nach eindeutigen 400- oder 404-Antworten von beiden by-ID-Endpunkten und atomarer Revalidation von Remote-ID und Dokumenttyp. 401/403 setzt den globalen Alarm; 429, 5xx, Timeout oder ein vorhandener Beleg lassen das Mapping stehen.
 - `stale_export_context_requeue_required` zeigt keinen normalen Retry. Die gesonderte Aktion verlangt die Mailfrei-Bestätigung und legt nur bei einem sicheren Vor-Write-Zustand einen neuen Job an.
-- Clientbereich für Proforma, Pending, Ready und Failure mit Eigentümer- und
-  PDF-Hashprüfung testen. Bei sevDesk-Hoheit darf kein normaler sichtbarer
+- Clientbereich für Proforma, Pending, Ready und Failure mit Eigentümer-,
+  `invoices`-Berechtigungs- und PDF-Hashprüfung testen. Bei sevDesk-Hoheit darf kein normaler sichtbarer
   WHMCS-Endrechnungslink übrig bleiben. Historische Voucher und frühere
   sevDesk-Invoices müssen ihre jeweils eingefrorene Hoheit auch nach einem
   globalen Setupwechsel behalten.
-- Den echten Clientarea-Einstiegspunkt in einem isolierten WHMCS-Harness ausführen: fremder Eigentümer und falscher Typ enden vor jedem PDF-Abruf mit 404, unvollständiges Ready mit 409, Hash- oder API-Fehler mit bereinigtem 503, ein 401/403 setzt den globalen Alarm und nur der vollständig passende Besitzer erhält exakt die geprüften PDF-Bytes.
+- Den echten Clientarea-Einstiegspunkt in einem isolierten WHMCS-Harness ausführen: fremder Eigentümer, fehlendes Benutzerrecht `invoices` und falscher Typ enden vor Mapping- und PDF-Abruf mit 404, unvollständiges Ready mit 409, Hash- oder API-Fehler mit bereinigtem 503, ein 401/403 setzt den globalen Alarm und nur der vollständig berechtigte Besitzer erhält exakt die geprüften PDF-Bytes.
 - Direkten WHMCS-Core-PDF-Endpunkt als bekannte technische Restgrenze dokumentieren;
   der Test garantiert Kundenoberfläche und E-Mail-Auslieferung, keine Core-Änderung.
 - sevDesk- und WHMCS-Template-Versand separat prüfen. Bulk-/Backfill-Jobs dürfen
@@ -414,7 +417,7 @@ Diese Punkte werden manuell oder mit passenden Browsertests geprüft:
 - CSRF für Start, Retry, Cancel und Unlink testen.
 - SQL-Eingaben ausschließlich gebunden/über Query Builder.
 - Dateiuploadpfad und temporäre PDF-Dateien auf Berechtigungen und Cleanup prüfen.
-- PDF-Proxy auf IDOR testen: fremder Kunde, fremde WHMCS-Invoice, direkt übergebene sevDesk-ID, untypisiertes Mapping und fehlendes Ready müssen scheitern.
+- PDF-Proxy auf IDOR testen: fremder Kunde, delegierter Benutzer ohne `invoices`-Recht, fremde WHMCS-Invoice, direkt übergebene sevDesk-ID, untypisiertes Mapping und fehlendes Ready müssen vor Mapping- und Remote-I/O scheitern.
 - Mailanhang-Token auf Zufälligkeit, einmaligen Verbrauch, falsche Vorlage, falsche Invoice und Prozessgrenze testen.
 - bestätigen, dass weder PDF-Bytes noch E-Mail-Adresse/Betreff/Text in Job- oder Fehlerlogs landen.
 - bestätigen, dass XML-Bytes und strukturierte Empfängeradressen weder in Jobs noch in Logs landen; persistiert werden nur IDs und Hashes.
@@ -489,6 +492,6 @@ Ein Release darf erst freigegeben werden, wenn:
 13. für einen Drop-in-Wechsel die Funktionsmatrix gegen den realen Altbetrieb geprüft und ein Dateirückwechsel sowohl vor als auch nach einem synthetischen Invoice-Mapping geprobt beziehungsweise nach Invoice-Beginn nachweislich blockiert wurde.
 14. das Positivlisten-Releasearchiv die eigenständige `UPGRADE.md` und die GPL-Lizenz enthält, aber weder Tests, `vendor/` noch lokale Arbeitsdaten. Die Release Notes werden separat am GitHub-Pre-Release veröffentlicht.
 
-`2.1.0-rc.2` darf als klar gekennzeichnete GitHub-Vorabversion veröffentlicht werden, sobald die automatisierten Repository-Checks und der Archivscan grün sind. Das ist keine Produktivfreigabe. Die finale `2.1.0` und jeder Einsatz mit echten Buchhaltungsdaten bleiben bis zu allen oben genannten Zielumgebungs- und Canary-Nachweisen gesperrt.
+`2.1.0-rc.3` darf als klar gekennzeichnete GitHub-Vorabversion veröffentlicht werden, sobald die automatisierten Repository-Checks und der Archivscan grün sind. Das ist keine Produktivfreigabe. Die finale `2.1.0` und jeder Einsatz mit echten Buchhaltungsdaten bleiben bis zu allen oben genannten Zielumgebungs- und Canary-Nachweisen gesperrt.
 
 Offene Punkte in Steuerlogik, Idempotenz oder Mappingmigration blockieren auch eine Vorabversion.

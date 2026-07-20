@@ -1,6 +1,6 @@
 # Sicherer Ersatz eines bestehenden WHMCS-sevDesk-Moduls
 
-Diese Anleitung gehört zu `2.1.0-rc.2`. Der RC ist eine Vorabversion für Testinstallationen. Für echte Buchhaltungsdaten fehlen noch die Zielumgebungsprüfungen sowie der Invoice- und der getrennte ZUGFeRD-Canary.
+Diese Anleitung gehört zu `2.1.0-rc.3`. Der RC ist eine Vorabversion für Testinstallationen. Die technischen Invoice- und ZUGFeRD-Läufe unter WHMCS 8.13.4 sind abgeschlossen. Für echte Buchhaltungsdaten fehlen noch die Bestätigung des Postfacheingangs, Invoice-`bookAmount`, die produktiven Voucher-Steuerfälle und die fachliche Abnahme.
 
 Diese Version verwendet weiterhin den Addon-Namen und Ordner `sevdesk` sowie
 die Mappingtabelle `mod_sevdesk`. Der Austausch erhält vorhandene Zuordnungen

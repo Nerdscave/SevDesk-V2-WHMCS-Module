@@ -4,14 +4,9 @@
 
 Ziel ist ein PHP-8.3-fähiges Drop-in-Replacement, das den vorhandenen Mappingbestand schützt und auch große Nachläufe in wiederaufnehmbaren Jobs verarbeitet. Die OSS-/Invoice-Erweiterung ist für Modulrelease 2.1.0 vorgesehen; Booking und Korrektur-Voucher bleiben Bestandteil von 2.0.0 und aufwärts.
 
-Die Voucher-Basisphasen sowie die Codepfade für wählbare Voucher-/Invoice-Ziele, typisierte Mappings, Invoice-Recovery, Invoice-Booking und sevDesk-Dokumenthoheit sind im Repository umgesetzt. `2.1.0-rc.2` ergänzt die abgesicherte Bestandsübernahme und einen eng begrenzten, sevDesk-nativen ZUGFeRD-Pfad. Der Plan bildet die Grundlage für die Abnahme. Umgesetzt heißt nicht, dass die Invoice- oder E-Rechnungsfunktion bereits für Produktivdaten freigegeben ist.
+Die Voucher-Basisphasen sowie die Codepfade für wählbare Voucher-/Invoice-Ziele, typisierte Mappings, Invoice-Recovery, Invoice-Booking und sevDesk-Dokumenthoheit sind im Repository umgesetzt. `2.1.0-rc.2` ergänzte die abgesicherte Bestandsübernahme und einen eng begrenzten, sevDesk-nativen ZUGFeRD-Pfad. `2.1.0-rc.3` übernimmt die daraus entstandenen Live-API- und WHMCS-Kompatibilitätskorrekturen. Der Plan bildet die Grundlage für die Abnahme. Umgesetzt heißt nicht, dass die Invoice- oder E-Rechnungsfunktion bereits für Produktivdaten freigegeben ist.
 
-Mehrere Prüfungen brauchen eine echte Zielumgebung und stehen noch aus:
-
-- MariaDB-Testlauf;
-- Installation und Renderprüfung unter WHMCS 8.13.4 mit PHP 8.3;
-- lesender Vertragstest in einem sevDesk-Testmandanten;
-- Voucher-Canaries, der Invoice-API-Canary und der davon getrennte ZUGFeRD-Canary.
+Die automatisierten Prüfungen unter PHP 8.3 und MariaDB sowie die technischen Live-Läufe unter WHMCS 8.13.4 sind abgeschlossen. Offen bleiben der bestätigte Postfacheingang, Invoice-`bookAmount`, die Voucher-Canaries der produktiv genutzten Steuerfälle und die fachliche Abnahme.
 
 Der Invoice-Canary bleibt ein hartes Release-Gate. Bis dahin blockiert `invoice_canary_confirmed=off` alle Invoice-Modi. ZUGFeRD hat mit `e_invoice_canary_confirmed` ein eigenes Gate. Das additive Upgrade behält `voucher_only` bei, stoppt den 2.0-Betrieb aber einmalig mit `sync_enabled=off` und `runtime_review_required=on`. Runner und Remote-fähige Adminaktionen werden erst nach der bestätigten Bestandsprüfung im Setup wieder freigegeben.
 
@@ -429,14 +424,14 @@ Der Buchungsassistent und die manuellen Korrektur-Voucher gehören zu Release 2.
 
 Vor produktiver Aktivierung bestätigt ein sevDesk-Testmandant:
 
-- normale `RE` im Draft-Status 100 mit Rule 19, Landsteuersatz, `deliveryAddressCountry` und ohne `accountDatev`;
+- normale `RE` im Draft-Status 100 mit Rule 19, Landsteuersatz, kleingeschriebenem `deliveryAddressCountry`, exakt passender `StaticCountry`-Referenz und ohne `accountDatev`;
 - unveränderte WHMCS-Rechnungsnummer;
 - stabilen Marker `[WHMCS-INVOICE:<id>]`;
 - Pflichtreferenzen für `SevUser`, `Unity`, Kontakt, Positionen und Adresse;
 - getrenntes Verhalten von Create, `sendBy`, `sendViaEmail`, `getPdf` und `/Invoice/{id}/bookAmount`;
 - stabile finale PDF und keine problematische Voucher-/Invoice-ID-Kollision.
 
-Der Canary ist im aktuellen Stand extern ausstehend. Scheitert Marker, Rule 19 oder ID-Eindeutigkeit, bleibt `invoice_for_oss` gesperrt und die Architektur muss neu entschieden werden.
+Der technische Live-Lauf hat Rule 19, Marker, Nummer, Pflichtreferenzen, PDF und beide Versandaufrufe bestätigt. Offen sind der Postfacheingang, Invoice-`bookAmount`, die endgültige Bewertung der dokumenttypübergreifenden ID-Eindeutigkeit und die fachliche Abnahme. Scheitert einer dieser Nachweise, bleibt `invoice_for_oss` gesperrt und die Architektur muss neu entschieden werden.
 
 ### Aufgaben
 

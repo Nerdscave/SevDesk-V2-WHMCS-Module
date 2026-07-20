@@ -62,18 +62,18 @@ Die lokale Unique-Annahme für `sevdesk_id` bleibt erhalten. Der externe Canary 
 
 Die lokale OpenAPI beschreibt Invoice-Erstellung, PDF, Öffnen, Versand und Buchung als getrennte Schritte, enthält bei einzelnen Feldern aber widersprüchliche Schemaangaben. Ein echter sevDesk-Testmandant muss deshalb vor jeder produktiven Invoice-Aktivierung bestätigen:
 
-- normale Invoice `RE`, Draft-Status 100, Rule 19, `deliveryAddressCountry`, WHMCS-Steuersatz und kein `accountDatev`;
+- normale Invoice `RE`, Draft-Status 100, Rule 19, kleingeschriebenes `deliveryAddressCountry`, passende `StaticCountry`-Referenz, WHMCS-Steuersatz und kein `accountDatev`;
 - unveränderte finale WHMCS-Rechnungsnummer als `invoiceNumber`;
 - stabiler, lesbar abgleichbarer Marker `[WHMCS-INVOICE:<id>]`;
 - Pflichtdaten und Referenzen für `SevUser`, `Unity`, Kontakt, Positionen und Adressen;
 - Verhalten von `sendBy`, `sendViaEmail`, `getPdf` und `/Invoice/{id}/bookAmount`;
 - stabile finale PDF und ID-Eindeutigkeit zwischen Voucher und Invoice.
 
-Dieses Gate kann nicht durch Mocks oder die eingecheckte OpenAPI ersetzt werden. Im aktuellen Repository ist es extern ausstehend. `invoice_canary_confirmed` ist eine dokumentierte Betreiberbestätigung des ausgeführten Canarys, keine automatisierte Behauptung des Moduls.
+Dieses Gate kann nicht durch Mocks oder die eingecheckte OpenAPI ersetzt werden. Der technische Live-Lauf hat Rule-19-Create und -Readback, Marker, Nummer, Pflichtreferenzen, Steuersatz, fehlendes `accountDatev`, PDF sowie `sendBy` und `sendViaEmail` bestätigt. Die geprüften Remote-IDs hatten stichprobenweise keinen Treffer beim jeweils anderen Dokumenttyp. Offen bleiben Invoice-`bookAmount`, der bestätigte Postfacheingang und die fachliche Abnahme. `invoice_canary_confirmed` ist eine dokumentierte Betreiberbestätigung des vollständig ausgeführten Canarys, keine automatisierte Behauptung des Moduls.
 
 ## Architekturentscheidung: sevDesk-natives ZUGFeRD
 
-**Status:** implementiert. Der technische Kern wurde mit synthetischen Daten live geprüft; die Produktivfreigabe bleibt bis zum vollständigen separaten Canary gesperrt.
+**Status:** implementiert. Create, XML/PDF, EN-16931-Prüfung, beide technischen Versandwege, WHMCS-Anhang und der authentifizierte Kundendownload wurden mit synthetischen Daten live geprüft. Die Produktivfreigabe bleibt bis zur Bestätigung des Postfacheingangs und zur fachlichen Abnahme gesperrt.
 
 Das Modul erzeugt kein eigenes XML. Eine ZUGFeRD-Rechnung bleibt eine normale sevDesk-`Invoice`; das Payload setzt zusätzlich `propertyIsEInvoice=true`, eine bestätigte `PaymentMethod`, eine strukturierte Empfängeradresse und `takeDefaultAddress=false`.
 
@@ -223,10 +223,10 @@ Der bestehende Pfad bleibt fachlich unverändert:
 
 ### Invoice-Pfad
 
-1. Mapping, Paid-Status, finale Nummer, Tax Rule, Land, Währung, positive Positionen, SevUser und Unity prüfen.
+1. Mapping, Paid-Status, finale Nummer, Tax Rule, Land, Währung, positive Positionen, SevUser und Unity prüfen. Für Rule 19 wird zusätzlich genau eine passende `StaticCountry`-ID lesend aufgelöst; kein oder mehr als ein eindeutiger Treffer blockiert vor dem Write.
 2. Kontakt eindeutig auflösen.
 3. normale Invoice `RE` im Draft-Status 100 mit unveränderter WHMCS-Nummer und Marker erstellen.
-4. Invoice und Positionen erneut lesen; ID, Nummer, Kontakt, Rule, Status, Währung, Netto/Brutto, Positionen und Summen exakt vergleichen.
+4. Invoice und Positionen erneut lesen; ID, Nummer, Kontakt, Rule, Status, Währung, Netto/Brutto, Positionen und Summen exakt vergleichen. Rule 19 liest dazu `addressCountry` eingebettet zurück und verlangt mindestens einen zum eingefrorenen Zielland passenden Ländercode.
 5. erst danach Remote-ID, `document_type=invoice` und Dokumentnummer atomar mappen.
 6. unmittelbar vor `sendBy` oder `sendViaEmail` Draft-Header und alle Positionen nochmals lesend gegen den gefrorenen Snapshot prüfen.
 7. Invoice über `sendBy` ohne Kundenversand öffnen oder über den gewählten Versandpfad öffnen und zustellen.
@@ -263,7 +263,7 @@ Der Adaptervertrag erhält mindestens `authority`, `state`, `invoiceNumber` und 
 
 Der Client fragt ausschließlich mit einer internen WHMCS-Invoice-ID an. Die Route prüft:
 
-- angemeldeten WHMCS-Kunden und Eigentümer der Invoice;
+- angemeldeten WHMCS-Kunden, Eigentümer der Invoice und das WHMCS-Benutzerrecht `invoices` für diesen Client;
 - vollständiges Mapping mit `document_type=invoice`;
 - `document_ready_at` und gültige Remote-ID;
 - PDF-MIME, `%PDF`-Signatur, EOF-Marker und Größenlimit;
@@ -467,7 +467,7 @@ WHMCS-Kundenguthaben bleibt ein eigener Sonderfall. Bulk- und Hook-Export blocki
 
 - Token werden nie in Jobs, Fehlermeldungen oder HTML geschrieben.
 - PDF-Bytes liegen weder im Mapping noch in der Jobtabelle und werden nicht geloggt.
-- Clientdownload prüft Eigentümer und nimmt keine sevDesk-ID aus dem Request an.
+- Clientdownload prüft Eigentümer und das WHMCS-Benutzerrecht `invoices`; eine sevDesk-ID wird nicht aus dem Request übernommen.
 - In-Memory-Mailanhänge sind zufällig, einmalig, template- und invoicegebunden.
 - Logs enthalten nur Job-/Item-/Invoice-ID, Aktion, Dokumenttyp, Status, Fehlercode, HTTP-Status und bereinigte Kurzmeldung.
 - Namen, Adressen, E-Mails, USt-IDs, Positionsbeschreibungen und Rohpayloads werden nicht in Jobdiagnosen dupliziert.

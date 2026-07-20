@@ -109,7 +109,7 @@ final class Application
             new Client(),
             $token,
             'https://my.sevdesk.de/api/v1',
-            'Nerdscave WHMCS-sevdesk/2.1.0-rc.2',
+            'Nerdscave WHMCS-sevdesk/2.1.0-rc.3',
         );
     }
 
@@ -172,6 +172,7 @@ final class Application
             ),
             (string) $this->config->get('invoice_sev_user_id', ''),
             (string) $this->config->get('invoice_unity_id', ''),
+            fn (string $countryCode): ?string => $this->referenceData()->exactCountryId($countryCode),
         );
     }
 

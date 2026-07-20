@@ -16,6 +16,9 @@ final class ReferenceData
     /** @var array<string, string|null> */
     private array $countries = [];
 
+    /** @var array<string, string|null> */
+    private array $exactCountries = [];
+
     private ?string $addressCategoryId = null;
 
     private bool $addressCategoryLoaded = false;
@@ -139,6 +142,36 @@ final class ReferenceData
         }
 
         return $this->countries[$countryCode] = null;
+    }
+
+    /**
+     * Resolve a tax-relevant country without hiding API failures or accepting
+     * an unlabelled/ambiguous result row.
+     */
+    public function exactCountryId(string $countryCode): ?string
+    {
+        $countryCode = strtoupper(trim($countryCode));
+        if (isset($this->exactCountries[$countryCode]) || array_key_exists($countryCode, $this->exactCountries)) {
+            return $this->exactCountries[$countryCode];
+        }
+
+        $matchingIds = [];
+        foreach (self::rows($this->client->get('/StaticCountry', ['code' => $countryCode])) as $country) {
+            $code = strtoupper(trim((string) ($country['code'] ?? $country['countryCode'] ?? '')));
+            if ($code !== $countryCode) {
+                continue;
+            }
+            $id = self::numericId($country['id'] ?? null);
+            if ($id !== null) {
+                $matchingIds[] = $id;
+            }
+        }
+
+        if (count($matchingIds) !== 1) {
+            return $this->exactCountries[$countryCode] = null;
+        }
+
+        return $this->exactCountries[$countryCode] = $matchingIds[0];
     }
 
     public function contactAddressCategoryId(): ?string

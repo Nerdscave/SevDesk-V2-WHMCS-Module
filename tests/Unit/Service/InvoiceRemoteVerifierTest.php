@@ -102,23 +102,80 @@ final class InvoiceRemoteVerifierTest extends TestCase
         );
 
         $reportedCountry = $omittedCountry;
-        $reportedCountry['addressCountry'] = ['code' => 'DE'];
-        self::assertSame(
-            'delivery_country_unverifiable',
-            $this->verifier()->invoiceMismatch(
-                $reportedCountry,
-                $this->invoice(),
-                '42',
-                '19',
-                100,
-                '99',
-                'DE',
-            ),
-        );
+        $reportedCountry['addressCountry'] = ['code' => 'de'];
+        self::assertNull($this->verifier()->invoiceMismatch(
+            $reportedCountry,
+            $this->invoice(),
+            '42',
+            '19',
+            100,
+            '99',
+            'DE',
+        ));
+
+        $wrongFallback = $omittedCountry;
+        $wrongFallback['addressCountry'] = ['code' => 'FR'];
+        self::assertSame('delivery_country_mismatch', $this->verifier()->invoiceMismatch(
+            $wrongFallback,
+            $this->invoice(),
+            '42',
+            '19',
+            100,
+            '99',
+            'DE',
+        ));
 
         $reportedCountry['deliveryAddressCountry'] = 'DE';
         self::assertNull($this->verifier()->invoiceMismatch(
             $reportedCountry,
+            $this->invoice(),
+            '42',
+            '19',
+            100,
+            '99',
+            'DE',
+        ));
+
+        $conflictingCountries = $reportedCountry;
+        $conflictingCountries['addressCountry'] = ['code' => 'FR'];
+        self::assertNull($this->verifier()->invoiceMismatch(
+            $conflictingCountries,
+            $this->invoice(),
+            '42',
+            '19',
+            100,
+            '99',
+            'DE',
+        ));
+
+        $malformedDelivery = $reportedCountry;
+        $malformedDelivery['deliveryAddressCountry'] = ['id' => '1'];
+        self::assertSame('delivery_country_unverifiable', $this->verifier()->invoiceMismatch(
+            $malformedDelivery,
+            $this->invoice(),
+            '42',
+            '19',
+            100,
+            '99',
+            'DE',
+        ));
+
+        $malformedBilling = $reportedCountry;
+        $malformedBilling['addressCountry'] = ['id' => '1'];
+        self::assertNull($this->verifier()->invoiceMismatch(
+            $malformedBilling,
+            $this->invoice(),
+            '42',
+            '19',
+            100,
+            '99',
+            'DE',
+        ));
+
+        $malformedBillingFallback = $omittedCountry;
+        $malformedBillingFallback['addressCountry'] = ['id' => '1'];
+        self::assertSame('delivery_country_unverifiable', $this->verifier()->invoiceMismatch(
+            $malformedBillingFallback,
             $this->invoice(),
             '42',
             '19',

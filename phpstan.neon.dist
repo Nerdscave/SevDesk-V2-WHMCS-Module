@@ -6,6 +6,7 @@ parameters:
         - tests/Integration/Support/WhmcsCapsule.php
         - tests/StaticAnalysis/whmcs-functions.php
         - tests/StaticAnalysis/whmcs-client.php
+        - tests/StaticAnalysis/whmcs-user.php
         - tests/StaticAnalysis/whmcs-current-user.php
     tmpDir: .phpstan-cache
     treatPhpDocTypesAsCertain: false

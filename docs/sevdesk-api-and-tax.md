@@ -30,6 +30,7 @@ Vor dem ersten Write und im Health Check liest das Modul `/Tools/bookkeepingSyst
 | Buchhaltungssystem prüfen | `GET /Tools/bookkeepingSystemVersion` |
 | Konto-/Rule-Fähigkeit | `GET /ReceiptGuidance/forAllAccounts`, `/forAccountNumber`, `/forTaxRule`, `/forRevenue` |
 | Kontakt lesen/anlegen | benötigte `Contact`-Endpunkte |
+| Rule-19-Land auflösen | `GET /StaticCountry?code=<ISO>` |
 | Voucher-PDF temporär hochladen | `POST /Voucher/Factory/uploadTempFile` |
 | Voucher samt Positionen anlegen | `POST /Voucher/Factory/saveVoucher` |
 | Voucher lesen/suchen/buchen | benötigte `Voucher`-GET-Endpunkte, `PUT /Voucher/{id}/bookAmount` |
@@ -122,7 +123,8 @@ Eine Invoice wird nicht aus der WHMCS-PDF importiert. Das Modul erstellt eine no
     "showNet": false,
     "taxRule": {"id": "19", "objectName": "TaxRule"},
     "customerInternalNote": "[WHMCS-INVOICE:123]",
-    "deliveryAddressCountry": "FR",
+    "deliveryAddressCountry": "fr",
+    "addressCountry": {"id": "STATIC_COUNTRY_ID", "objectName": "StaticCountry"},
     "propertyIsEInvoice": false
   },
   "invoicePosSave": [
@@ -158,7 +160,7 @@ Verbindliche Regeln:
 - nach Create werden Invoice und alle Positionen gelesen und ID, Nummer, Status, Kontakt, Rule, Währung, Positionen und Summen exakt verglichen;
 - erst die bestätigte Remote-ID plus `document_type=invoice` ergibt ein erfolgreiches Mapping.
 
-sevDesk übernimmt `deliveryAddressCountry` beim Create, lässt aber bei normalen Invoice-GETs je nach Mandant sowohl dieses Feld als auch `addressCountry` weg. Meldet die API einen Ländercode, muss er exakt passen. Fehlen beide Felder bei einer normalen Nicht-OSS-Invoice, kann der übrige vollständige Abgleich fortgesetzt werden. Für die OSS-Rules 18 bis 20 muss dagegen ausdrücklich `deliveryAddressCountry` lesbar und passend sein; die Rechnungsadresse ist dafür kein Ersatz. In diesem Release ist davon nur die freigegebene Rule 19 erreichbar.
+Bei den OSS-Regeln 18 bis 20 erwartet sevDesk `deliveryAddressCountry` beim Create in der kleingeschriebenen Form aus `StaticCountry`, zum Beispiel `fr`. Von diesen Regeln ist in diesem Release nur Rule 19 erreichbar. Beim Factory-Endpunkt wird zusätzlich die zuvor lesend aufgelöste `StaticCountry`-Referenz als `addressCountry` gesetzt, weil der aktuelle Validator beide Angaben verlangt. Intern normalisiert das Modul ISO-Codes weiterhin auf Großbuchstaben. Beim Readback über `GET /Invoice/{id}?embed=addressCountry` kann sevDesk das beim Create gesendete `deliveryAddressCountry` weglassen. Ist das Lieferland vorhanden, ist es für OSS maßgeblich und darf von der Rechnungsadresse abweichen. Nur wenn es fehlt, dient `addressCountry` als Fallback und muss zum eingefrorenen Zielland passen. Sind beide Felder nicht lesbar, bleibt der Vorgang unklar und ein weiterer Write ist gesperrt. Bei normalen Nicht-OSS-Invoices kann der übrige vollständige Abgleich fortgesetzt werden, wenn beide Länderfelder fehlen.
 
 Die fehlende freie `accountDatev`-Zuordnung ist eine sichtbare Einschränkung von `invoice_only`, nicht etwas, das das Modul verdeckt ergänzt.
 
@@ -260,7 +262,7 @@ EU-Land außerhalb Deutschlands, keine Firma/USt-ID und `taxexempt=false` darf n
 
 ### Rule 19
 
-Eine bezahlte EU-B2C-Rechnung mit finaler Nummer und tatsächlichem WHMCS-Landsteuersatz wird nur dann Rule-19-Invoice, wenn Modus, OSS-Profil, Canary und digitale Homogenität bestätigt sind. In `voucher_only`, ohne Profil, vor Zahlung, ohne finale Nummer oder bei Rules 18/20 findet kein Remote-Write statt.
+Eine bezahlte EU-B2C-Rechnung mit finaler Nummer und tatsächlichem WHMCS-Landsteuersatz wird nur dann Rule-19-Invoice, wenn Modus, OSS-Profil, Canary und digitale Homogenität bestätigt sind. Die exakte `StaticCountry`-Auflösung gehört zum Preflight: Eine leere, unbeschriftete oder mehrdeutige Antwort blockiert vor dem Write. In `voucher_only`, ohne Profil, vor Zahlung, ohne finale Nummer oder bei Rules 18/20 findet ebenfalls kein Remote-Write statt.
 
 ### Konto mit unzulässiger Rule
 

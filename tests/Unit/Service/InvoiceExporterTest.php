@@ -14,6 +14,7 @@ use GuzzleHttp\Psr7\Response;
 use GuzzleHttp\Psr7\Request;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
+use WHMCS\Module\Addon\SevDesk\Api\ApiException;
 use WHMCS\Module\Addon\SevDesk\Api\SevdeskClient;
 use WHMCS\Module\Addon\SevDesk\Domain\DocumentTargetDecision;
 use WHMCS\Module\Addon\SevDesk\Domain\EInvoiceContext;
@@ -111,7 +112,7 @@ final class InvoiceExporterTest extends TestCase
             },
         );
 
-        self::assertSame(ExportResult::SUCCEEDED, $result->status);
+        self::assertSame(ExportResult::SUCCEEDED, $result->status, $result->code . ': ' . $result->message);
         self::assertSame('99', $result->remoteId);
         self::assertSame([
             10 => [
@@ -143,6 +144,7 @@ final class InvoiceExporterTest extends TestCase
         self::assertSame(0, $payload['invoice']['timeToPay']);
         self::assertSame('[WHMCS-INVOICE:10]', $payload['invoice']['customerInternalNote']);
         self::assertSame(1, $payload['invoice']['taxRule']['id']);
+        self::assertSame('DE', $payload['invoice']['deliveryAddressCountry']);
         self::assertSame(7, $payload['invoice']['contactPerson']['id']);
         self::assertSame(1, $payload['invoicePosSave'][0]['quantity']);
         self::assertSame(8, $payload['invoicePosSave'][0]['unity']['id']);
@@ -186,15 +188,216 @@ final class InvoiceExporterTest extends TestCase
             DocumentTargetResolver::OSS_RULE_19_CONFIRMED,
         ))->resolve($tax, true, true);
 
-        $payload = $exporter->buildPayload($invoice, '42', $tax, 'FR', $target);
+        $payload = $exporter->buildPayload($invoice, '42', $tax, 'FR', $target, null, '55');
         $encoded = json_encode($payload, JSON_THROW_ON_ERROR);
 
         self::assertSame(19, $payload['invoice']['taxRule']['id']);
-        self::assertSame('FR', $payload['invoice']['deliveryAddressCountry']);
+        self::assertSame('fr', $payload['invoice']['deliveryAddressCountry']);
+        self::assertSame(['id' => 55, 'objectName' => 'StaticCountry'], $payload['invoice']['addressCountry']);
         self::assertSame(20.0, $payload['invoicePosSave'][0]['taxRate']);
         self::assertFalse($payload['invoice']['showNet']);
         self::assertStringNotContainsString('accountDatev', $encoded);
         self::assertArrayNotHasKey('filename', $payload);
+    }
+
+    public function testRule19CountryReferenceIsResolvedBeforeTheWriteCheckpoint(): void
+    {
+        $history = [];
+        $checkpoints = [];
+        $exporter = new InvoiceExporter(
+            $this->client([], $history),
+            static fn (): null => null,
+            static fn (): bool => true,
+            '7',
+            '8',
+            static fn (): null => null,
+        );
+        $invoice = new InvoiceSnapshot(
+            10,
+            20,
+            'RE-10',
+            new DateTimeImmutable('2026-07-01'),
+            'EUR',
+            '120.00',
+            '0',
+            [new LineItem('Digital service', '120.00', '20', false)],
+        );
+        $tax = TaxDecision::allowInvoiceRule19(
+            'eu_b2c_oss_rule19',
+            'Confirmed digital service.',
+            ['20'],
+        );
+        $target = (new DocumentTargetResolver(
+            DocumentTargetResolver::MODE_INVOICE_FOR_OSS,
+            DocumentTargetResolver::AUTHORITY_WHMCS,
+            DocumentTargetResolver::OSS_RULE_19_CONFIRMED,
+        ))->resolve($tax, true, true);
+
+        $result = $exporter->export(
+            $invoice,
+            '42',
+            $tax,
+            'FR',
+            $target,
+            static function (string $checkpoint) use (&$checkpoints): void {
+                $checkpoints[] = $checkpoint;
+            },
+        );
+
+        self::assertSame(ExportResult::FAILED, $result->status);
+        self::assertSame('invoice_country_reference_missing', $result->code);
+        self::assertSame([], $checkpoints);
+        self::assertSame([], $history);
+    }
+
+    #[DataProvider('countryLookupFailureProvider')]
+    public function testRule19CountryLookupFailureRemainsAReadOnlyPreWriteFailure(
+        ?int $httpStatus,
+        string $sevdeskCode,
+        bool $outcomeUnknown,
+        string $expectedCode,
+    ): void {
+        $history = [];
+        $checkpoints = [];
+        $exporter = new InvoiceExporter(
+            $this->client([], $history),
+            static fn (): null => null,
+            static fn (): bool => true,
+            '7',
+            '8',
+            static function () use ($httpStatus, $sevdeskCode, $outcomeUnknown): never {
+                throw new ApiException(
+                    'Synthetic country lookup failure.',
+                    $httpStatus,
+                    $sevdeskCode,
+                    outcomeUnknown: $outcomeUnknown,
+                );
+            },
+        );
+        $invoice = new InvoiceSnapshot(
+            10,
+            20,
+            'RE-10',
+            new DateTimeImmutable('2026-07-01'),
+            'EUR',
+            '120.00',
+            '0',
+            [new LineItem('Digital service', '120.00', '20', false)],
+        );
+        $tax = TaxDecision::allowInvoiceRule19(
+            'eu_b2c_oss_rule19',
+            'Confirmed digital service.',
+            ['20'],
+        );
+        $target = (new DocumentTargetResolver(
+            DocumentTargetResolver::MODE_INVOICE_FOR_OSS,
+            DocumentTargetResolver::AUTHORITY_WHMCS,
+            DocumentTargetResolver::OSS_RULE_19_CONFIRMED,
+        ))->resolve($tax, true, true);
+
+        $result = $exporter->export(
+            $invoice,
+            '42',
+            $tax,
+            'FR',
+            $target,
+            static function (string $checkpoint) use (&$checkpoints): void {
+                $checkpoints[] = $checkpoint;
+            },
+        );
+
+        self::assertSame(ExportResult::FAILED, $result->status);
+        self::assertSame($expectedCode, $result->code);
+        self::assertFalse($result->context['outcomeUnknown']);
+        self::assertArrayNotHasKey('definiteWriteRejected', $result->context);
+        self::assertSame([], $checkpoints);
+        self::assertSame([], $history);
+    }
+
+    /** @return iterable<string,array{int|null,string,bool,string}> */
+    public static function countryLookupFailureProvider(): iterable
+    {
+        yield 'rate limit' => [429, 'RATE_LIMIT', false, 'api_rate_limited'];
+        yield 'server failure' => [503, 'SERVER_ERROR', false, 'invoice_country_reference_failed'];
+        yield 'transport timeout' => [null, 'transport_error', true, 'invoice_country_reference_failed'];
+        yield 'validation rejection' => [422, 'VALIDATION', false, 'invoice_country_reference_failed_permanent'];
+    }
+
+    public function testRule19ExportUsesExactCountryReferenceAndBillingCountryReadback(): void
+    {
+        $history = [];
+        $rule19Invoice = new InvoiceSnapshot(
+            10,
+            20,
+            'RE-10',
+            new DateTimeImmutable('2026-07-01'),
+            'EUR',
+            '120.00',
+            '0',
+            [new LineItem('Digital service', '120.00', '20', false)],
+        );
+        $rule19Tax = TaxDecision::allowInvoiceRule19(
+            'eu_b2c_oss_rule19',
+            'Confirmed digital service.',
+            ['20'],
+        );
+        $rule19Target = (new DocumentTargetResolver(
+            DocumentTargetResolver::MODE_INVOICE_FOR_OSS,
+            DocumentTargetResolver::AUTHORITY_WHMCS,
+            DocumentTargetResolver::OSS_RULE_19_CONFIRMED,
+        ))->resolve($rule19Tax, true, true);
+        $remoteDraft = [
+            'taxRule' => ['id' => '19', 'objectName' => 'TaxRule'],
+            'showNet' => false,
+            'deliveryAddressCountry' => null,
+            'addressCountry' => ['id' => '1490', 'objectName' => 'StaticCountry', 'code' => 'cy'],
+            'sumGross' => '120.00',
+        ];
+        $remotePosition = [
+            'name' => 'Digital service',
+            'text' => 'Digital service',
+            'price' => '120.00',
+            'taxRate' => '20',
+        ];
+        $client = $this->client([
+            new Response(201, [], '{"objects":{"invoice":{"id":"99"}}}'),
+            $this->invoiceResponse(100, $remoteDraft),
+            $this->positionResponse($remotePosition),
+            $this->invoiceResponse(100, $remoteDraft),
+            $this->positionResponse($remotePosition),
+            new Response(200, [], '{"objects":{"id":"501","objectName":"InvoiceLog"}}'),
+            $this->invoiceResponse(200, array_merge($remoteDraft, ['sendType' => 'VPDF'])),
+            $this->positionResponse($remotePosition),
+        ], $history);
+        $mappings = [];
+        $exporter = new InvoiceExporter(
+            $client,
+            static fn (int $invoiceId): mixed => $mappings[$invoiceId] ?? null,
+            static function (int $invoiceId, string $remoteId) use (&$mappings): void {
+                $mappings[$invoiceId] = $remoteId;
+            },
+            '7',
+            '8',
+            static fn (string $countryCode): string => $countryCode === 'CY' ? '1490' : '',
+        );
+
+        $result = $exporter->export($rule19Invoice, '42', $rule19Tax, 'CY', $rule19Target);
+
+        self::assertSame(ExportResult::SUCCEEDED, $result->status, $result->code . ': ' . $result->message);
+        self::assertSame([10 => '99'], $mappings);
+        $payload = json_decode((string) $history[0]['request']->getBody(), true, flags: JSON_THROW_ON_ERROR);
+        self::assertSame('cy', $payload['invoice']['deliveryAddressCountry']);
+        self::assertSame(
+            ['id' => 1490, 'objectName' => 'StaticCountry'],
+            $payload['invoice']['addressCountry'],
+        );
+        foreach ([1, 3, 6] as $historyIndex) {
+            self::assertStringContainsString(
+                'embed=addressCountry',
+                (string) $history[$historyIndex]['request']->getUri()->getQuery(),
+            );
+        }
+        self::assertSame(1, $this->countRequests($history, 'POST', '/api/v1/Invoice/Factory/saveInvoice'));
     }
 
     public function testUnknownCreateOutcomeIsAmbiguousAndNeverRetriedOrMapped(): void
@@ -1346,6 +1549,16 @@ final class InvoiceExporterTest extends TestCase
             static fn (array $entry): string => $entry['request']->getMethod(),
             $history,
         );
+    }
+
+    /** @param array<int, array<string, mixed>> $history */
+    private function countRequests(array $history, string $method, string $path): int
+    {
+        return count(array_filter(
+            $history,
+            static fn (array $entry): bool => $entry['request']->getMethod() === $method
+                && $entry['request']->getUri()->getPath() === $path,
+        ));
     }
 
     /**

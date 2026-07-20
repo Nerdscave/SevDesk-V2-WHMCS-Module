@@ -76,20 +76,45 @@ final class InvoiceRemoteVerifier
         }
         if ($deliveryCountryCode !== null) {
             $expectedCountry = strtoupper(trim($deliveryCountryCode));
-            $reportedDeliveryCountry = self::normaliseCountryCode($remote['deliveryAddressCountry'] ?? null);
-            if ($reportedDeliveryCountry !== null && $reportedDeliveryCountry !== $expectedCountry) {
-                return 'delivery_country_mismatch';
-            }
-            // Normal Invoice GET responses may omit both country fields. OSS is
-            // different: without a readable destination the tax result is not proven.
-            if (in_array($taxRuleId, ['18', '19', '20'], true)) {
-                if ($reportedDeliveryCountry === null) {
-                    return 'delivery_country_unverifiable';
+            $rawDeliveryCountry = $remote['deliveryAddressCountry'] ?? null;
+            $rawBillingCountry = $remote['addressCountry'] ?? null;
+            $reportedDeliveryCountry = self::normaliseCountryCode($rawDeliveryCountry);
+            $reportedBillingCountry = self::normaliseCountryCode($rawBillingCountry);
+            $ossRule = in_array($taxRuleId, ['18', '19', '20'], true);
+            if ($ossRule) {
+                // deliveryAddressCountry is the explicit OSS destination and may
+                // legitimately differ from the billing address. sevdesk can omit
+                // it on GET, so addressCountry is used only as a fallback.
+                if (self::hasReportedCountryValue($rawDeliveryCountry)) {
+                    if ($reportedDeliveryCountry === null) {
+                        return 'delivery_country_unverifiable';
+                    }
+                    if ($reportedDeliveryCountry !== $expectedCountry) {
+                        return 'delivery_country_mismatch';
+                    }
+                } else {
+                    if (
+                        !self::hasReportedCountryValue($rawBillingCountry)
+                        || $reportedBillingCountry === null
+                    ) {
+                        return 'delivery_country_unverifiable';
+                    }
+                    if ($reportedBillingCountry !== $expectedCountry) {
+                        return 'delivery_country_mismatch';
+                    }
                 }
             } else {
-                $reportedBillingCountry = self::normaliseCountryCode($remote['addressCountry'] ?? null);
+                if ($reportedDeliveryCountry !== null && $reportedDeliveryCountry !== $expectedCountry) {
+                    return 'delivery_country_mismatch';
+                }
                 if ($reportedBillingCountry !== null && $reportedBillingCountry !== $expectedCountry) {
                     return 'delivery_country_mismatch';
+                }
+                if (
+                    self::hasReportedCountryValue($rawDeliveryCountry)
+                    && $reportedDeliveryCountry === null
+                ) {
+                    return 'delivery_country_unverifiable';
                 }
             }
         }
@@ -136,6 +161,15 @@ final class InvoiceRemoteVerifier
         $countryCode = strtoupper(trim($value));
 
         return preg_match('/^[A-Z]{2}$/', $countryCode) === 1 ? $countryCode : null;
+    }
+
+    private static function hasReportedCountryValue(mixed $value): bool
+    {
+        if ($value === null || $value === '' || $value === []) {
+            return false;
+        }
+
+        return true;
     }
 
     /**
