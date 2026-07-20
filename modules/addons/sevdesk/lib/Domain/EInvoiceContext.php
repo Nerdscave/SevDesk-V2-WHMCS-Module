@@ -192,7 +192,13 @@ final class EInvoiceContext
         if ((string) ($remote['paymentMethod']['id'] ?? '') !== $this->paymentMethodId) {
             return 'e_invoice_payment_method_mismatch';
         }
-        if (self::remoteBoolean($remote['propertyIsEInvoice'] ?? null) !== true) {
+        // sevdesk can omit propertyIsEInvoice from Invoice GET responses even
+        // though getXml returns the native CII document. An explicit non-true
+        // value still fails here; callers additionally require verified XML.
+        if (
+            array_key_exists('propertyIsEInvoice', $remote)
+            && self::remoteBoolean($remote['propertyIsEInvoice']) !== true
+        ) {
             return 'e_invoice_flag_mismatch';
         }
 

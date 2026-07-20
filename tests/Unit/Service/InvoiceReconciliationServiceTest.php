@@ -438,7 +438,9 @@ final class InvoiceReconciliationServiceTest extends TestCase
         $history = [];
         $mappings = [];
         $xml = $this->zugferdXml();
-        $candidate = array_merge($this->candidate('99'), $this->eInvoiceFields());
+        $eInvoiceFields = $this->eInvoiceFields();
+        unset($eInvoiceFields['propertyIsEInvoice']);
+        $candidate = array_merge($this->candidate('99'), $eInvoiceFields);
         $service = new InvoiceReconciliationService(
             $this->client([
                 new Response(200, [], json_encode(['objects' => [$candidate]], JSON_THROW_ON_ERROR)),
@@ -478,6 +480,81 @@ final class InvoiceReconciliationServiceTest extends TestCase
             hash('sha256', $xml),
         ]], $mappings);
         self::assertSame(['GET', 'GET', 'GET'], array_map(
+            static fn (array $entry): string => $entry['request']->getMethod(),
+            $history,
+        ));
+    }
+
+    public function testEInvoiceRecoveryWithMissingFlagStillRequiresValidXml(): void
+    {
+        $history = [];
+        $mappings = [];
+        $eInvoiceFields = $this->eInvoiceFields();
+        unset($eInvoiceFields['propertyIsEInvoice']);
+        $candidate = array_merge($this->candidate('99'), $eInvoiceFields);
+        $service = new InvoiceReconciliationService(
+            $this->client([
+                new Response(200, [], json_encode(['objects' => [$candidate]], JSON_THROW_ON_ERROR)),
+                $this->positionResponse(),
+                new Response(200, [], '{}'),
+            ], $history),
+            static fn (): null => null,
+            static function () use (&$mappings): void {
+                $mappings[] = true;
+            },
+            '7',
+            '8',
+        );
+
+        $result = $service->reconcile(
+            $this->invoice(),
+            '42',
+            $this->taxDecision(),
+            'DE',
+            eInvoiceContext: $this->eInvoiceContext(),
+        );
+
+        self::assertSame(ExportResult::AMBIGUOUS, $result->status);
+        self::assertSame('invoice_reconciliation_xml_invalid', $result->code);
+        self::assertSame([], $mappings);
+        self::assertSame(['GET', 'GET', 'GET'], array_map(
+            static fn (array $entry): string => $entry['request']->getMethod(),
+            $history,
+        ));
+    }
+
+    public function testEInvoiceRecoveryRejectsExplicitFalseFlagWithoutXmlFallback(): void
+    {
+        $history = [];
+        $xml = $this->zugferdXml();
+        $candidate = array_merge(
+            $this->candidate('99'),
+            $this->eInvoiceFields(),
+            ['propertyIsEInvoice' => false],
+        );
+        $service = new InvoiceReconciliationService(
+            $this->client([
+                new Response(200, [], json_encode(['objects' => [$candidate]], JSON_THROW_ON_ERROR)),
+                $this->positionResponse(),
+                new Response(200, [], json_encode(['objects' => $xml], JSON_THROW_ON_ERROR)),
+            ], $history),
+            static fn (): null => null,
+            static fn (): bool => true,
+            '7',
+            '8',
+        );
+
+        $result = $service->reconcile(
+            $this->invoice(),
+            '42',
+            $this->taxDecision(),
+            'DE',
+            eInvoiceContext: $this->eInvoiceContext(),
+        );
+
+        self::assertSame(ExportResult::AMBIGUOUS, $result->status);
+        self::assertSame('invoice_reconciliation_no_match', $result->code);
+        self::assertSame(['GET'], array_map(
             static fn (array $entry): string => $entry['request']->getMethod(),
             $history,
         ));

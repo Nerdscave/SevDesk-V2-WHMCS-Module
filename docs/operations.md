@@ -2,7 +2,7 @@
 
 ## Freigabestatus
 
-Dieses Runbook gilt für `2.1.0-rc.2`. Der RC ist für Testinstallationen gedacht, nicht für Produktivdaten. Die automatisierten Prüfungen unter PHP 8.3 mit XMLReader und MariaDB sowie ein kleiner mailfreier Rule-1-Live-Lauf unter WHMCS-Hoheit sind abgeschlossen. Vor der Freigabe stehen noch die vollständige Prüfung unter WHMCS 8.13.4, die bisherigen Voucher-Canaries, der Invoice-API-Canary mit Rule 19, Versand und Zahlungsbuchung sowie der getrennte ZUGFeRD-Canary in einem echten sevDesk-Testmandanten aus.
+Dieses Runbook gilt für `2.1.0-rc.2`. Der RC ist für Testinstallationen gedacht, nicht für Produktivdaten. Die automatisierten Prüfungen unter PHP 8.3 mit XMLReader und MariaDB sowie ein kleiner mailfreier Rule-1-Live-Lauf unter WHMCS-Hoheit sind abgeschlossen. Beim ZUGFeRD-Pfad ist auch der technische Live-Kern mit synthetischen Daten geprüft. Vor der Freigabe stehen noch die bisherigen Voucher-Canaries, der vollständige Invoice-API-Canary mit Rule 19, Versand und Zahlungsbuchung sowie beim ZUGFeRD-Canary beide Mailwege und der reine Kundenlogin aus.
 
 Bis dahin bleiben `invoice_canary_confirmed`, `e_invoice_canary_confirmed` und bei neuen Rollouts auch `sync_enabled` deaktiviert. Ein 2.0-Bestand behält beim Upgrade den Modus `voucher_only` und erhält `runtime_review_required=on`. Diese Quarantäne stoppt automatische und manuelle Verarbeitung. Sie endet erst nach einer erfolgreichen read-only Prüfung und der Bestätigung im Setup.
 
@@ -231,7 +231,7 @@ Der Pfad ist nur mit `invoice_only`, sevDesk-Dokumenthoheit, bestandenem Invoice
 
 Der bestehende sevDesk-Kontakt muss eine Käuferreferenz, genau eine passende Haupt-E-Mail, eine vollständige deutsche Rechnungsadresse und `governmentAgency=false` besitzen. Das Modul trägt fehlende Daten nicht automatisch nach. Sobald das Kunden-Opt-in greift, führt ein fehlendes oder abweichendes Pflichtfeld zu einem Prüffall. Es gibt keinen stillen Rückfall auf eine normale PDF-Invoice.
 
-Das Modul übergibt `propertyIsEInvoice=true`, die strukturierte Empfängeradresse, die `PaymentMethod` und `takeDefaultAddress=false`. Nach dem Create liest es Invoice, Kontakt, Zahlungsmethode und Adresse zurück. Anschließend lädt es `getXml`, prüft Größe, UTF-8, CII-Wurzelelement und wohlgeformtes XML ohne DTD oder externe Entitäten und friert den SHA-256-Hash ein. Die EN-16931-Prüfung bleibt Bestandteil des externen Canarys; die lokale Strukturprüfung ersetzt sie nicht.
+Das Modul übergibt `propertyIsEInvoice=true`, die strukturierte Empfängeradresse, die `PaymentMethod` und `takeDefaultAddress=false`. Nach dem Create liest es Invoice, Kontakt, Zahlungsmethode und Adresse zurück. Liefert sevDesk das E-Invoice-Flag mit, muss es wahr sein. Fehlt das Feld, darf erst ein gültiges Ergebnis von `getXml` den Ablauf fortsetzen. Ein ausdrücklich falscher Wert blockiert auch dann, wenn XML abrufbar wäre. Das XML wird auf Größe, UTF-8, CII-Wurzelelement und Wohlgeformtheit ohne DTD oder externe Entitäten geprüft; anschließend friert das Modul den SHA-256-Hash ein. Die lokale Strukturprüfung ersetzt die externe EN-16931-Prüfung nicht.
 
 Das Mapping bleibt `document_type=invoice` und erhält additiv `is_e_invoice` sowie `xml_sha256`. `pdf_sha256` gehört weiterhin zur ausgelieferten sevDesk-PDF. Namen und Adressen werden nicht im Job gespeichert; dort liegen nur die notwendigen IDs und ein PII-freier Adresshash. PDF und XML werden weder dauerhaft in WHMCS gespeichert noch geloggt.
 
@@ -277,7 +277,7 @@ Scheitert die ID-Eindeutigkeit, Rule 19 oder der Markerabgleich, bleiben mindest
 
 Der ZUGFeRD-Canary ist vom normalen Invoice-Canary getrennt. Er verwendet einen synthetischen deutschen B2B-Kunden und muss vor `e_invoice_canary_confirmed` belegen:
 
-1. `propertyIsEInvoice=true`, strukturierte Adresse, `PaymentMethod`, `SevUser`, `Unity`, Kontakt und Rule 1 werden von sevDesk angenommen und unverändert zurückgegeben.
+1. `propertyIsEInvoice=true`, strukturierte Adresse, `PaymentMethod`, `SevUser`, `Unity`, Kontakt und Rule 1 werden von sevDesk angenommen. Fehlt das Flag beim Readback, muss `getXml` den E-Rechnungspfad eindeutig bestätigen; ein ausdrücklich falsches Flag ist nicht zulässig.
 2. `getXml` liefert wohlgeformtes CII-XML. Der Inhalt besteht zusätzlich eine externe EN-16931-Prüfung.
 3. Die von sevDesk erzeugte ZUGFeRD-PDF lässt sich über `getPdf` stabil laden; PDF- und XML-Hashes bleiben im getesteten Lifecycle nachvollziehbar.
 4. `sendBy` öffnet die Invoice ohne Vertragsabweichung.
@@ -286,6 +286,8 @@ Der ZUGFeRD-Canary ist vom normalen Invoice-Canary getrennt. Er verwendet einen 
 7. Recovery nach Create, XML-/PDF-Abruf, Öffnung und Versand führt keinen zweiten Remote-Write aus.
 
 Das Protokoll bleibt wie beim Invoice-Canary außerhalb von Git. Im Repository stehen weder Testadressen noch PDFs, XML-Dateien, IDs oder Rohpayloads. Ein gesetzter Setup-Schalter ersetzt den Canary nicht.
+
+Teilstand vom 20.07.2026: Mit einem synthetischen deutschen B2B-Konto wurden Create, Readback, `getXml`, `getPdf`, `sendBy`, die WHMCS-Kundenansicht und ein erneuter idempotenter Worker-Lauf geprüft. [Mustangproject 2.24.0](https://github.com/ZUGFeRD/mustangproject/releases/tag/core-2.24.0) meldete PDF/A und eingebettetes XML als gültig; das extrahierte XML war bytegleich zur `getXml`-Antwort. sevDesk ließ `propertyIsEInvoice` beim Readback aus. Außerdem lieferte die kombinierte `CommunicationWay`-Abfrage mit Kontakt, Typ und Hauptkennzeichen keine Zeile, während die kontaktgebundene Liste den korrekten Haupt-Mail-Eintrag enthielt. Beide Fälle sind im Modul jetzt explizit und fail-closed behandelt. `sendViaEmail(sendXml=false)`, der WHMCS-Mailanhang und der Eigentümertest in einer reinen Kundensitzung wurden nicht ausgeführt. `e_invoice_canary_confirmed` bleibt daher aus.
 
 ## Twenty-One-Adapter installieren
 
@@ -481,7 +483,7 @@ Der Checkpoint bestimmt die einzig zulässige Aktion:
 - bei `invoice_payment_pending`: kein sevDesk-Dokument wurde geschrieben. Im Hybridmodus aktuellen WHMCS-Paid-Status neu lesen; `invoice_payment_event_followup` bedeutet, dass ein während des Abschlusses beobachtetes `InvoicePaid`-Ereignis denselben Dedupe-Besitzer einmal erneut prüfen lässt;
 - nach `invoice_write_requested`: ausschließlich Invoice anhand Marker, Nummer, Kontakt, Währung, Rule, Betrag und Positionen suchen; kein zweiter Create;
 - nach `invoice_created` vor `mapping_persisted`: bekannte Invoice-ID lesen, exakt prüfen und erst dann Typ/ID mappen; bei ZUGFeRD zusätzlich `getXml` prüfen und den ersten XML-Hash einfrieren;
-- nach `invoice_xml_verified`: bekannte Invoice-ID, E-Rechnungsflag, PaymentMethod, Kontakt, Adresshash und gespeicherten XML-Hash erneut lesen; ein fehlendes oder abweichendes XML bleibt `ambiguous`;
+- nach `invoice_xml_verified`: bekannte Invoice-ID, PaymentMethod, Kontakt, Adresshash und gespeicherten XML-Hash erneut lesen. Ein vorhandenes E-Rechnungsflag muss wahr sein; ein fehlendes Flag ist nur zusammen mit gültigem, unverändertem XML zulässig. Fehlendes oder abweichendes XML bleibt `ambiguous`;
 - nach `mapping_persisted` ohne auffindbares lokales Mapping: nur den exakten Draft lesend suchen und typisiert wiederherstellen; niemals neu erstellen;
 - nach `invoice_open_write_requested`: Status, `sendType`, Kontakt, einen von sevDesk gemeldeten Ländercode und Positionen lesen; `sendBy` nicht automatisch wiederholen. Bei Rule 19 ist ein lesbar bestätigtes Lieferland Pflicht;
 - nach `invoice_delivery_write_requested`: Status, `sendType`, `sendDate`, Kontakt, einen von sevDesk gemeldeten Ländercode und Positionen lesen; `sendViaEmail` nicht automatisch wiederholen. Bei Rule 19 ist ein lesbar bestätigtes Lieferland Pflicht;
@@ -575,6 +577,7 @@ Wenn bereits das Anlegen eines Jobs timeoutet, zuerst in der Jobliste prüfen, o
 - `getXml` nur über den typisierten Workerpfad lesen; keine XML-Datei aus einem Ticket oder lokalen Export als Ersatz einspielen;
 - bei ungültigem CII, DTD-/Entity-Inhalt, Größenüberschreitung oder Hashabweichung das Item `ambiguous` lassen;
 - Kontakt, PaymentMethod und strukturierte Adresse gegen den eingefrorenen Kontext prüfen;
+- fehlt nur `propertyIsEInvoice` in der Invoice-Antwort, `getXml` trotzdem ausschließlich lesend prüfen; ein ausdrücklich falsches Flag bleibt ein Vertragsfehler;
 - weder den Soll-Hash überschreiben noch eine normale Invoice als Fallback erzeugen;
 - keine XML-Bytes in Datenbank, Log, Supportexport oder Repository ablegen.
 

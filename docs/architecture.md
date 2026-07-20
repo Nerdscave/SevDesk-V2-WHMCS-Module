@@ -73,13 +73,13 @@ Dieses Gate kann nicht durch Mocks oder die eingecheckte OpenAPI ersetzt werden.
 
 ## Architekturentscheidung: sevDesk-natives ZUGFeRD
 
-**Status:** implementiert, aber bis zum separaten Testmandanten-Canary gesperrt.
+**Status:** implementiert. Der technische Kern wurde mit synthetischen Daten live geprüft; die Produktivfreigabe bleibt bis zum vollständigen separaten Canary gesperrt.
 
 Das Modul erzeugt kein eigenes XML. Eine ZUGFeRD-Rechnung bleibt eine normale sevDesk-`Invoice`; das Payload setzt zusätzlich `propertyIsEInvoice=true`, eine bestätigte `PaymentMethod`, eine strukturierte Empfängeradresse und `takeDefaultAddress=false`.
 
 Die Auswahl ist bewusst eng. Sie setzt `invoice_only`, sevDesk-Hoheit, Rule 1, einen deutschen Organisationskunden, ein Admin-only-Tickbox-Opt-in, ein Aktivierungsdatum und den E-Invoice-Canary voraus. Der aktuelle Kontakt muss Käuferreferenz, genau eine passende Haupt-E-Mail, vollständige deutsche Anschrift und `governmentAgency=false` liefern. `SevUser`, `Unity`, `PaymentMethod` und Land werden im aktuellen Mandanten read-only geprüft. Die Pflichtdaten des Rechnungsausstellers lassen sich mit der versionierten API nicht vollständig lesen; ihr Nachweis gehört deshalb zum externen Canary. Eine definitive 422-Ablehnung bleibt ein permanenter Pflichtdatenfehler und führt nie zu einer normalen Invoice als Fallback.
 
-Nach Create und Finalisierung liest das Modul die Invoice und ihre Positionen erneut, prüft E-Invoice-Flag, Kontakt, PaymentMethod und einen kanonischen Adresshash und ruft `getXml` ab. Der XML-Hash wird vor dem nächsten Write eingefroren. Ändert sich das XML zwischen Create, `sendBy`, Versand oder Recovery, wird der Vorgang `ambiguous`. Das finale PDF folgt weiter dem vorhandenen Signatur-, Größen- und Hashvertrag.
+Nach Create und Finalisierung liest das Modul die Invoice und ihre Positionen erneut. Ein von sevDesk zurückgegebenes E-Invoice-Flag muss wahr sein. Fehlt das Feld im Readback, darf der Ablauf nur weitergehen, wenn `getXml` anschließend ein gültiges CII-Dokument liefert; ein ausdrücklich falscher Wert bleibt ein Vertragsfehler. Zusätzlich prüft das Modul Kontakt, PaymentMethod und einen kanonischen Adresshash. Der XML-Hash wird vor dem nächsten Write eingefroren. Ändert sich das XML zwischen Create, `sendBy`, Versand oder Recovery, wird der Vorgang `ambiguous`. Das finale PDF folgt weiter dem vorhandenen Signatur-, Größen- und Hashvertrag.
 
 Der persistierte Jobsnapshot enthält nur IDs, E-Invoice-Flag und SHA-256-Werte. Name, Straße, E-Mail und XML bleiben Laufzeitdaten. `mod_sevdesk.is_e_invoice` und `xml_sha256` ergänzen das Mapping; PDF und XML werden nicht dauerhaft gespiegelt.
 
@@ -232,7 +232,7 @@ Der bestehende Pfad bleibt fachlich unverändert:
 7. Invoice über `sendBy` ohne Kundenversand öffnen oder über den gewählten Versandpfad öffnen und zustellen.
 8. finale PDF laden, PDF-Signatur und Größenlimit prüfen und `document_ready_at`/`pdf_sha256` ergänzen; nach Zustellung zusätzlich `delivered_at` setzen.
 
-Bei einer ausgewählten ZUGFeRD-Invoice kommen vor dem Mapping der E-Invoice-Readback und `getXml` hinzu. Nach der Finalisierung muss derselbe XML-Hash erneut vorliegen. Der Versand über sevDesk setzt `sendXml=false`, weil das maßgebliche XML bereits im ZUGFeRD-PDF steckt.
+Bei einer ausgewählten ZUGFeRD-Invoice kommen vor dem Mapping der E-Invoice-Readback und `getXml` hinzu. Das Flag darf im Readback fehlen, aber nie ausdrücklich falsch sein. Ohne gültiges CII-XML entsteht kein Mapping. Nach der Finalisierung muss derselbe XML-Hash erneut vorliegen. Der Versand über sevDesk setzt `sendXml=false`, weil das maßgebliche XML bereits im ZUGFeRD-PDF steckt.
 
 Das WHMCS-PDF wird nicht in eine offizielle sevDesk-Invoice umgewandelt. sevDesk erzeugt die Invoice-PDF selbst.
 

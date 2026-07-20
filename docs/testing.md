@@ -20,7 +20,7 @@ Die Tests verwenden ausschließlich synthetische Kunden, Invoices und API-Fixtur
 
 MariaDB und PHP 8.3 bleiben eigene Release-Gates. Ein übersprungener Datenbanktest oder ein Lauf unter einer anderen PHP-Version ersetzt diese Nachweise nicht.
 
-Der Invoice-API-Canary und der davon getrennte ZUGFeRD-Canary sind eigene externe Gates. Mocks, OpenAPI-Fixtures und gesetzte Konfigurationswerte beweisen nicht, dass sie stattgefunden haben. Beide Testmandanten-Nachweise sind für `2.1.0-rc.2` noch offen.
+Der Invoice-API-Canary und der davon getrennte ZUGFeRD-Canary sind eigene externe Gates. Mocks, OpenAPI-Fixtures und gesetzte Konfigurationswerte beweisen nicht, dass sie stattgefunden haben. Beim ZUGFeRD-Pfad sind Create, Readback, `getXml`, `getPdf`, `sendBy`, Kundenansicht, PDF/XML-Hash und die externe EN-16931-Prüfung mit synthetischen Daten bestätigt. Die Mailwege und der Eigentümertest mit einer reinen Kundensitzung fehlen noch. Der normale Invoice-Canary ist ebenfalls nicht vollständig. Beide Setup-Gates bleiben deshalb aus.
 
 ## Testebenen
 
@@ -41,13 +41,14 @@ Schnelle Tests ohne WHMCS-Datenbank oder Netzwerk für:
 - ZUGFeRD-Auswahl nur für `invoice_only` mit sevDesk-Hoheit, deutschem Organisationskunden, Rule 1, gültigem Aktivierungsdatum, gesetztem Admin-Tickbox-Feld und bestätigtem Canary;
 - kein ZUGFeRD bei Rule 19, Rules 18/20, B2G, historischem Backfill, fehlendem XMLReader oder Rechnung vor dem Aktivierungsdatum;
 - kein stiller Fallback, sobald das Kunden-Opt-in greift und Kontakt-, Adress-, PaymentMethod-, Unity-, SevUser- oder Länderdaten fehlen;
-- `propertyIsEInvoice`, strukturierte Adresse, `PaymentMethod`, `takeDefaultAddress=false`, Rückprüfung des Adresshashs sowie unveränderliche PDF-/XML-Hashes;
+- `propertyIsEInvoice`, strukturierte Adresse, `PaymentMethod`, `takeDefaultAddress=false`, Rückprüfung des Adresshashs sowie unveränderliche PDF-/XML-Hashes; ein fehlendes Flag ist nur zusammen mit gültigem CII-XML zulässig, ein ausdrücklich falsches Flag nie;
 - `getXml` mit Größenlimit, UTF-8, CII-Wurzel, Wohlgeformtheit, DTD-/Entity-Blockade und fehlender XMLReader-Laufzeit;
 - einmaliger, invoice- und templategebundener In-Memory-Anhang;
 - Fehlerklassifikation und Retry-Entscheidung;
 - Statusübergänge von Job und Item;
 - lazy Kontakt-Referenzdaten: bestehende/verknüpfte Kontakte dürfen weder
   Address-Kategorie noch CommunicationWay-Key vorab laden;
+- die Haupt-E-Mail-Abfrage filtert den Kontakt serverseitig und prüft Kontakt-ID, Typ und Hauptkennzeichen nochmals lokal; fremde Kontakte, Telefonwege und Nebenadressen zählen nicht;
 - explizite Legacy-Kontakt-ID: Eine vorhandene Remote-ID bleibt auch ohne oder mit historisch anderer `customerNumber` maßgeblich und wird nicht aktualisiert. Ein 400/404 blockiert ohne Such- oder Create-Fallback;
 - leeres Kontaktfeld: Zulässig sind kein Treffer, genau ein Treffer oder mehrere exakt geprüfte Kundennummerntreffer. Listentreffer ohne Kundennummer werden per ID nachgelesen. Beweist auch der Einzelabruf keine Gleichheit, blockiert das Modul den Fall als unverifizierbar;
 - Kontakt-Neuanlage: Ein leerer Suchausgang blockiert ohne `customer_number_contact_creation_confirmed` vor Checkpoint und POST. Nach der Bestätigung darf dieselbe Eingabe einen Kontakt anlegen;
@@ -130,7 +131,7 @@ Abzudecken sind:
 - Voucher-Create mit HTTP 201 und Remote-ID;
 - Invoice-Create `RE`/100 mit HTTP 201, finaler WHMCS-Nummer, Marker, SevUser, Unity, Land, Rule und Positionen;
 - `GET /Invoice/{id}` und `getPositions` mit exakter ID-/Nummer-/Kontakt-/Rule-/Status-/Summenprüfung;
-- native E-Invoice mit `propertyIsEInvoice=true`, strukturierter Adresse, `PaymentMethod`, `takeDefaultAddress=false` sowie exakter Rückprüfung von Flag, Kontakt, Unity, PaymentMethod und Adresshash;
+- native E-Invoice mit `propertyIsEInvoice=true`, strukturierter Adresse, `PaymentMethod`, `takeDefaultAddress=false` sowie exakter Rückprüfung von Kontakt, Unity, PaymentMethod und Adresshash; die Matrix enthält vorhandenes Wahr-Flag, ausgelassenes Flag mit gültigem oder ungültigem XML und ein ausdrücklich falsches Flag;
 - `getXml` mit gültigem CII, leerer/übergroßer/ungültiger Antwort, DTD/Entity, Hashabweichung und fehlender XMLReader-Laufzeit;
 - `sendBy`, `sendViaEmail`, `getPdf` und typabhängiges `/Invoice/{id}/bookAmount`; bei `getPdf` sowohl dokumentiertes JSON/Base64 als auch die reale Raw-PDF-Antwort, fehlerhaftes Content-Encoding, HTTP 206/401, MIME, Signatur, Trailer und Größenlimit;
 - `sendViaEmail(sendXml=false)` für ZUGFeRD, ohne lose XML-Datei im WHMCS-Mail- oder Kundenpfad;
@@ -204,7 +205,7 @@ Der getrennte ZUGFeRD-Canary prüft zusätzlich:
 
 - synthetischer deutscher Organisationskunde mit Admin-Opt-in, Käuferreferenz, Haupt-E-Mail und vollständiger sevDesk-Rechnungsadresse;
 - Rule 1, `propertyIsEInvoice=true`, strukturierte Empfängeradresse, PaymentMethod und `takeDefaultAddress=false`;
-- Readback von Flag, Kontakt, Unity, PaymentMethod und Adresse;
+- Readback von Kontakt, Unity, PaymentMethod und Adresse; ein vorhandenes Flag muss wahr sein, ein fehlendes Feld braucht den zwingenden XML-Nachweis;
 - `getXml`, lokale CII-Strukturprüfung und externe EN-16931-Validierung;
 - stabile PDF-/XML-Hashes über Create, Open, `sendBy` und Download;
 - `sendViaEmail(sendXml=false)`, geprüfter sevDesk-/ZUGFeRD-PDF-Anhang über WHMCS und authentifizierter Kundendownload;

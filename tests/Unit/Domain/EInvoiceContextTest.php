@@ -119,4 +119,35 @@ final class EInvoiceContextTest extends TestCase
             'FR',
         );
     }
+
+    public function testRemoteReadbackMayOmitFlagButNeverReportItAsFalse(): void
+    {
+        $hash = EInvoiceContext::addressHash('Example GmbH', 'Musterstr. 1', '12345', 'Berlin', 'DE');
+        $context = EInvoiceContext::zugferd(
+            '42',
+            '9',
+            '8',
+            '1',
+            $hash,
+            'Example GmbH',
+            'Musterstr. 1',
+            '12345',
+            'Berlin',
+            'DE',
+        );
+        $remote = [
+            'contact' => ['id' => '42'],
+            'paymentMethod' => ['id' => '9'],
+            'addressName' => 'Example GmbH',
+            'addressStreet' => 'Musterstr. 1',
+            'addressZip' => '12345',
+            'addressCity' => 'Berlin',
+            'addressCountry' => ['id' => '1'],
+        ];
+
+        self::assertNull($context->remoteMismatch($remote));
+
+        $remote['propertyIsEInvoice'] = false;
+        self::assertSame('e_invoice_flag_mismatch', $context->remoteMismatch($remote));
+    }
 }

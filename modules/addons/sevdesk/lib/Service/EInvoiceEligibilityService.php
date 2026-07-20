@@ -316,11 +316,12 @@ final class EInvoiceEligibilityService
             return 'e_invoice_contact_master_data_missing';
         }
 
+        // Some sevdesk tenants return an empty list when type/main are combined
+        // with the contact filter. Read the bounded contact set and enforce
+        // EMAIL + main locally so the prerequisite remains fail-closed.
         $emails = self::rows($this->client->get('/CommunicationWay', [
             'contact[id]' => $contactId,
             'contact[objectName]' => 'Contact',
-            'type' => 'EMAIL',
-            'main' => '1',
             'limit' => 1000,
             'offset' => 0,
         ]));

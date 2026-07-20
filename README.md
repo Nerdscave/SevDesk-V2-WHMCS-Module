@@ -6,7 +6,7 @@ Für den nativen E-Rechnungspfad muss PHP außerdem `XMLReader` bereitstellen. D
 
 Die wählbaren Invoice-Modi gehören zu 2.1.0. Der aktuelle Stand ist `2.1.0-rc.2` und nur für Testsysteme vorgesehen. Der Voucher-, Booking- und Korrekturumfang aus 2.0.0 bleibt erhalten. Dieser RC ergänzt außerdem einen eng begrenzten, sevDesk-nativen ZUGFeRD-Pfad.
 
-> Der Invoice-API-Canary und der davon getrennte ZUGFeRD-Canary in einem echten sevDesk-Testmandanten stehen noch aus. Bis sie bestanden sind, bleiben `invoice_canary_confirmed` und `e_invoice_canary_confirmed` ausgeschaltet. Bei neuen Installationen und Freigaberollouts bleibt auch `sync_enabled` aus.
+> Der vollständige Invoice-API-Canary steht noch aus. Ein erster ZUGFeRD-Live-Test mit synthetischen Daten hat Create, Readback, `getXml`, `getPdf`, `sendBy`, Kundenansicht und die technische EN-16931-Prüfung bestanden. Offen sind noch beide Mailwege und der Eigentümertest mit einer reinen Kundensitzung. Deshalb bleiben `invoice_canary_confirmed` und `e_invoice_canary_confirmed` ausgeschaltet. Bei neuen Installationen und Freigaberollouts bleibt auch `sync_enabled` aus.
 >
 > Das Upgrade behält `voucher_only` bei, setzt aber einmalig `runtime_review_required=on`. Hooks, Worker und Remote-fähige Adminaktionen bleiben gesperrt, bis der übernommene Bestand im Setup geprüft und freigegeben wurde.
 
@@ -134,7 +134,7 @@ ZUGFeRD ist kein eigener Dokumenttyp. Das Mapping bleibt vom Typ `invoice`. Der 
 
 Nach einem Kunden-Opt-in gilt kein stiller Rückfall auf eine normale PDF-Invoice. Fehlen Pflichtdaten oder lehnt sevDesk die E-Rechnung ab, bleibt das Item mit einem verständlichen Fehler stehen. Rule 19 ist immer eine normale Invoice; OSS, Behördenfälle, XRechnung und historische E-Rechnungs-Nachläufe sind ausgeschlossen.
 
-sevDesk erstellt das strukturierte Dokument mit `propertyIsEInvoice=true`. Das Modul liest die Invoice zurück, prüft Kontakt, Zahlungsmethode und Adresshash, ruft `getXml` ab und friert dessen SHA-256 ein. Die ausgelieferte Datei bleibt das von sevDesk erzeugte ZUGFeRD-PDF. XML und PDF werden nicht dauerhaft in WHMCS gespeichert. Technischer Ausgangspunkt sind die [sevDesk-Hinweise zur E-Rechnungs-API](https://tech.sevdesk.com/api_news/posts/2024_11_15-einvoice_changes/); die fachliche Einordnung beschreibt die [BMF-FAQ zur E-Rechnung](https://www.bundesfinanzministerium.de/Content/DE/FAQ/e-rechnung.html).
+sevDesk erstellt das strukturierte Dokument mit `propertyIsEInvoice=true`. Beim Readback kann sevDesk dieses Feld auslassen. Ein vorhandener Wert muss weiterhin eindeutig wahr sein; fehlt das Feld, gilt erst ein erfolgreich geprüftes `getXml` als Nachweis. Das Modul prüft außerdem Kontakt, Zahlungsmethode und Adresshash und friert den SHA-256 des XML ein. Die ausgelieferte Datei bleibt das von sevDesk erzeugte ZUGFeRD-PDF. XML und PDF werden nicht dauerhaft in WHMCS gespeichert. Technischer Ausgangspunkt sind die [sevDesk-Hinweise zur E-Rechnungs-API](https://tech.sevdesk.com/api_news/posts/2024_11_15-einvoice_changes/); die fachliche Einordnung beschreibt die [BMF-FAQ zur E-Rechnung](https://www.bundesfinanzministerium.de/Content/DE/FAQ/e-rechnung.html).
 
 ## Datenmodell und Zuverlässigkeit
 

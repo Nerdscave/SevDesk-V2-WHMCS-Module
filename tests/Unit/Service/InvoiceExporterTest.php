@@ -915,7 +915,7 @@ final class InvoiceExporterTest extends TestCase
         $exporter = new InvoiceExporter(
             $this->client([
                 new Response(201, [], '{"objects":{"invoice":{"id":"99"}}}'),
-                $this->eInvoiceResponse(100),
+                $this->eInvoiceResponseWithoutFlag(100),
                 $this->positionResponse(),
                 $this->xmlResponse($xml),
             ], $history),
@@ -985,6 +985,71 @@ final class InvoiceExporterTest extends TestCase
         self::assertSame('Berlin', $payload['invoice']['addressCity']);
         self::assertSame(1, $payload['invoice']['addressCountry']['id']);
         self::assertFalse($payload['takeDefaultAddress']);
+    }
+
+    public function testMissingEInvoiceFlagStillRequiresStructurallyValidXmlAfterCreate(): void
+    {
+        $history = [];
+        $mappings = [];
+        $exporter = new InvoiceExporter(
+            $this->client([
+                new Response(201, [], '{"objects":{"invoice":{"id":"99"}}}'),
+                $this->eInvoiceResponseWithoutFlag(100),
+                $this->positionResponse(),
+                new Response(200, [], '{}'),
+            ], $history),
+            static fn (): null => null,
+            static function () use (&$mappings): void {
+                $mappings[] = true;
+            },
+            '7',
+            '8',
+        );
+
+        $result = $exporter->export(
+            $this->invoice(),
+            '42',
+            $this->taxDecision(),
+            'DE',
+            $this->target(DocumentTargetResolver::AUTHORITY_SEVDESK),
+            eInvoiceContext: $this->eInvoiceContext(),
+        );
+
+        self::assertSame(ExportResult::AMBIGUOUS, $result->status);
+        self::assertSame('invoice_xml_verification_invalid', $result->code);
+        self::assertSame([], $mappings);
+        self::assertSame(['POST', 'GET', 'GET', 'GET'], $this->requestMethods($history));
+    }
+
+    public function testExplicitFalseEInvoiceFlagIsNeverOverriddenByValidXmlAfterCreate(): void
+    {
+        $history = [];
+        $xml = $this->zugferdXml();
+        $exporter = new InvoiceExporter(
+            $this->client([
+                new Response(201, [], '{"objects":{"invoice":{"id":"99"}}}'),
+                $this->eInvoiceResponse(100, ['propertyIsEInvoice' => false]),
+                $this->positionResponse(),
+                $this->xmlResponse($xml),
+            ], $history),
+            static fn (): null => null,
+            static fn (): bool => true,
+            '7',
+            '8',
+        );
+
+        $result = $exporter->export(
+            $this->invoice(),
+            '42',
+            $this->taxDecision(),
+            'DE',
+            $this->target(DocumentTargetResolver::AUTHORITY_SEVDESK),
+            eInvoiceContext: $this->eInvoiceContext(),
+        );
+
+        self::assertSame(ExportResult::AMBIGUOUS, $result->status);
+        self::assertSame('remote_e_invoice_flag_mismatch', $result->code);
+        self::assertSame(['POST', 'GET'], $this->requestMethods($history));
     }
 
     public function testChangedNativeXmlNeverReplacesTheFrozenRecoveryHash(): void
@@ -1203,6 +1268,18 @@ final class InvoiceExporterTest extends TestCase
             'addressCity' => 'Berlin',
             'addressCountry' => ['id' => '1', 'objectName' => 'StaticCountry', 'code' => 'DE'],
         ], $overrides));
+    }
+
+    private function eInvoiceResponseWithoutFlag(int $status): Response
+    {
+        return $this->invoiceResponse($status, [
+            'paymentMethod' => ['id' => '9', 'objectName' => 'PaymentMethod'],
+            'addressName' => 'Example GmbH',
+            'addressStreet' => 'Musterstr. 1',
+            'addressZip' => '12345',
+            'addressCity' => 'Berlin',
+            'addressCountry' => ['id' => '1', 'objectName' => 'StaticCountry', 'code' => 'DE'],
+        ]);
     }
 
     private function xmlResponse(string $xml): Response

@@ -16,6 +16,8 @@ rc.2 sichert vor allem den Wechsel in `invoice_only` ab und ergänzt einen begre
 - Queue, Leases und Wartezeiten richten sich jetzt nach der Datenbankzeit. Dadurch bleiben Web- und Cron-Läufe auch dann synchron, wenn PHP-FPM und PHP-CLI unterschiedliche Standardzeitzonen verwenden.
 - Der PDF-Abruf verarbeitet sowohl die dokumentierte JSON-/Base64-Antwort als auch die in der Praxis vorkommende direkte PDF-Antwort. Beide Wege bleiben auf einen einzigen, streng geprüften GET begrenzt.
 - Normale Nicht-OSS-Invoices dürfen beim Readback ein von sevDesk ausgelassenes Länderfeld haben. Ein gemeldetes falsches Land blockiert weiterhin; Rule 19 bleibt ohne ausdrücklich lesbares Lieferland gesperrt.
+- Beim ZUGFeRD-Readback darf `propertyIsEInvoice` fehlen, weil sevDesk das Feld trotz vorhandenem CII-XML nicht immer mitsendet. Ein vorhandener Wert muss wahr sein, und ohne gültiges `getXml` wird kein Mapping gespeichert.
+- Die Haupt-E-Mail eines Kontakts wird aus einer begrenzten Kontaktabfrage lokal streng geprüft. Damit funktioniert der Pfad auch in Mandanten, in denen die kombinierte sevDesk-Abfrage mit Typ- und Hauptkennzeichen fälschlich leer bleibt.
 
 ## Austausch eines bestehenden Moduls
 
@@ -76,7 +78,7 @@ Der Pfad wird nur gewählt, wenn alle Voraussetzungen erfüllt sind:
 
 Greift das Kunden-Opt-in und fehlt eine Pflichtangabe, stoppt der Export. Es gibt keinen stillen Rückfall auf eine normale Invoice.
 
-sevDesk erhält `propertyIsEInvoice=true`, die strukturierte Adresse, PaymentMethod und `takeDefaultAddress=false`. Das Modul liest die Daten zurück, prüft das CII-XML aus `getXml` und friert den SHA-256-Hash ein. Die EN-16931-Prüfung erfolgt im externen Canary. Kundenbereich und WHMCS-Mail liefern weiterhin die geprüfte ZUGFeRD-PDF. Beim sevDesk-Versand wird `sendXml=false` gesetzt.
+sevDesk erhält `propertyIsEInvoice=true`, die strukturierte Adresse, PaymentMethod und `takeDefaultAddress=false`. Das Modul liest die Daten zurück, prüft das CII-XML aus `getXml` und friert den SHA-256-Hash ein. Lässt sevDesk das E-Invoice-Flag beim Readback aus, ist genau dieser XML-Nachweis Pflicht; ein ausdrücklich falsches Flag blockiert. Kundenbereich und WHMCS-Mail liefern weiterhin die geprüfte ZUGFeRD-PDF. Beim sevDesk-Versand wird `sendXml=false` gesetzt.
 
 Rule 19 bleibt eine normale Invoice. Rules 18/20, B2G, XRechnung und historische E-Rechnungs-Backfills sind ausgeschlossen.
 
@@ -84,12 +86,12 @@ Rule 19 bleibt eine normale Invoice. Rules 18/20, B2G, XRechnung und historische
 
 Folgende Gates sind noch offen:
 
-- WHMCS 8.13.4 mit Rollen, Hooks, Proforma, Theme-Adapter, Mail und Kundenbereich;
+- die noch offenen WHMCS-8.13.4-Prüfungen für Rollen, beide Mailwege und den Kundendownload mit reiner Kundensitzung;
 - Voucher-Canaries für die tatsächlich verwendeten Steuerfälle;
 - Invoice-API-Canary mit Rule 19, Marker, Pflichtreferenzen, PDF, Versand, `bookAmount` und Prüfung auf Voucher-/Invoice-ID-Kollisionen;
-- eigener ZUGFeRD-Canary mit Create, Readback, `getXml`, externer EN-16931-Prüfung, PDF, `sendBy`, `sendViaEmail(sendXml=false)`, geprüftem sevDesk-/ZUGFeRD-PDF-Anhang über WHMCS und Kundendownload;
+- Abschluss des ZUGFeRD-Canarys mit `sendViaEmail(sendXml=false)`, geprüftem sevDesk-/ZUGFeRD-PDF-Anhang über WHMCS und Eigentümertest des Kundendownloads;
 
-Abgeschlossen sind die automatisierten Prüfungen unter PHP 8.3 mit XMLReader, der vollständige MariaDB-Integrationstest und ein kleiner mailfreier Rule-1-Live-Lauf unter WHMCS-Hoheit. Der Live-Lauf ersetzt nicht den noch offenen Invoice-Canary für Rule 19, Versand und Zahlungsbuchung.
+Abgeschlossen sind die automatisierten Prüfungen unter PHP 8.3 mit XMLReader, der vollständige MariaDB-Integrationstest und ein kleiner mailfreier Rule-1-Live-Lauf unter WHMCS-Hoheit. Ein weiterer synthetischer Live-Test hat den ZUGFeRD-Kern unter sevDesk-Hoheit geprüft: Create, Readback, `getXml`, `getPdf`, `sendBy`, Kundenansicht und Idempotenz waren erfolgreich. [Mustangproject 2.24.0](https://github.com/ZUGFeRD/mustangproject/releases/tag/core-2.24.0) bestätigte PDF/A und EN 16931; das aus der PDF extrahierte XML war bytegleich zur API-Antwort. Dabei wurde keine Kundenmail versendet. Diese Teilprüfung ersetzt weder die noch offenen Mailtests noch den normalen Invoice-Canary für Rule 19 und Zahlungsbuchung.
 
 Der RC kann als GitHub-Pre-Release veröffentlicht werden, sobald die automatisierten Repository-Checks und der Archivscan grün sind. Das ist keine Freigabe für Produktivdaten. Die finale `2.1.0` folgt erst nach den genannten Gates.
 

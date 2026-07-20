@@ -353,7 +353,15 @@ final class EInvoiceEligibilityServiceTest extends TestCase
 
     public function testCompleteGermanB2bProfileCreatesRuntimeOnlyZugferdContext(): void
     {
-        $service = $this->service($this->readyResponses(), true);
+        $history = new ArrayObject();
+        $responses = $this->readyResponses();
+        $responses[5] = new Response(200, [], '{"objects":[
+            {"contact":{"id":"77"},"type":"EMAIL","main":"1","value":"foreign@example.test"},
+            {"contact":{"id":"42"},"type":"PHONE","main":"1","value":"+49 30 123456"},
+            {"contact":{"id":"42"},"type":"EMAIL","main":"0","value":"other@example.test"},
+            {"contact":{"id":"42"},"type":"EMAIL","main":"1","value":"billing@example.test"}
+        ]}');
+        $service = $this->service($responses, true, $history);
         $result = $service->decide(
             $this->invoice(),
             $this->contact(),
@@ -371,6 +379,26 @@ final class EInvoiceEligibilityServiceTest extends TestCase
         self::assertSame('9', $frozen['eInvoicePaymentMethodId']);
         self::assertArrayNotHasKey('street', $frozen);
         self::assertArrayNotHasKey('email', $frozen);
+
+        $requests = iterator_to_array($history);
+        self::assertCount(7, $requests);
+        $communicationRequest = null;
+        foreach ($requests as $requestEntry) {
+            $candidate = is_array($requestEntry) ? ($requestEntry['request'] ?? null) : null;
+            if (
+                $candidate instanceof \Psr\Http\Message\RequestInterface
+                && $candidate->getUri()->getPath() === '/api/v1/CommunicationWay'
+            ) {
+                $communicationRequest = $candidate;
+                break;
+            }
+        }
+        self::assertInstanceOf(\Psr\Http\Message\RequestInterface::class, $communicationRequest);
+        parse_str($communicationRequest->getUri()->getQuery(), $query);
+        self::assertSame('42', $query['contact']['id'] ?? null);
+        self::assertSame('Contact', $query['contact']['objectName'] ?? null);
+        self::assertArrayNotHasKey('type', $query);
+        self::assertArrayNotHasKey('main', $query);
     }
 
     public function testMissingRemoteBuyerReferenceBlocksSelectedEInvoice(): void

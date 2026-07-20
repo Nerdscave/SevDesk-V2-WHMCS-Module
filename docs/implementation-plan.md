@@ -508,7 +508,7 @@ Der Canary ist im aktuellen Stand extern ausstehend. Scheitert Marker, Rule 19 o
 - ZUGFeRD nur für neue, bezahlte deutsche Organisationskunden mit Rule 1, `invoice_only`, sevDesk-Hoheit und gesetztem Admin-Tickbox-Feld auswählen;
 - Auswahl, Contact-, PaymentMethod-, Unity- und Country-ID sowie einen PII-freien Hash aus Empfängername und strukturierter Adresse einfrieren;
 - `propertyIsEInvoice=true`, strukturierte Adresse, `paymentMethod` und `takeDefaultAddress=false` an den bestehenden `InvoiceExporter` übergeben;
-- E-Rechnungsflag, Kontakt, Zahlungsmethode und Adresshash zurückprüfen, `getXml` sicher und wohlgeformt als CII lesen und den ersten verifizierten XML-Hash unveränderlich speichern;
+- ein vorhandenes E-Rechnungsflag strikt zurückprüfen; fehlt es in der Invoice-Antwort, den Pfad nur nach erfolgreichem `getXml` fortsetzen. Kontakt, Zahlungsmethode und Adresshash bleiben Pflichtprüfungen, der erste verifizierte XML-Hash wird unveränderlich gespeichert;
 - vor Öffnung, PDF-Auslieferung und Versand erneut lesen. Ein abweichender XML-Hash bleibt `ambiguous` und ersetzt nie den Soll-Hash;
 - beim sevDesk-Versand `sendXml=false` verwenden. Kundenbereich und WHMCS-Mail liefern weiterhin nur das geprüfte ZUGFeRD-PDF, ohne PDF oder XML dauerhaft zu speichern;
 - fehlende Pflichtdaten und HTTP 422 nach ausdrücklicher Auswahl blockieren. Es gibt keinen Rückfall auf eine normale PDF-Invoice.
