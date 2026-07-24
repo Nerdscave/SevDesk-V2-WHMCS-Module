@@ -329,41 +329,96 @@ final class JobRepository
     /** @param array<string, scalar|null> $context */
     public function checkpoint(int $itemId, string $token, string $checkpoint, array $context = []): bool
     {
-        $query = Capsule::table(Migrator::ITEMS_TABLE)
-            ->where('id', $itemId)
-            ->where('lease_token', $token)
-            ->where('status', 'running');
-        $item = (clone $query)->first();
-        if ($item === null) {
-            return false;
-        }
-
-        $candidate = [];
-        if (is_string($item->candidate_json) && $item->candidate_json !== '') {
-            try {
-                $decoded = json_decode($item->candidate_json, true, 32, JSON_THROW_ON_ERROR);
-                $candidate = is_array($decoded) ? $decoded : [];
-            } catch (\JsonException) {
-                $candidate = [];
+        return Capsule::connection()->transaction(function () use (
+            $itemId,
+            $token,
+            $checkpoint,
+            $context,
+        ): bool {
+            $jobId = Capsule::table(Migrator::ITEMS_TABLE)
+                ->where('id', $itemId)
+                ->value('job_id');
+            if (!is_int($jobId) && !is_string($jobId)) {
+                return false;
             }
-        }
-        $context = self::preserveFrozenXmlHash($candidate, $context);
-        foreach ($context as $key => $value) {
-            if (preg_match('/^[A-Za-z][A-Za-z0-9_]{0,63}$/', $key) === 1) {
-                $candidate[$key] = is_string($value) ? mb_substr($value, 0, 255) : $value;
+
+            // Keep the established job-then-item lock order. In particular, the
+            // locked reread prevents a concurrent InvoicePaid dedupe signal from
+            // being overwritten by a checkpoint based on stale candidate JSON.
+            $job = Capsule::table(Migrator::JOBS_TABLE)
+                ->where('id', (int) $jobId)
+                ->lockForUpdate()
+                ->first();
+            if ($job === null) {
+                return false;
             }
-        }
+            $item = Capsule::table(Migrator::ITEMS_TABLE)
+                ->where('id', $itemId)
+                ->where('lease_token', $token)
+                ->where('status', 'running')
+                ->lockForUpdate()
+                ->first();
+            if ($item === null) {
+                return false;
+            }
 
-        $remoteId = $context['remoteId'] ?? null;
+            $candidate = [];
+            if (is_string($item->candidate_json) && $item->candidate_json !== '') {
+                try {
+                    $decoded = json_decode($item->candidate_json, true, 32, JSON_THROW_ON_ERROR);
+                    $candidate = is_array($decoded) ? $decoded : [];
+                } catch (\JsonException) {
+                    $candidate = [];
+                }
+            }
+            $checkpointContext = self::preserveFrozenXmlHash($candidate, $context);
+            foreach ($checkpointContext as $key => $value) {
+                if (preg_match('/^[A-Za-z][A-Za-z0-9_]{0,63}$/', $key) === 1) {
+                    $candidate[$key] = is_string($value) ? mb_substr($value, 0, 255) : $value;
+                }
+            }
 
-        return $query->update([
-            'checkpoint' => mb_substr($checkpoint, 0, 64),
-            'candidate_json' => $candidate === [] ? $item->candidate_json : $this->encode($candidate),
-            'sevdesk_id' => is_scalar($remoteId) && preg_match('/^\d+$/', (string) $remoteId) === 1
+            $remoteId = $checkpointContext['remoteId'] ?? null;
+            $targetCheckpoint = mb_substr($checkpoint, 0, 64);
+            $targetCandidateJson = $candidate === []
+                ? $item->candidate_json
+                : $this->encode($candidate);
+            $targetRemoteId = is_scalar($remoteId) && preg_match('/^\d+$/', (string) $remoteId) === 1
                 ? (string) $remoteId
-                : $item->sevdesk_id,
-            'updated_at' => $this->now(),
-        ]) === 1;
+                : $item->sevdesk_id;
+
+            $updated = Capsule::table(Migrator::ITEMS_TABLE)
+                ->where('id', $itemId)
+                ->where('lease_token', $token)
+                ->where('status', 'running')
+                ->update([
+                    'checkpoint' => $targetCheckpoint,
+                    'candidate_json' => $targetCandidateJson,
+                    'sevdesk_id' => $targetRemoteId,
+                    'updated_at' => $this->now(),
+                ]);
+            if ($updated === 1) {
+                return true;
+            }
+            if ($updated !== 0) {
+                return false;
+            }
+
+            // MariaDB reports zero affected rows when the same checkpoint is
+            // emitted twice within one timestamp second. Treat that as success
+            // only when the locked lease still contains the exact target state.
+            $persisted = Capsule::table(Migrator::ITEMS_TABLE)
+                ->where('id', $itemId)
+                ->lockForUpdate()
+                ->first();
+
+            return $persisted !== null
+                && $persisted->status === 'running'
+                && $persisted->lease_token === $token
+                && $persisted->checkpoint === $targetCheckpoint
+                && $persisted->candidate_json === $targetCandidateJson
+                && $persisted->sevdesk_id === $targetRemoteId;
+        });
     }
 
     public function finish(object $item, JobOutcome $outcome): void
@@ -879,6 +934,7 @@ final class JobRepository
                 'item.*', 'invoice.invoicenum', 'invoice.date', 'invoice.total',
                 'invoice.status as invoice_status',
                 'mapping.document_type as mapping_document_type',
+                'mapping.document_authority as mapping_document_authority',
                 'mapping.document_number as mapping_document_number',
                 'mapping.document_ready_at', 'mapping.delivered_at',
             ])
@@ -907,6 +963,7 @@ final class JobRepository
             'item.*', 'invoice.invoicenum', 'invoice.date', 'invoice.total',
             'invoice.status as invoice_status',
             'mapping.document_type as mapping_document_type',
+            'mapping.document_authority as mapping_document_authority',
             'mapping.document_number as mapping_document_number',
             'mapping.document_ready_at', 'mapping.delivered_at',
         ])->orderBy('item.id')
@@ -1661,6 +1718,7 @@ final class JobRepository
             || $invoiceId === null
             || $invoiceId < 1
             || $action !== 'export_document'
+            || $incomingCandidate === null
             || ($incomingCandidate['trigger'] ?? null) !== 'InvoicePaid'
             || ($incomingCandidate['requestedExportMode'] ?? null) !== 'invoice_for_oss'
         ) {
@@ -1682,6 +1740,25 @@ final class JobRepository
         if ($ownerMode !== 'invoice_for_oss') {
             return;
         }
+        if (array_key_exists('massPaymentContainerInvoiceId', $incomingCandidate)) {
+            $incomingParentId = self::positiveCandidateId(
+                $incomingCandidate['massPaymentContainerInvoiceId'],
+            );
+            $ownerHasParent = array_key_exists('massPaymentContainerInvoiceId', $candidate);
+            $ownerParentId = $ownerHasParent
+                ? self::positiveCandidateId($candidate['massPaymentContainerInvoiceId'])
+                : null;
+            if (
+                $incomingParentId === null
+                || ($ownerHasParent && $ownerParentId !== $incomingParentId)
+            ) {
+                // Never replace one paid-hook parent with another. The worker
+                // sees this monotonic flag and blocks before every remote write.
+                $candidate['massPaymentContainerConflict'] = true;
+            } elseif (!$ownerHasParent) {
+                $candidate['massPaymentContainerInvoiceId'] = $incomingParentId;
+            }
+        }
         $candidate['paidTriggerObserved'] = true;
         $candidate['paidTriggerObservedAt'] = $now;
 
@@ -1692,6 +1769,22 @@ final class JobRepository
                 'candidate_json' => $this->encode($candidate),
                 'updated_at' => $now,
             ]);
+    }
+
+    private static function positiveCandidateId(mixed $value): ?int
+    {
+        if (!is_int($value) && !is_string($value)) {
+            return null;
+        }
+        $normalised = trim((string) $value);
+        if (preg_match('/^[1-9]\d*$/', $normalised) !== 1) {
+            return null;
+        }
+        $id = filter_var($normalised, FILTER_VALIDATE_INT, [
+            'options' => ['min_range' => 1],
+        ]);
+
+        return is_int($id) ? $id : null;
     }
 
     private function shouldResumeAfterPaidTrigger(

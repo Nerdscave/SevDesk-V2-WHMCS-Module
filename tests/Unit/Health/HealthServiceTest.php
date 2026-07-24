@@ -72,6 +72,48 @@ final class HealthServiceTest extends TestCase
         self::assertStringContainsString('fail-closed', $notice['message']);
     }
 
+    public function testSmallBusinessPeriodNoticesCoverLegacyBoundedAndInvalidStates(): void
+    {
+        $off = HealthService::smallBusinessPeriodNotice(false, '');
+        self::assertSame('healthy', $off['status']);
+
+        $legacy = HealthService::smallBusinessPeriodNotice(true, '');
+        self::assertSame('warning', $legacy['status']);
+        self::assertStringContainsString('ohne Enddatum', $legacy['message']);
+
+        $bounded = HealthService::smallBusinessPeriodNotice(true, '31-12-2025');
+        self::assertSame('warning', $bounded['status']);
+        self::assertStringContainsString('31.12.2025', $bounded['message']);
+
+        $invalid = HealthService::smallBusinessPeriodNotice(true, '31-02-2025');
+        self::assertSame('error', $invalid['status']);
+        self::assertStringContainsString('ungültig', $invalid['message']);
+    }
+
+    public function testSmallBusinessInvoiceCanaryNoticeIsFailClosedOnlyForTheActiveProfile(): void
+    {
+        $inactive = HealthService::smallBusinessInvoiceCanaryNotice(false, false);
+        self::assertSame('healthy', $inactive['status']);
+
+        $blocked = HealthService::smallBusinessInvoiceCanaryNotice(true, false);
+        self::assertSame('error', $blocked['status']);
+        self::assertStringContainsString('gesperrt', $blocked['message']);
+        self::assertStringContainsString('Receipt Guidance', $blocked['message']);
+
+        $confirmed = HealthService::smallBusinessInvoiceCanaryNotice(true, true);
+        self::assertSame('healthy', $confirmed['status']);
+        self::assertStringContainsString('Rule 11 mit 0 %', $confirmed['message']);
+    }
+
+    public function testEInvoiceCreditBoundaryIsVisibleAsAWarning(): void
+    {
+        $notice = HealthService::eInvoiceCreditNotice();
+
+        self::assertSame('warning', $notice['status']);
+        self::assertStringContainsString('WHMCS-Guthaben', $notice['message']);
+        self::assertStringContainsString('blockiert', $notice['message']);
+    }
+
     public function testUnconfirmedContactCreationPolicyIsAWarning(): void
     {
         $notice = HealthService::contactCreationPolicyNotice(false);

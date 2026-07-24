@@ -51,6 +51,17 @@ final class Decimal
         return $negative ? -$minor : $minor;
     }
 
+    /** Convert an exact cent amount back to a canonical two-decimal string. */
+    public static function fromMinorUnits(int $minorUnits): string
+    {
+        $negative = $minorUnits < 0;
+        $absolute = abs($minorUnits);
+        $whole = intdiv($absolute, 100);
+        $fraction = $absolute % 100;
+
+        return ($negative ? '-' : '') . $whole . '.' . str_pad((string) $fraction, 2, '0', STR_PAD_LEFT);
+    }
+
     public static function grossMinorUnits(string $amount, string $taxRate, bool $net): int
     {
         if (!$net) {

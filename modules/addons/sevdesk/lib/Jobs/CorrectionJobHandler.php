@@ -140,7 +140,7 @@ final class CorrectionJobHandler
                 $contact->countryCode,
                 $contact->taxExempt,
                 $contact->vatNumber,
-                $this->config->bool('smallBusinessOwner'),
+                $this->config->smallBusinessAppliesOn($invoice->invoiceDate),
                 $this->whmcs->isAddFundsInvoice($invoiceId),
                 $positions,
                 $contact->isOrganisation(),

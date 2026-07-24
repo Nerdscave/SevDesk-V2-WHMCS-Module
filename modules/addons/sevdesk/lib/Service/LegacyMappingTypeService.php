@@ -13,12 +13,13 @@ use WHMCS\Module\Addon\SevDesk\Repository\MappingRepository;
 /** Read-only type detection followed by one explicit, freshly verified confirmation. */
 final class LegacyMappingTypeService
 {
-    /** @var Closure(int, string, string, string): (void|bool) */
+    /** @var Closure(int, string, string, string, string): (void|bool) */
     private readonly Closure $persistMetadata;
 
     /**
-     * @param callable(int, string, string, string): (void|bool) $persistMetadata
-     *     Receives WHMCS invoice ID, unchanged sevdesk ID, type and document number.
+     * @param callable(int, string, string, string, string): (void|bool) $persistMetadata
+     *     Receives WHMCS invoice ID, unchanged sevdesk ID, type, document number
+     *     and the authority explicitly selected by the administrator.
      */
     public function __construct(
         private readonly SevdeskClient $client,
@@ -43,7 +44,7 @@ final class LegacyMappingTypeService
         if ($inputFailure !== null) {
             return $inputFailure;
         }
-        $invoiceNumber = self::documentNumber($invoiceId, $invoiceNumber);
+        $invoiceNumber = WhmcsGateway::effectiveInvoiceNumber($invoiceId, $invoiceNumber);
         $remoteId = trim($remoteId);
 
         $voucher = null;
@@ -125,6 +126,7 @@ final class LegacyMappingTypeService
                 'numberEvidence' => $evidence['numberMatched'],
                 'markerEvidence' => $markerEvidence,
                 'legacyMarkerMissing' => $evidence['markerMissing'],
+                'deliveryReady' => $evidence['deliveryReady'],
             ],
         );
     }
@@ -147,8 +149,10 @@ final class LegacyMappingTypeService
         string $invoiceNumber,
         string $remoteId,
         string $confirmedType,
+        string $confirmedAuthority,
     ): array {
         $confirmedType = strtolower(trim($confirmedType));
+        $confirmedAuthority = strtolower(trim($confirmedAuthority));
         if (
             !in_array(
                 $confirmedType,
@@ -165,6 +169,28 @@ final class LegacyMappingTypeService
                 'The requested document type is invalid.',
             );
         }
+        if (
+            !in_array($confirmedAuthority, [
+                MappingRepository::DOCUMENT_AUTHORITY_WHMCS,
+                MappingRepository::DOCUMENT_AUTHORITY_SEVDESK,
+            ], true)
+        ) {
+            return self::result(
+                'blocked',
+                'legacy_mapping_authority_invalid',
+                'The requested document authority is invalid.',
+            );
+        }
+        if (
+            $confirmedType === MappingRepository::DOCUMENT_TYPE_VOUCHER
+            && $confirmedAuthority !== MappingRepository::DOCUMENT_AUTHORITY_WHMCS
+        ) {
+            return self::result(
+                'blocked',
+                'legacy_mapping_authority_invalid',
+                'A Voucher can only keep WHMCS document authority.',
+            );
+        }
 
         $inspection = $this->inspect($invoiceId, $invoiceNumber, $remoteId);
         if (($inspection['status'] ?? '') !== 'suggested') {
@@ -178,13 +204,25 @@ final class LegacyMappingTypeService
                 context: ['matchCount' => 1],
             );
         }
+        if (
+            $confirmedAuthority === MappingRepository::DOCUMENT_AUTHORITY_SEVDESK
+            && ($inspection['context']['deliveryReady'] ?? false) !== true
+        ) {
+            return self::result(
+                'blocked',
+                'legacy_mapping_delivery_not_ready',
+                'The legacy Invoice is not finalized and cannot become the customer-facing document.',
+                context: ['matchCount' => 1],
+            );
+        }
 
         try {
             $persisted = ($this->persistMetadata)(
                 $invoiceId,
                 trim($remoteId),
                 $confirmedType,
-                self::documentNumber($invoiceId, $invoiceNumber),
+                WhmcsGateway::effectiveInvoiceNumber($invoiceId, $invoiceNumber),
+                $confirmedAuthority,
             );
             if ($persisted === false) {
                 throw new \RuntimeException('Mapping metadata callback returned false.');
@@ -200,9 +238,10 @@ final class LegacyMappingTypeService
         return self::result(
             'confirmed',
             'legacy_mapping_type_confirmed',
-            'The legacy mapping received its explicitly confirmed document type.',
+            'The legacy mapping received its explicitly confirmed document type and authority.',
             $confirmedType,
-            self::documentNumber($invoiceId, $invoiceNumber),
+            WhmcsGateway::effectiveInvoiceNumber($invoiceId, $invoiceNumber),
+            ['documentAuthority' => $confirmedAuthority],
         );
     }
 
@@ -241,7 +280,7 @@ final class LegacyMappingTypeService
 
     /**
      * @param array<string, mixed> $voucher
-     * @return array{valid:bool,numberMatched:bool,markerMatched:bool,markerMissing:bool}
+     * @return array{valid:bool,numberMatched:bool,markerMatched:bool,markerMissing:bool,deliveryReady:bool}
      */
     private static function voucherEvidence(
         array $voucher,
@@ -261,12 +300,13 @@ final class LegacyMappingTypeService
             'numberMatched' => $numberMatched,
             'markerMatched' => $marker['matched'],
             'markerMissing' => $marker['missing'],
+            'deliveryReady' => false,
         ];
     }
 
     /**
      * @param array<string, mixed> $invoice
-     * @return array{valid:bool,numberMatched:bool,markerMatched:bool,markerMissing:bool}
+     * @return array{valid:bool,numberMatched:bool,markerMatched:bool,markerMissing:bool,deliveryReady:bool}
      */
     private static function invoiceEvidence(
         array $invoice,
@@ -288,6 +328,7 @@ final class LegacyMappingTypeService
             'numberMatched' => $numberMatched,
             'markerMatched' => $marker['matched'],
             'markerMissing' => $marker['missing'],
+            'deliveryReady' => in_array((int) ($invoice['status'] ?? 0), [200, 750, 1000], true),
         ];
     }
 
@@ -304,7 +345,7 @@ final class LegacyMappingTypeService
         ];
     }
 
-    /** @return array{valid:false,numberMatched:false,markerMatched:false,markerMissing:false} */
+    /** @return array{valid:false,numberMatched:false,markerMatched:false,markerMissing:false,deliveryReady:false} */
     private static function emptyEvidence(): array
     {
         return [
@@ -312,6 +353,7 @@ final class LegacyMappingTypeService
             'numberMatched' => false,
             'markerMatched' => false,
             'markerMissing' => false,
+            'deliveryReady' => false,
         ];
     }
 
@@ -322,7 +364,7 @@ final class LegacyMappingTypeService
     {
         if (
             $invoiceId < 1
-            || mb_strlen(self::documentNumber($invoiceId, $invoiceNumber)) > 191
+            || mb_strlen(WhmcsGateway::effectiveInvoiceNumber($invoiceId, $invoiceNumber)) > 191
             || self::numericId($remoteId) === null
         ) {
             return self::result(
@@ -333,15 +375,6 @@ final class LegacyMappingTypeService
         }
 
         return null;
-    }
-
-    private static function documentNumber(int $invoiceId, string $invoiceNumber): string
-    {
-        $invoiceNumber = trim($invoiceNumber);
-
-        // WHMCS uses its immutable row ID as the invoice reference while an
-        // installation has not assigned a display number yet.
-        return $invoiceNumber !== '' ? $invoiceNumber : (string) $invoiceId;
     }
 
     private static function numericId(mixed $value): ?string

@@ -147,6 +147,51 @@ final class AdminSetupBehaviorTest extends MariaDbTestCase
         self::assertSame('off', $application->config->get('e_invoice_mode'));
     }
 
+    public function testSmallBusinessCutoffChangeRequiresFreshInventoryConfirmation(): void
+    {
+        $application = $this->application();
+        $_POST['smallBusinessOwner'] = 'on';
+        $_POST['small_business_until'] = '2025-12-31';
+        $_POST['small_business_confirmed'] = 'on';
+
+        $this->expectSetupFailure($application, 'Übergangsinventur');
+
+        $_POST['transition_inventory_confirmed'] = '1';
+        $_POST['transition_inventory_fingerprint'] = $this->transitionInventoryFingerprint($application);
+        $this->invokeSaveSetup($application);
+
+        self::assertTrue($application->config->bool('smallBusinessOwner'));
+        self::assertSame('31-12-2025', $application->config->get('small_business_until'));
+    }
+
+    public function testAmbiguousExportBlocksSmallBusinessCutoffChange(): void
+    {
+        $application = $this->application();
+        $this->insertItem('completed', 'ambiguous', 'export_document');
+        $_POST['smallBusinessOwner'] = 'on';
+        $_POST['small_business_until'] = '2025-12-31';
+        $_POST['small_business_confirmed'] = 'on';
+        $_POST['transition_inventory_confirmed'] = '1';
+        $_POST['transition_inventory_fingerprint'] = $this->transitionInventoryFingerprint($application);
+
+        $this->expectSetupFailure($application, 'ungeklärte Exportjobs');
+
+        self::assertFalse($application->config->bool('smallBusinessOwner'));
+        self::assertSame('', $application->config->get('small_business_until'));
+    }
+
+    public function testInvalidSmallBusinessCutoffIsRejectedWithoutChangingSettings(): void
+    {
+        $application = $this->application();
+        $_POST['smallBusinessOwner'] = 'on';
+        $_POST['small_business_until'] = '2025-02-31';
+
+        $this->expectSetupFailure($application, 'gültigen Kleinunternehmer-Stichtag');
+
+        self::assertFalse($application->config->bool('smallBusinessOwner'));
+        self::assertSame('', $application->config->get('small_business_until'));
+    }
+
     public function testStaleNormalSetupFormCannotOverwriteANewerDocumentProfile(): void
     {
         $application = $this->application();
@@ -191,6 +236,80 @@ final class AdminSetupBehaviorTest extends MariaDbTestCase
         self::assertNotSame($before['fingerprint'], $after['fingerprint']);
     }
 
+    public function testRiskyTerminalExportBlocksDocumentProfileChanges(): void
+    {
+        $application = $this->applicationWithRuleElevenGuidance(true);
+        $this->insertItem(
+            'completed',
+            'permanent_failed',
+            'export_document',
+            'invoice_write_requested',
+        );
+        $_POST['small_business_invoice_canary_confirmed'] = 'on';
+        $_POST['invoice_discount_canary_confirmed'] = 'on';
+        $_POST['transition_inventory_confirmed'] = '1';
+        $_POST['transition_inventory_fingerprint'] = $this->transitionInventoryFingerprint($application);
+
+        $this->expectSetupFailure($application, 'ungeklärte Exportjobs');
+
+        self::assertFalse($application->config->bool('invoice_discount_canary_confirmed'));
+    }
+
+    public function testSafePreWriteTerminalDoesNotByItselfBlockAProfileChange(): void
+    {
+        $application = $this->applicationWithRuleElevenGuidance(true);
+        $this->insertItem('completed', 'permanent_failed', 'export_document', 'queued');
+        $_POST['small_business_invoice_canary_confirmed'] = 'on';
+        $_POST['invoice_discount_canary_confirmed'] = 'on';
+        $_POST['transition_inventory_confirmed'] = '1';
+        $_POST['transition_inventory_fingerprint'] = $this->transitionInventoryFingerprint($application);
+
+        $this->invokeSaveSetup($application);
+
+        self::assertTrue($application->config->bool('small_business_invoice_canary_confirmed'));
+        self::assertTrue($application->config->bool('invoice_discount_canary_confirmed'));
+    }
+
+    public function testRuleElevenInvoiceCanaryNeedsCurrentRevenueGuidance(): void
+    {
+        $application = $this->applicationWithRuleElevenGuidance(false);
+        $_POST['small_business_invoice_canary_confirmed'] = 'on';
+
+        $this->expectSetupFailure($application, 'kein REVENUE-Konto');
+
+        self::assertFalse(
+            $application->config->bool('small_business_invoice_canary_confirmed'),
+        );
+    }
+
+    public function testRuleElevenInvoiceCanaryIsProtectedByTheTransitionInventory(): void
+    {
+        $application = $this->applicationWithRuleElevenGuidance(true);
+        $_POST['small_business_invoice_canary_confirmed'] = 'on';
+
+        $this->expectSetupFailure($application, 'Übergangsinventur');
+
+        $_POST['transition_inventory_confirmed'] = '1';
+        $_POST['transition_inventory_fingerprint'] = $this->transitionInventoryFingerprint(
+            $application,
+        );
+        $this->invokeSaveSetup($application);
+
+        self::assertTrue(
+            $application->config->bool('small_business_invoice_canary_confirmed'),
+        );
+    }
+
+    public function testDiscountCanaryCannotBeStoredWithoutTheGeneralRuleElevenGate(): void
+    {
+        $application = $this->application();
+        $_POST['invoice_discount_canary_confirmed'] = 'on';
+
+        $this->expectSetupFailure($application, 'allgemeinen Rule-11-Invoice-Canary');
+
+        self::assertFalse($application->config->bool('invoice_discount_canary_confirmed'));
+    }
+
     public function testPublicClientTickboxCannotBeStoredAsEInvoiceOptIn(): void
     {
         $application = $this->application();
@@ -199,6 +318,40 @@ final class AdminSetupBehaviorTest extends MariaDbTestCase
         $this->expectSetupFailure($application, 'nur für Administratoren sichtbares Tickbox-Feld');
 
         self::assertSame('', $application->config->get('e_invoice_client_field_id'));
+    }
+
+    public function testWhmcs813CannotStoreTheUnsupportedTemplateAttachmentChannel(): void
+    {
+        $application = $this->application();
+        $_POST['export_mode'] = 'invoice_only';
+        $_POST['document_authority'] = 'sevdesk';
+        $_POST['sync_enabled'] = 'on';
+        $_POST['invoice_canary_confirmed'] = 'on';
+        $_POST['invoice_sev_user_id'] = '7';
+        $_POST['invoice_unity_id'] = '8';
+        $_POST['invoice_delivery_channel'] = 'whmcs_template';
+        $_POST['whmcs_invoice_email_template'] = 'Synthetic custom Invoice template';
+        $before = $application->config->stored();
+
+        $this->expectSetupFailure($application, 'keine Binäranhänge aus EmailPreSend');
+
+        self::assertSame($before, $application->config->stored());
+        self::assertSame('sevdesk', $application->config->get('invoice_delivery_channel'));
+    }
+
+    public function testWhmcsAuthorityPreservesAnIrrelevantLegacyTemplateSelection(): void
+    {
+        $application = $this->application();
+        $_POST['invoice_delivery_channel'] = 'whmcs_template';
+        $_POST['whmcs_invoice_email_template'] = 'Legacy custom Invoice template';
+
+        $this->invokeSaveSetup($application);
+
+        self::assertSame('whmcs_template', $application->config->get('invoice_delivery_channel'));
+        self::assertSame(
+            'Legacy custom Invoice template',
+            $application->config->get('whmcs_invoice_email_template'),
+        );
     }
 
     public function testZugferdCannotBeEnabledWithWhmcsAuthority(): void
@@ -433,6 +586,34 @@ final class AdminSetupBehaviorTest extends MariaDbTestCase
         return $application;
     }
 
+    private function applicationWithRuleElevenGuidance(bool $supported): Application
+    {
+        $application = $this->application();
+        $application->config->set('sevdesk_api_key', 'synthetic-token');
+        $guidanceBody = json_encode([
+            'objects' => [[
+                'accountDatevId' => 500,
+                'allowedReceiptTypes' => [$supported ? 'REVENUE' : 'REGULAR'],
+                'allowedTaxRules' => [[
+                    'id' => 11,
+                    'taxRates' => ['ZERO'],
+                ]],
+            ]],
+        ], JSON_THROW_ON_ERROR);
+        $client = new SevdeskClient(
+            new Client(['handler' => HandlerStack::create(new MockHandler([
+                new Response(200, [], $guidanceBody),
+                new Response(200, [], $guidanceBody),
+            ]))]),
+            'synthetic-token',
+            'http://127.0.0.1/api/v1',
+            'WHMCS-sevdesk-test',
+        );
+        (new ReflectionProperty(Application::class, 'client'))->setValue($application, $client);
+
+        return $application;
+    }
+
     /** @param list<Response> $responses */
     private function quarantinedApplication(array $responses = []): Application
     {
@@ -577,6 +758,7 @@ final class AdminSetupBehaviorTest extends MariaDbTestCase
             'sevdesk_email_subject' => 'Ihre Rechnung {invoice_number}',
             'sevdesk_email_body' => "Guten Tag,\n\nim Anhang finden Sie Ihre Rechnung {invoice_number}.",
             'import_only_paid' => 'on',
+            'small_business_until' => '',
             'eu_b2c_mode' => 'blocked',
             'accountingTypeGeneral' => '',
             'accountingTypeInterCommunityBusiness' => '',

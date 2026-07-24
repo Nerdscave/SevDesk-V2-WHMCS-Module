@@ -13,8 +13,10 @@ use WHMCS\Module\Addon\SevDesk\Domain\DocumentTargetDecision;
 use WHMCS\Module\Addon\SevDesk\Domain\Decimal;
 use WHMCS\Module\Addon\SevDesk\Domain\EInvoiceContext;
 use WHMCS\Module\Addon\SevDesk\Domain\ExportResult;
+use WHMCS\Module\Addon\SevDesk\Domain\InvoiceAddressContext;
 use WHMCS\Module\Addon\SevDesk\Domain\InvoiceSnapshot;
 use WHMCS\Module\Addon\SevDesk\Domain\TaxDecision;
+use WHMCS\Module\Addon\SevDesk\Repository\MappingRepository;
 
 /** Restores one typed Invoice mapping through reads only; it never creates a document. */
 final class InvoiceReconciliationService
@@ -22,7 +24,7 @@ final class InvoiceReconciliationService
     /** @var Closure(int): (int|string|null) */
     private readonly Closure $findMapping;
 
-    /** @var Closure(int, string, string, string, bool=, string|null=): (bool|null) */
+    /** @var Closure(int, string, string, string, bool=, string|null=, string=): (bool|null) */
     private readonly Closure $persistMapping;
 
     private readonly InvoiceRemoteVerifier $remoteVerifier;
@@ -225,6 +227,8 @@ final class InvoiceReconciliationService
         ?string $knownRemoteId = null,
         ?callable $checkpoint = null,
         ?EInvoiceContext $eInvoiceContext = null,
+        ?InvoiceAddressContext $invoiceAddressContext = null,
+        string $documentAuthority = MappingRepository::DOCUMENT_AUTHORITY_WHMCS,
     ): ExportResult {
         $checkpoint = $checkpoint === null ? null : Closure::fromCallable($checkpoint);
 
@@ -345,6 +349,7 @@ final class InvoiceReconciliationService
                 $taxDecision->taxRuleId ?? '',
                 $deliveryCountryCode,
                 $eInvoiceContext,
+                $invoiceAddressContext,
             ),
         ));
 
@@ -454,6 +459,7 @@ final class InvoiceReconciliationService
                 $invoice->invoiceNumber,
                 $eInvoiceContext !== null,
                 $xmlSha256,
+                $documentAuthority,
             );
             if ($persisted === false) {
                 throw new \RuntimeException('Mapping callback returned false.');
@@ -475,6 +481,7 @@ final class InvoiceReconciliationService
                     'documentType' => DocumentTargetDecision::DOCUMENT_INVOICE,
                     'documentNumber' => $invoice->invoiceNumber,
                 ],
+                $invoiceAddressContext?->frozenContext() ?? [],
                 $eInvoiceContext?->frozenContext($xmlSha256) ?? [
                     'isEInvoice' => false,
                     'xmlSha256' => null,
@@ -576,6 +583,7 @@ final class InvoiceReconciliationService
         string $taxRuleId,
         string $deliveryCountryCode,
         ?EInvoiceContext $eInvoiceContext = null,
+        ?InvoiceAddressContext $invoiceAddressContext = null,
     ): bool {
         return $this->remoteVerifier->invoiceMismatch(
             $candidate,
@@ -585,6 +593,7 @@ final class InvoiceReconciliationService
             100,
             deliveryCountryCode: $deliveryCountryCode,
             eInvoiceContext: $eInvoiceContext,
+            invoiceAddressContext: $invoiceAddressContext,
         ) === null;
     }
 

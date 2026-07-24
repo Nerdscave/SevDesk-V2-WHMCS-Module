@@ -121,6 +121,41 @@ final class WhmcsRuntimeCompatibilityTest extends MariaDbTestCase
                 'currency' => 0,
             ]);
         }
+        Capsule::table('tblinvoices')->insert([
+            'id' => 999,
+            'userid' => 7,
+            'invoicenum' => 'MASS-999',
+            'date' => '2025-01-01',
+            'datepaid' => '2026-07-10 12:00:00',
+            'subtotal' => '25.00',
+            'total' => '25.00',
+            'status' => 'Paid',
+        ]);
+        Capsule::table('tblinvoiceitems')->insert([
+            'invoiceid' => 999,
+            'type' => 'Invoice',
+            'relid' => 100,
+            'description' => 'Synthetic mass-payment reference',
+            'amount' => '25.00',
+            'taxed' => false,
+        ]);
+        Capsule::table(Migrator::MAPPING_TABLE)->insert([
+            'invoice_id' => 999,
+            'sevdesk_id' => '8999',
+            'document_type' => MappingRepository::DOCUMENT_TYPE_VOUCHER,
+            'document_number' => 'MASS-999',
+        ]);
+        Capsule::table('tblaccounts')->insert([
+            'id' => 1_999,
+            'invoiceid' => 999,
+            'date' => '2026-07-10 12:00:00',
+            'amountin' => '25.00',
+            'amountout' => '0.00',
+            'transid' => 'MASS-PAY-999',
+            'gateway' => 'banktransfer',
+            'refundid' => 0,
+            'currency' => 0,
+        ]);
         $gateway = new WhmcsGateway(new Config());
 
         $first = $gateway->bookingPaymentsBetween(

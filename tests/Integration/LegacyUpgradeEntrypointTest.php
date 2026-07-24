@@ -39,6 +39,7 @@ final class LegacyUpgradeEntrypointTest extends MariaDbTestCase
         self::assertSame('on', $stored[Config::RUNTIME_REVIEW_SETTING]);
         self::assertSame('70001', Capsule::table(Migrator::MAPPING_TABLE)->value('sevdesk_id'));
         self::assertNull(Capsule::table(Migrator::MAPPING_TABLE)->value('document_type'));
+        self::assertNull(Capsule::table(Migrator::MAPPING_TABLE)->value('document_authority'));
         Migrator::assertRuntimeSchema();
     }
 
@@ -76,6 +77,7 @@ final class LegacyUpgradeEntrypointTest extends MariaDbTestCase
         $config = new Config();
         self::assertSame($before, $this->mappingFingerprint());
         self::assertSame(3, Capsule::table(Migrator::MAPPING_TABLE)->whereNull('document_type')->count());
+        self::assertSame(3, Capsule::table(Migrator::MAPPING_TABLE)->whereNull('document_authority')->count());
         self::assertSame('synthetic-token', $config->stored()['sevdesk_api_key']);
         self::assertSame('42', $config->stored()['custom_field_id']);
         self::assertSame('4400', $config->stored()['accountingTypeGeneral']);
@@ -89,6 +91,7 @@ final class LegacyUpgradeEntrypointTest extends MariaDbTestCase
         self::assertSame('whmcs', $config->get('document_authority'));
         self::assertSame('blocked', $config->get('oss_profile'));
         self::assertFalse($config->bool('invoice_canary_confirmed'));
+        self::assertFalse($config->bool('small_business_invoice_canary_confirmed'));
         self::assertSame('off', $config->get('e_invoice_mode'));
         self::assertFalse($config->bool('e_invoice_canary_confirmed'));
     }
@@ -122,6 +125,7 @@ final class LegacyUpgradeEntrypointTest extends MariaDbTestCase
         self::assertTrue(Capsule::schema()->hasTable(Migrator::ITEMS_TABLE));
         self::assertSame('71201', Capsule::table(Migrator::MAPPING_TABLE)->value('sevdesk_id'));
         self::assertNull(Capsule::table(Migrator::MAPPING_TABLE)->value('document_type'));
+        self::assertNull(Capsule::table(Migrator::MAPPING_TABLE)->value('document_authority'));
     }
 
     public function testReplacementDisablesSyncBeforeAFailingSchemaMigration(): void

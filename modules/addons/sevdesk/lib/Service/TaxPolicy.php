@@ -32,7 +32,7 @@ final class TaxPolicy
      *
      * @var array<int, list<string>>
      */
-    private const INVOICE_TAX_RATES_BY_RULE = [
+    private const NORMAL_TAX_RATES_BY_RULE = [
         '1' => ['0', '7', '19'],
         '2' => ['0'],
         '3' => ['0'],
@@ -61,6 +61,8 @@ final class TaxPolicy
 
     private readonly string $ossProfile;
 
+    private readonly bool $invoiceRuleElevenTenantScopeSupported;
+
     /**
      * @param array<string, array<string, mixed>> $profiles
      * @param array<array-key, mixed>|null $receiptGuidance Unwrapped response from ReceiptGuidance/forRevenue.
@@ -70,6 +72,8 @@ final class TaxPolicy
         string $euB2cMode = self::EU_B2C_BLOCKED,
         ?array $receiptGuidance = null,
         string $ossProfile = self::OSS_BLOCKED,
+        private readonly bool $smallBusinessInvoiceCanaryConfirmed = false,
+        ?bool $invoiceRuleElevenTenantScopeSupported = null,
     ) {
         if (!in_array($euB2cMode, [self::EU_B2C_BLOCKED, self::EU_B2C_DOMESTIC_CONFIRMED], true)) {
             throw new \InvalidArgumentException('Invalid EU B2C mode.');
@@ -82,6 +86,8 @@ final class TaxPolicy
         $this->euB2cMode = $euB2cMode;
         $this->receiptGuidance = $receiptGuidance;
         $this->ossProfile = $ossProfile;
+        $this->invoiceRuleElevenTenantScopeSupported = $invoiceRuleElevenTenantScopeSupported
+            ?? self::guidanceSupportsInvoiceRuleEleven($receiptGuidance);
     }
 
     /**
@@ -107,10 +113,10 @@ final class TaxPolicy
             return TaxDecision::block('invalid_country', 'The customer country code is invalid.');
         }
 
-        if ($addFunds) {
-            $decision = $this->fromProfile('add_funds', true, null);
-        } elseif ($smallBusinessOwner) {
+        if ($smallBusinessOwner) {
             $decision = $this->fromProfile('small_business', true, '11');
+        } elseif ($addFunds) {
+            $decision = $this->fromProfile('add_funds', true, null);
         } elseif ($countryCode === 'DE') {
             if ($taxExempt) {
                 return TaxDecision::block(
@@ -200,10 +206,24 @@ final class TaxPolicy
             return TaxDecision::block('invalid_country', 'The customer country code is invalid.');
         }
 
-        if ($addFunds) {
-            $decision = $this->fromInvoiceProfile('add_funds', true, null, $lineItems);
-        } elseif ($smallBusinessOwner) {
+        if ($smallBusinessOwner) {
             $decision = $this->fromInvoiceProfile('small_business', true, '11', $lineItems);
+            if ($decision->allowed && !$this->smallBusinessInvoiceCanaryConfirmed) {
+                return TaxDecision::block(
+                    'small_business_invoice_canary_not_confirmed',
+                    'Rule 11 Invoices require their separate sevdesk tenant canary.',
+                    'small_business',
+                );
+            }
+            if ($decision->allowed && !$this->invoiceRuleElevenTenantScopeSupported) {
+                return TaxDecision::block(
+                    'invoice_rule11_tenant_scope_unsupported',
+                    'Receipt Guidance offers no REVENUE account with Rule 11 and a zero percent tax rate.',
+                    'small_business',
+                );
+            }
+        } elseif ($addFunds) {
+            $decision = $this->fromInvoiceProfile('add_funds', true, null, $lineItems);
         } elseif ($countryCode === 'DE') {
             if ($taxExempt) {
                 return TaxDecision::block(
@@ -266,6 +286,68 @@ final class TaxPolicy
         return self::validateEuB2bRates($decision, $lineItems);
     }
 
+    public function invoiceRuleElevenTenantScopeSupported(): bool
+    {
+        return $this->invoiceRuleElevenTenantScopeSupported;
+    }
+
+    /**
+     * InvoicePos has no accountDatev field. The guidance result therefore acts
+     * only as a tenant capability gate; it does not select an account for the
+     * Invoice payload.
+     *
+     * @param array<array-key, mixed>|null $guidance
+     */
+    public static function guidanceSupportsInvoiceRuleEleven(?array $guidance): bool
+    {
+        if ($guidance === null) {
+            return false;
+        }
+        if (isset($guidance['objects']) && is_array($guidance['objects'])) {
+            $guidance = $guidance['objects'];
+        }
+
+        foreach ($guidance as $accountGuide) {
+            if (
+                !is_array($accountGuide)
+                || preg_match('/^[1-9]\d*$/', trim((string) ($accountGuide['accountDatevId'] ?? ''))) !== 1
+            ) {
+                continue;
+            }
+            $receiptTypes = $accountGuide['allowedReceiptTypes'] ?? null;
+            if (
+                !is_array($receiptTypes)
+                || !in_array(
+                    'REVENUE',
+                    array_map('strtoupper', array_map('strval', $receiptTypes)),
+                    true,
+                )
+            ) {
+                continue;
+            }
+            $rules = $accountGuide['allowedTaxRules'] ?? null;
+            if (!is_array($rules)) {
+                continue;
+            }
+            foreach ($rules as $rule) {
+                if (!is_array($rule) || trim((string) ($rule['id'] ?? '')) !== '11') {
+                    continue;
+                }
+                $rates = $rule['taxRates'] ?? null;
+                if (!is_array($rates)) {
+                    continue;
+                }
+                foreach ($rates as $rate) {
+                    if (self::normaliseGuidanceRate($rate) === '0') {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
     /**
      * Validate an already selected account/rule pair and its actual tax rates.
      *
@@ -326,6 +408,15 @@ final class TaxPolicy
                     }
                 }
                 $allowedRates = array_values(array_unique($allowedRates));
+                $fixedRates = self::NORMAL_TAX_RATES_BY_RULE[$decision->taxRuleId ?? ''] ?? null;
+                if ($fixedRates === null) {
+                    return TaxDecision::block(
+                        'unsupported_voucher_tax_rule',
+                        'The selected tax rule is not enabled for sevdesk vouchers.',
+                        $decision->profile,
+                    );
+                }
+                $allowedRates = array_values(array_intersect($allowedRates, $fixedRates));
 
                 foreach ($lineItems as $lineItem) {
                     if (!$lineItem instanceof LineItem) {
@@ -500,7 +591,7 @@ final class TaxPolicy
                 $profileName,
             );
         }
-        if ($taxRule === '21' || !isset(self::INVOICE_TAX_RATES_BY_RULE[$taxRule])) {
+        if ($taxRule === '21' || !isset(self::NORMAL_TAX_RATES_BY_RULE[$taxRule])) {
             return TaxDecision::block(
                 'unsupported_invoice_tax_rule',
                 'The configured tax rule is not enabled for normal sevdesk Invoices.',
@@ -508,7 +599,7 @@ final class TaxPolicy
             );
         }
 
-        $allowedRates = self::INVOICE_TAX_RATES_BY_RULE[$taxRule];
+        $allowedRates = self::NORMAL_TAX_RATES_BY_RULE[$taxRule];
         foreach ($lineItems as $lineItem) {
             if (in_array(self::normaliseNumericRate($lineItem->taxRate), $allowedRates, true)) {
                 continue;

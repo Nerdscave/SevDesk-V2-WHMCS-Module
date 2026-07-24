@@ -30,6 +30,7 @@ final class ContactServiceTest extends TestCase
         ], $history);
         $stored = [];
         $checkpoints = [];
+        $guardContactIds = [];
         $addressCategoryCalls = 0;
         $emailKeyCalls = 0;
         $service = new ContactService(
@@ -54,8 +55,16 @@ final class ContactServiceTest extends TestCase
 
         $result = $service->resolve(
             $this->contact(),
-            static function (string $name) use (&$checkpoints): void {
+            static function (string $name, array $_context) use (&$checkpoints): null {
                 $checkpoints[] = $name;
+
+                return null;
+            },
+            false,
+            static function (?string $contactId) use (&$guardContactIds): bool {
+                $guardContactIds[] = $contactId;
+
+                return true;
             },
         );
 
@@ -65,6 +74,7 @@ final class ContactServiceTest extends TestCase
         self::assertSame('created', $result->value()->source);
         self::assertSame([7 => '42'], $stored);
         self::assertSame(['contact_write_requested', 'contact_linked'], $checkpoints);
+        self::assertSame([null, '42', '42'], $guardContactIds);
         self::assertSame(1, $addressCategoryCalls);
         self::assertSame(1, $emailKeyCalls);
         $contactPayload = json_decode((string) $history[1]['request']->getBody(), true);
@@ -73,6 +83,80 @@ final class ContactServiceTest extends TestCase
         self::assertFalse($contactPayload['governmentAgency'] ?? true);
         self::assertSame('/api/v1/ContactAddress', $history[2]['request']->getUri()->getPath());
         self::assertSame('/api/v1/CommunicationWay', $history[3]['request']->getUri()->getPath());
+    }
+
+    public function testPreWriteGuardBlocksContactCreateBeforeCheckpointAndPost(): void
+    {
+        $history = [];
+        $client = $this->client([
+            new Response(200, [], '{"objects":[]}'),
+        ], $history);
+        $checkpoints = [];
+        $service = new ContactService(
+            $client,
+            static fn (): bool => true,
+            static fn (): int => 1,
+            allowCustomerNumberContactCreate: true,
+        );
+
+        $result = $service->resolve(
+            $this->contact(),
+            static function (string $name, array $_context) use (&$checkpoints): null {
+                $checkpoints[] = $name;
+
+                return null;
+            },
+            false,
+            static fn (): bool => false,
+        );
+
+        self::assertTrue($result->isFailure());
+        self::assertSame('contact_pre_write_guard_failed', $result->errorCode());
+        self::assertSame([], $checkpoints);
+        self::assertCount(1, $history);
+        self::assertSame('GET', $history[0]['request']->getMethod());
+    }
+
+    public function testContractDriftAfterContactCreateSkipsAddressAndEmailPosts(): void
+    {
+        $history = [];
+        $client = $this->client([
+            new Response(200, [], '{"objects":[]}'),
+            new Response(201, [], '{"objects":{"id":42}}'),
+        ], $history);
+        $guardCalls = 0;
+        $service = new ContactService(
+            $client,
+            static fn (): bool => true,
+            static fn (): int => 1,
+            '3',
+            '47',
+            '2',
+            true,
+        );
+
+        $result = $service->resolve(
+            $this->contact(),
+            null,
+            false,
+            static function () use (&$guardCalls): bool {
+                ++$guardCalls;
+
+                return $guardCalls === 1;
+            },
+        );
+
+        self::assertTrue($result->isSuccess());
+        self::assertSame([
+            'address_not_added:local_contract_changed',
+            'email_not_added:local_contract_changed',
+        ], $result->value()->warnings);
+        self::assertSame(3, $guardCalls);
+        self::assertSame(
+            ['GET', 'POST'],
+            array_map(static fn (array $entry): string => $entry['request']->getMethod(), $history),
+        );
+        self::assertSame('/api/v1/Contact', $history[1]['request']->getUri()->getPath());
     }
 
     public function testSupplementaryReferenceResolversStayLazyForExistingContact(): void
@@ -394,7 +478,7 @@ final class ContactServiceTest extends TestCase
         $service = new ContactService(
             $client,
             static fn (): bool => true,
-            fn (string $countryCode): ?string => $referenceData->countryId($countryCode),
+            fn (string $countryCode): ?string => $referenceData->exactCountryId($countryCode),
             '3',
             fn (): ?string => $referenceData->contactAddressCategoryId(),
             fn (): ?string => $referenceData->emailKeyId(),
@@ -425,7 +509,7 @@ final class ContactServiceTest extends TestCase
         $service = new ContactService(
             $client,
             static fn (): bool => true,
-            fn (string $countryCode): ?string => $referenceData->countryId($countryCode),
+            fn (string $countryCode): ?string => $referenceData->exactCountryId($countryCode),
             '3',
             fn (): ?string => $referenceData->contactAddressCategoryId(),
             fn (): ?string => $referenceData->emailKeyId(),
@@ -458,7 +542,7 @@ final class ContactServiceTest extends TestCase
         $service = new ContactService(
             $client,
             static fn (): bool => true,
-            fn (string $countryCode): ?string => $referenceData->countryId($countryCode),
+            fn (string $countryCode): ?string => $referenceData->exactCountryId($countryCode),
             '3',
             fn (): ?string => $referenceData->contactAddressCategoryId(),
             fn (): ?string => $referenceData->emailKeyId(),
@@ -516,6 +600,81 @@ final class ContactServiceTest extends TestCase
         self::assertSame(0, $result->context()['matchCount']);
         self::assertCount(1, $history);
         self::assertSame('GET', $history[0]['request']->getMethod());
+    }
+
+    public function testRecoveryRelinksExactlyTheCheckpointedContactId(): void
+    {
+        $history = [];
+        $stored = [];
+        $checkpoints = [];
+        $client = $this->client([
+            new Response(200, [], '{"objects":{"id":"42","objectName":"Contact"}}'),
+        ], $history);
+        $service = new ContactService(
+            $client,
+            static function (int $clientId, string $contactId) use (&$stored): bool {
+                $stored[] = [$clientId, $contactId];
+
+                return true;
+            },
+            static fn (): int => 1,
+        );
+
+        $result = $service->resolve(
+            $this->contact(),
+            static function (string $name, array $context) use (&$checkpoints): bool {
+                $checkpoints[] = [$name, $context];
+
+                return true;
+            },
+            true,
+            expectedRecoveryContactId: '42',
+        );
+
+        self::assertFalse($result->isFailure());
+        self::assertInstanceOf(ContactResolution::class, $result->value());
+        self::assertSame('42', $result->value()->contactId);
+        self::assertSame([[7, '42']], $stored);
+        self::assertSame([['contact_linked', ['remoteContactId' => '42']]], $checkpoints);
+        self::assertCount(1, $history);
+        self::assertSame('/api/v1/Contact/42', $history[0]['request']->getUri()->getPath());
+        self::assertSame('', $history[0]['request']->getUri()->getQuery());
+    }
+
+    public function testRecoveryNeverReplacesCheckpointedContactWithCustomerNumberMatch(): void
+    {
+        $history = [];
+        $stored = [];
+        $client = $this->client([
+            new Response(
+                200,
+                [],
+                '{"objects":[{"id":"84","objectName":"Contact","customerNumber":"7"}]}',
+            ),
+        ], $history);
+        $service = new ContactService(
+            $client,
+            static function (int $clientId, string $contactId) use (&$stored): bool {
+                $stored[] = [$clientId, $contactId];
+
+                return true;
+            },
+            static fn (): int => 1,
+        );
+
+        $result = $service->resolve(
+            $this->contact(),
+            null,
+            true,
+            expectedRecoveryContactId: '42',
+        );
+
+        self::assertTrue($result->isFailure());
+        self::assertSame('contact_recovery_snapshot_missing', $result->errorCode());
+        self::assertSame([], $stored);
+        self::assertCount(1, $history);
+        self::assertSame('/api/v1/Contact/42', $history[0]['request']->getUri()->getPath());
+        self::assertSame('', $history[0]['request']->getUri()->getQuery());
     }
 
     /**

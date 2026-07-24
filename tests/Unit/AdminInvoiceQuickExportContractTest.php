@@ -94,7 +94,7 @@ final class AdminInvoiceQuickExportContractTest extends TestCase
             $dryRun,
         );
         self::assertStringContainsString(
-            '$snapshot->lineGrossMinorUnits() !== $snapshot->totalMinorUnits()',
+            '$snapshot->calculatedDocumentGrossMinorUnits() !== $snapshot->totalMinorUnits()',
             $dryRun,
         );
         self::assertStringContainsString("\$reasonCode = 'invoice_total_mismatch';", $dryRun);

@@ -54,7 +54,10 @@ Invoice-Erstellung, Öffnen, PDF und Versand sind getrennte Schritte. Erfolg ein
 | `invoice_for_oss` | Rule 19 als Invoice, sonst freigegebener Voucher-Pfad |
 | `invoice_only` | alle im Invoice-Vertrag freigegebenen Rules als Invoice |
 
-`document_authority=sevdesk` ist nur mit `invoice_only` zulässig. Invoice-Ziele sind immer paid-only und verlangen eine finale WHMCS-Rechnungsnummer.
+`document_authority=sevdesk` ist nur mit `invoice_only` zulässig. Invoice-Ziele sind immer paid-only und
+verlangen eine effektive WHMCS-Rechnungsnummer. Dafür verwendet das Modul das getrimmte `invoicenum`; ist es
+bei einer Legacy-Rechnung leer, gilt die unveränderliche interne Invoice-ID als WHMCS-Rechnungsnummer. Diese
+Auflösung ist rein lesend und füllt `tblinvoices.invoicenum` nicht nachträglich.
 
 Das bestätigte Rule-19-Profil ist gegenseitig ausschließend zur früheren Betreiberfreigabe `eu_b2c_mode=domestic_confirmed`. Das Setup blockiert diese widersprüchliche Kombination, damit derselbe EU-B2C-Fall nicht zugleich als deutsche Rule 1 und als OSS-Rule 19 freigegeben ist.
 
@@ -101,7 +104,17 @@ Für jeden Voucher gilt:
 - konsistenter Netto- oder Bruttomodus;
 - normaler Status 100, kein bezahlter Create-Sonderstatus;
 - unveränderter Dateiname aus dem temporären Upload;
-- HTTP 201, valide Remote-ID, exakte Rückprüfung und typisiertes Mapping als Erfolgsvoraussetzung.
+- HTTP 201 und valide Remote-ID;
+- vor dem Mapping ein separates `GET /Voucher/{id}` sowie ein gefiltertes
+  `GET /VoucherPos`: Kontakt, Rule, Status, Datum, Marker, Währung, Positionen,
+  Steuersätze und das vor dem Write eingefrorene `accountDatev` müssen passen.
+  Nur für die Voucher-Gesamtsumme bleibt die dokumentierte Toleranz von einem Cent.
+
+Die Recovery verwendet ausschließlich den im Job gespeicherten Kontakt-, Rule- und
+Kontovertrag. Fehlt er nach `voucher_write_requested`, bleibt das Item
+`ambiguous`; aktuelle Setupwerte dürfen den Altjob nicht neu interpretieren. Die
+Markersuche paginiert in 100er-Schritten bis höchstens 1.000 Kandidaten. Eine volle
+letzte Seite beweist keine Eindeutigkeit und darf kein Mapping wiederherstellen.
 
 ## Invoice-Vertrag
 
@@ -124,6 +137,11 @@ Eine Invoice wird nicht aus der WHMCS-PDF importiert. Das Modul erstellt eine no
     "taxRule": {"id": "19", "objectName": "TaxRule"},
     "customerInternalNote": "[WHMCS-INVOICE:123]",
     "deliveryAddressCountry": "fr",
+    "address": "Synthetischer Kunde\nTeststraße 1\n12345 Teststadt\nFR",
+    "addressName": "Synthetischer Kunde",
+    "addressStreet": "Teststraße 1",
+    "addressZip": "12345",
+    "addressCity": "Teststadt",
     "addressCountry": {"id": "STATIC_COUNTRY_ID", "objectName": "StaticCountry"},
     "propertyIsEInvoice": false
   },
@@ -143,30 +161,69 @@ Eine Invoice wird nicht aus der WHMCS-PDF importiert. Das Modul erstellt eine no
   "invoicePosDelete": null,
   "discountSave": null,
   "discountDelete": null,
-  "takeDefaultAddress": true
+  "takeDefaultAddress": false
 }
 ```
 
 Verbindliche Regeln:
 
 - `invoiceType=RE`, Create-Status 100;
-- unveränderte finale WHMCS-Nummer als `invoiceNumber`;
+- unveränderte effektive WHMCS-Nummer als `invoiceNumber`;
 - Marker `[WHMCS-INVOICE:<invoice_id>]` in einem lesbaren internen Feld;
-- positive EUR-Rechnung ohne angewendetes Guthaben und ohne negative Position;
+- positive EUR-Rechnung; angewendetes Guthaben ist nur bei einer exakt bewiesenen WHMCS-Sammelzahlung zulässig und verändert den Dokumentbrutto nicht;
+- negative Positionen bleiben blockiert. Die einzige Ausnahme ist genau ein strukturell zugeordneter `PromoHosting`-Eintrag, der im Rule-11-Pfad als festes `discountSave` übertragen wird;
 - exakt derselbe Netto-/Bruttomodus und WHMCS-Steuersatz wie im gefrorenen Snapshot;
-- konfigurierter, im Mandanten existierender `SevUser` und eine Standard-`Unity`;
+- eingefrorener, unmittelbar vor dem ersten Create nochmals lesend bestätigter `SevUser` und eine Standard-`Unity`;
+- vollständige WHMCS-Rechnungsadresse direkt am Dokument und `takeDefaultAddress=false`; ein bestehender sevDesk-Kontakt wird dafür weder ergänzt noch geändert;
 - v1 verwendet je WHMCS-Position Menge 1;
 - kein benutzerdefiniertes `accountDatev` an Invoice-Positionen;
 - nach Create werden Invoice und alle Positionen gelesen und ID, Nummer, Status, Kontakt, Rule, Währung, Positionen und Summen exakt verglichen;
 - erst die bestätigte Remote-ID plus `document_type=invoice` ergibt ein erfolgreiches Mapping.
 
-Bei den OSS-Regeln 18 bis 20 erwartet sevDesk `deliveryAddressCountry` beim Create in der kleingeschriebenen Form aus `StaticCountry`, zum Beispiel `fr`. Von diesen Regeln ist in diesem Release nur Rule 19 erreichbar. Beim Factory-Endpunkt wird zusätzlich die zuvor lesend aufgelöste `StaticCountry`-Referenz als `addressCountry` gesetzt, weil der aktuelle Validator beide Angaben verlangt. Intern normalisiert das Modul ISO-Codes weiterhin auf Großbuchstaben. Beim Readback über `GET /Invoice/{id}?embed=addressCountry` kann sevDesk das beim Create gesendete `deliveryAddressCountry` weglassen. Ist das Lieferland vorhanden, ist es für OSS maßgeblich und darf von der Rechnungsadresse abweichen. Nur wenn es fehlt, dient `addressCountry` als Fallback und muss zum eingefrorenen Zielland passen. Sind beide Felder nicht lesbar, bleibt der Vorgang unklar und ein weiterer Write ist gesperrt. Bei normalen Nicht-OSS-Invoices kann der übrige vollständige Abgleich fortgesetzt werden, wenn beide Länderfelder fehlen.
+Jede normale Invoice übernimmt Empfängername, Straße einschließlich zweiter Adresszeile, Postleitzahl, Ort und die eindeutig aufgelöste `StaticCountry`-Referenz aus der WHMCS-Rechnungsadresse. Der Request verwendet immer `takeDefaultAddress=false`; damit hängt `sendBy` nicht davon ab, ob am bereits verknüpften sevDesk-Kontakt eine Standardadresse gepflegt ist. Vor dem Create werden nur Länder-ID und ein kanonischer SHA-256-Adresshash im Job eingefroren, niemals die Anschrift. Create, Recovery, `sendBy` und Versand verlangen anschließend denselben Remote-Adresshash. Fehlt der neue Snapshot nach einem möglicherweise ausgeführten Write, bleibt der Altjob `ambiguous`; er ergänzt weder den Kontakt noch verändert er einen bestehenden Draft.
+
+Dieselbe strenge Länderauflösung gilt für neue Kontaktadressen und den deutschen E-Rechnungspfad. Die Antwort muss den angefragten ISO-Code tragen und eindeutig sein. Bei den bekannten GB-Dubletten wird nur der eindeutig bezeichnete Eintrag `United Kingdom` akzeptiert; fehlt er oder ist auch dieser mehrdeutig, findet kein Write statt.
+
+Bei den OSS-Regeln 18 bis 20 erwartet sevDesk `deliveryAddressCountry` beim Create in der kleingeschriebenen Form aus `StaticCountry`, zum Beispiel `fr`. Von diesen Regeln ist in diesem Release nur Rule 19 erreichbar. Beim Factory-Endpunkt wird dieselbe zuvor lesend aufgelöste `StaticCountry`-Referenz als `addressCountry` der vollständigen Rechnungsadresse gesetzt. Intern normalisiert das Modul ISO-Codes weiterhin auf Großbuchstaben. Beim Readback über `GET /Invoice/{id}?embed=addressCountry` kann sevDesk das beim Create gesendete `deliveryAddressCountry` weglassen. Ist das Lieferland vorhanden, ist es für OSS maßgeblich und darf von der Rechnungsadresse abweichen. Nur wenn es fehlt, dient `addressCountry` als Fallback und muss zum eingefrorenen Zielland passen. Die vollständige Rechnungsadresse muss unabhängig davon lesbar dem eingefrorenen Hash entsprechen.
 
 Die fehlende freie `accountDatev`-Zuordnung ist eine sichtbare Einschränkung von `invoice_only`, nicht etwas, das das Modul verdeckt ergänzt.
+
+### Sammelzahlungen, Guthaben und `discountSave`
+
+WHMCS-Sammelzahlungsrechnungen enthalten ausschließlich Positionen vom Typ `Invoice`. Deren `relid` zeigt auf die Originalrechnung, während die tatsächliche Gateway-Transaktion am Sammelbeleg hängt. Nur wenn alle Links, Mandanten, Status-, Steuer- und Betragsfelder sowie die Zahlungen zusammenpassen, gilt der Container als reiner Zahlungsbeleg. Er wird nicht als Umsatz nach sevDesk geschrieben.
+
+Für die Originalrechnung gilt centgenau `subtotal + tax + tax2 = total + credit`. Der Dokumentbrutto ist `total + credit`; `total` ist der direkte Zahlteil. Bei Teilguthaben muss die Summe der eigenen positiven `tblaccounts`-Zahlungen deshalb exakt `total` entsprechen. Bei Vollguthaben steht `total = 0` und es gibt keine eigene positive Gateway-Transaktion an der Originalrechnung. Der gemeinsame Zahlungseingang wird nicht automatisch auf einzelne sevDesk-Invoices gebucht. Der Buchungsassistent akzeptiert weiterhin nur eine eindeutig zur einzelnen Rechnung passende Banktransaktion.
+
+Rückerstattungen werden auch über die Gegenrichtung geprüft: Eine separate `tblaccounts`-Zeile mit `refundid` zur ursprünglichen Zahlung blockiert die Kette selbst dann, wenn ihre `invoiceid` nicht mehr auf den Parent oder die Originalrechnung zeigt.
+
+Der Kopfvertrag ist unabhängig vom WHMCS-`TaxType`. Nur der Positionsvergleich unterscheidet sich: Bei `Exclusive` entspricht die Summe der WHMCS-Positionen `subtotal`, bei `Inclusive` dem Dokumentbrutto. Andere `TaxType`-Werte werden blockiert.
+
+Ein alter, eindeutig unbezahlter (`Unpaid`) oder stornierter (`Cancelled`) Sammelzahlungsversuch ohne Zahlung, Guthaben, Mapping oder Rückerstattung blockiert einen später vollständig passenden Vorgang nicht. Andere Zustände werden nicht als harmlos geraten: Insbesondere `Refunded`, `Collections`, `Draft` und unbekannte Werte halten die Kette in der Prüfung, auch wenn keine Transaktionszeile mehr vorhanden ist. Sobald der alte Elternbeleg selbst einen möglichen Zahlungseffekt zeigt, bleibt die Kette ebenfalls gesperrt.
+
+Ein Parent gilt nur als eindeutig, wenn sein gesamter Zielgraph frei von einem zweiten aktiven Parent ist. Teilt er auch nur ein Ziel mit einem konkurrierenden Sammelbeleg, bleiben beide Container und sämtliche Ziele beider betroffenen Graphen gesperrt. Ein Ziel darf den Konflikt nicht deshalb umgehen, weil es selbst nur in einem der Container vorkommt.
+
+Ein negativer `PromoHosting`-Eintrag wird nur akzeptiert, wenn genau ein positiver `Hosting`-Eintrag mit derselben `relid` und demselben `taxed`-Wert existiert. Der Rabatt darf diesen Hosting-Betrag nicht überschreiten. Zulässig sind genau ein solcher Rabatt, `invoice_only`, Rule 11, durchgehend 0 %, EUR, der allgemeine Rule-11-Invoice-Canary und der zusätzliche Rabatt-Canary. Das Payload sendet ausschließlich positive `invoicePosSave`-Positionen und den absoluten Rabatt über `discountSave`.
+
+Vor `invoice_write_requested` friert das Modul einen PII-freien SHA-256 des Rabattvertrags ein. Die Remote-Invoice trägt zusätzlich `[WHMCS-DISCOUNT:<sha256>]`. Recovery verlangt diesen Marker sowie exakte Rabatt-, Positions- und Gesamtsummen. Die dokumentierte API bietet keinen eigenen Invoice-Discount-Read-Endpunkt; deshalb gehört die atomare `discountSave`-Semantik zum externen Canary. Ohne bestätigten Canary erfolgt kein Create.
+
+### Rule 11 bei normalen Invoices
+
+Der Voucher-Pfad prüft das konfigurierte `accountDatev` zusammen mit Rule 11 und 0 % gegen `ReceiptGuidance`. Bei normalen Invoices ist diese Zuordnung nicht möglich: `InvoicePos` unterstützt kein eigenes `accountDatev`, sodass sevDesk das Erlöskonto selbst bestimmt.
+
+Ein Live-Lauf hat diese Grenze sichtbar gemacht. Create akzeptierte den Rule-11-Entwurf, `sendBy` lehnte ihn danach mit Code 7100 ab, weil `KLEINUNTERNEHMER_P19` für das automatisch gewählte Konto beziehungsweise dessen Scope nicht zulässig war. Ein erfolgreicher Draft beweist deshalb noch keine nutzbare Rule-11-Invoice.
+
+Das Modul verlangt für Rule-11-Invoices zwei unabhängige Nachweise:
+
+- `small_business_invoice_canary_confirmed` bestätigt den vollständigen, rabattfreien Lifecycle im aktuell verbundenen Mandanten;
+- die jeweils aktuelle `ReceiptGuidance` enthält mindestens ein numerisches `REVENUE`-Konto, das Rule 11 mit 0 % zulässt.
+
+Die Guidance-Prüfung wählt kein Konto für das Payload. Sie ist ein Capability-Gate und blockiert mit `invoice_rule11_tenant_scope_unsupported`, wenn der Mandant die nötige Kombination nicht anbietet. Ist nur der Canary offen, lautet der Fehler `small_business_invoice_canary_not_confirmed`. Rule 1, Rule 19 und Rule-11-Voucher verwenden unverändert ihre bisherigen Verträge.
 
 ### Native ZUGFeRD-Invoice
 
 ZUGFeRD bleibt eine Eigenschaft der normalen `Invoice`. Es gibt keinen dritten Dokumenttyp und das Modul erzeugt kein eigenes XML. Der Pfad stützt sich auf sevDesks `propertyIsEInvoice`, `getXml` und die von sevDesk gerenderte PDF. Grundlage ist die [sevDesk-Ankündigung zur E-Rechnungs-API](https://tech.sevdesk.com/api_news/posts/2024_11_15-einvoice_changes/).
+
+Angewendetes WHMCS-Guthaben ist für ZUGFeRD noch nicht freigegeben. Auch ein exakt bewiesener Sammelzahlungsfall endet ohne Write und ohne normalen PDF-Fallback. Eine Freigabe braucht einen eigenen Canary mit Create, XML-Inhalt, PDF und Recovery.
 
 Ausgewählt wird er nur, wenn alle folgenden Bedingungen gleichzeitig erfüllt sind:
 
@@ -189,13 +246,14 @@ Rule 19 sowie Rules 18/20, Behördenfälle und historische Backfills werden nie 
 
 ### Öffnen, Versand und PDF
 
-- `sendBy` öffnet eine Invoice ohne kundenseitige sevDesk-Mail und wird für WHMCS-Hoheit sowie den WHMCS-Mailkanal verwendet.
+- `sendBy` öffnet eine Invoice ohne kundenseitige sevDesk-Mail und wird für WHMCS-Hoheit verwendet. Der frühere WHMCS-Vorlagenkanal bleibt unter WHMCS 8.13.4 gesperrt, weil diese Version den Binäranhang aus `EmailPreSend` nicht übernimmt.
 - `sendViaEmail` öffnet und versendet über sevDesk. Empfänger, Betreff und Text werden lokal validiert.
 - Unmittelbar vor beiden Writes werden Draft-Header und Positionen erneut vollständig gelesen und exakt mit dem gefrorenen Snapshot verglichen. Abweichungen verhindern Open und Versand.
 - `getPdf` wird erst nach nachweisbarer Finalisierung verwendet. Laut Spezifikation kommt die PDF als JSON/Base64; der reale Endpunkt kann stattdessen direkt `application/pdf` liefern. Das Modul akzeptiert beide Formen mit genau einem GET, verlangt HTTP 200 und prüft danach PDF-MIME, `%PDF`-Signatur, EOF-Marker und höchstens 10 MiB.
 - Nur für diesen PDF-GET sind Guzzles automatische Inhaltsdekodierung und die entsprechende cURL-Dekodierung abgeschaltet. Das umgeht fehlerhafte `Content-Encoding`-Antworten einzelner sevDesk-Installationen, ohne den übrigen API-Client aufzuweichen.
 - Die PDF wird nicht dauerhaft in WHMCS gespeichert; SHA-256, Ready- und Delivery-Zeitpunkt dürfen im Mapping stehen.
 - Bei ZUGFeRD wird vor Öffnung, Versand und PDF-Fortsetzung zusätzlich der unveränderliche XML-Hash geprüft.
+- Bei der Bestätigung einer alten sevDesk-geführten Invoice gelten die Remote-Status 200, 750 und 1000 als final. Draft 100 bleibt gesperrt. Eine im Altjob bereits eingefrorene Typ-/Hoheitsentscheidung darf durch die nachträgliche Mappingbestätigung nicht geändert werden.
 
 Nach `invoice_write_requested`, `invoice_open_write_requested` oder `invoice_delivery_write_requested` ist ein Transportfehler potenziell nicht wiederholbar. Recovery darf dann nur GETs ausführen. Ein fehlender Nachweis oder ein fehlendes Mapping nach einem späteren Write bleibt `ambiguous`; es gibt keinen Rückfall auf `saveInvoice`. Volle 1.000er-Seiten bei Kandidaten oder Positionen gelten als abgeschnitten und nicht beweiskräftig.
 
@@ -208,7 +266,7 @@ Nach `invoice_write_requested`, `invoice_open_write_requested` oder `invoice_del
 | 3 | `INNERGEM_LIEF` | nur bestätigte innergemeinschaftliche Warenlieferung, nie pauschal für EU |
 | 4 | steuerfreie Umsätze § 4 UStG | nur mit expliziter fachlicher Regel |
 | 5 | Reverse Charge nach § 13b UStG | nur mit expliziter fachlicher Regel |
-| 11 | Kleinunternehmer nach § 19 UStG | bei entsprechend bestätigtem Mandantenprofil |
+| 11 | Kleinunternehmer nach § 19 UStG | Voucher nach Guidance; Invoice nur mit eigenem Canary und aktuellem REVENUE-Scope für 0 % |
 | 17 | nicht im Inland steuerbare Leistung | nur fachlich freigegeben |
 | 18 | OSS-Sonderfall | in OSS-v1 blockiert |
 | 19 | OSS elektronische Leistungen | nur Invoice, nur bestätigtes digitales EU-B2C-Profil |
@@ -220,6 +278,8 @@ Die Tabelle ist kein Steuerberatungsergebnis. Sie beschreibt API-Fähigkeiten un
 ## Fachliche Klassifikation
 
 Der Tax-Resolver verwendet unter anderem Kleinunternehmerstatus, Land, Organisation, USt-ID, `taxexempt`, WHMCS-Steuersatz, Netto-/Bruttomodus, Positionsarten, Währung und eine zuverlässig bestätigte Leistungsart. Fehlen Pflichtdaten oder gibt es widersprüchliche Fälle, entsteht kein Payload.
+
+Der Kleinunternehmerstatus kann mit einem Enddatum versehen werden. Rule 11 gilt dann nur für Rechnungsdaten bis einschließlich dieses Tages. Sie hat in diesem Zeitraum auch Vorrang vor dem bestätigten AddFunds-Sonderprofil; dadurch kann AddFunds weder auf Rule 1 ausweichen noch die Rule-11-Invoice-Gates umgehen. Nach dem Stichtag gilt das AddFunds-Profil unverändert. Ohne Enddatum bleibt der aktivierte Schalter aus Gründen der Upgrade-Kompatibilität unbegrenzt wirksam. Bei aktivem Kleinunternehmerprofil wird ein ungültiger gespeicherter Stichtag nicht als „Regelbesteuerung“ interpretiert, sondern blockiert den Export. Im Modus `invoice_only` kommen der Rule-11-Invoice-Canary und die aktuelle Mandantenfähigkeit hinzu; `invoice_for_oss` lässt diese Fälle weiterhin als Voucher laufen.
 
 | Fall | Entscheidung |
 | --- | --- |
@@ -233,7 +293,11 @@ Der Tax-Resolver verwendet unter anderem Kleinunternehmerstatus, Land, Organisat
 | Drittland-Ausfuhr | Rule 2 nur nach fachlicher Freigabe |
 | Drittland-Dienstleistung | blockiert, bis eigene Regel bestätigt ist |
 | mehrere Steuer- oder Leistungsfälle | blockiert; keine vermutete Aufteilung |
-| Guthaben, Null-/Negativbetrag, negative Position, Refund, Storno | normaler Export blockiert oder eigener bestätigter Voucher-Korrekturpfad |
+| exakt bewiesene WHMCS-Sammelzahlung | Container ohne Umsatzexport; Originalrechnungen mit vollständigem Dokumentbruttobetrag |
+| gewöhnliches Guthaben ohne `Invoice`-Verknüpfung | nur als ausdrücklich bestätigter Voucher-Einzelexport über den vollständigen Dokumentbruttobetrag |
+| unklare Sammelzahlung oder anderer Guthabenfall | blockiert, manuelle Prüfung |
+| genau ein struktureller `PromoHosting`-Rabatt, Rule 11/0 %, Canary bestätigt | feste Invoice-Discount-Struktur in `invoice_only` |
+| Null-/Negativbetrag, andere negative Position, Refund oder Storno | normaler Export blockiert oder eigener bestätigter Voucher-Korrekturpfad |
 | Fremdwährung | blockiert, bis separat freigegeben |
 
 Die Rule-19-Bestätigung gilt für **alle Positionen** der betreffenden Rechnung. Das Modul wertet Beschreibungen nicht aus. Kann der Betreiber diese Homogenität nicht zusichern, bleibt der Fall blockiert.
@@ -262,7 +326,11 @@ EU-Land außerhalb Deutschlands, keine Firma/USt-ID und `taxexempt=false` darf n
 
 ### Rule 19
 
-Eine bezahlte EU-B2C-Rechnung mit finaler Nummer und tatsächlichem WHMCS-Landsteuersatz wird nur dann Rule-19-Invoice, wenn Modus, OSS-Profil, Canary und digitale Homogenität bestätigt sind. Die exakte `StaticCountry`-Auflösung gehört zum Preflight: Eine leere, unbeschriftete oder mehrdeutige Antwort blockiert vor dem Write. In `voucher_only`, ohne Profil, vor Zahlung, ohne finale Nummer oder bei Rules 18/20 findet ebenfalls kein Remote-Write statt.
+Eine bezahlte EU-B2C-Rechnung mit effektiver Nummer und tatsächlichem WHMCS-Landsteuersatz wird nur dann
+Rule-19-Invoice, wenn Modus, OSS-Profil, Canary und digitale Homogenität bestätigt sind. Die exakte
+`StaticCountry`-Auflösung gehört zum Preflight: Eine leere, unbeschriftete oder mehrdeutige Antwort blockiert
+vor dem Write. In `voucher_only`, ohne Profil, vor Zahlung, ohne auswertbare effektive Nummer oder bei
+Rules 18/20 findet ebenfalls kein Remote-Write statt.
 
 ### Konto mit unzulässiger Rule
 
@@ -295,7 +363,7 @@ Nach einem möglicherweise ausgeführten Contact-Create sucht die Recovery aussc
 
 ## Historischer Dublettenschutz
 
-Ein mailfreier Backfill prüft vor jedem Create zunächst die exakte finale Rechnungsnummer. Danach liest er Invoices für denselben Kontakt und Tag über dokumentierte Filter und vergleicht Datum, Kontakt, EUR-Währung und Bruttobetrag clientseitig exakt. Unbekannte Betragsfilter werden nicht an sevDesk gesendet. Eine volle Seite mit 1.000 Treffern bleibt vorsorglich blockiert.
+Ein mailfreier Backfill prüft vor jedem Create zunächst die exakte effektive Rechnungsnummer. Danach liest er Invoices für denselben Kontakt und Tag über dokumentierte Filter und vergleicht Datum, Kontakt, EUR-Währung und Bruttobetrag clientseitig exakt. Unbekannte Betragsfilter werden nicht an sevDesk gesendet. Eine volle Seite mit 1.000 Treffern bleibt vorsorglich blockiert.
 
 Zusätzlich sucht das Modul nach markerlosen Voucher-Kandidaten über Nummer, Datum, Kontakt und Betragsfenster sowie nach dem stabilen Marker `[WHMCS-INVOICE:<id>]`. Jeder mögliche Treffer verhindert die Neuanlage, ohne automatisch ein Mapping zu setzen. Die [sevDesk-OSS-Ankündigung](https://tech.sevdesk.com/api_news/posts/2025_03_06-oss-available/) ändert daran nichts: Rules 18 bis 20 werden nur über den ausdrücklich freigegebenen Invoice-Vertrag bewertet.
 

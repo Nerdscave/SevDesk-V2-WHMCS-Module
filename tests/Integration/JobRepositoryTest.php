@@ -51,11 +51,13 @@ final class JobRepositoryTest extends MariaDbTestCase
             'dedupe_key' => 'export_voucher:421',
             'candidate' => $this->hybridCandidate('InvoiceCreated'),
         ]]);
+        $paidCandidate = $this->hybridCandidate('InvoicePaid');
+        $paidCandidate['massPaymentContainerInvoiceId'] = 900;
         $paidJob = $this->jobs->create('automatic_export', [[
             'invoice_id' => 421,
             'action' => 'export_document',
             'dedupe_key' => 'export_voucher:421',
-            'candidate' => $this->hybridCandidate('InvoicePaid'),
+            'candidate' => $paidCandidate,
         ]]);
 
         $owner = Capsule::table(Migrator::ITEMS_TABLE)->where('job_id', $createdJob)->first();
@@ -65,12 +67,42 @@ final class JobRepositoryTest extends MariaDbTestCase
         self::assertSame('pending', $owner->status);
         self::assertSame('export_voucher:421', $owner->dedupe_key);
         self::assertTrue($candidate['paidTriggerObserved']);
+        self::assertSame(900, $candidate['massPaymentContainerInvoiceId']);
+        self::assertArrayNotHasKey('massPaymentContainerConflict', $candidate);
         self::assertSame('skipped', $loser->status);
         self::assertNull($loser->dedupe_key);
 
         $claimed = $this->jobs->claimNext();
         self::assertNotNull($claimed);
         self::assertSame((int) $owner->id, (int) $claimed->id);
+    }
+
+    public function testPaidHybridTriggerNeverReplacesADifferentFrozenMassPaymentParent(): void
+    {
+        $createdCandidate = $this->hybridCandidate('InvoiceCreated');
+        $createdCandidate['massPaymentContainerInvoiceId'] = 900;
+        $createdJob = $this->jobs->create('automatic_export', [[
+            'invoice_id' => 429,
+            'action' => 'export_document',
+            'dedupe_key' => 'export_voucher:429',
+            'candidate' => $createdCandidate,
+        ]]);
+        $paidCandidate = $this->hybridCandidate('InvoicePaid');
+        $paidCandidate['massPaymentContainerInvoiceId'] = 901;
+        $this->jobs->create('automatic_export', [[
+            'invoice_id' => 429,
+            'action' => 'export_document',
+            'dedupe_key' => 'export_voucher:429',
+            'candidate' => $paidCandidate,
+        ]]);
+
+        $owner = Capsule::table(Migrator::ITEMS_TABLE)->where('job_id', $createdJob)->first();
+        self::assertNotNull($owner);
+        $candidate = json_decode((string) $owner->candidate_json, true, 32, JSON_THROW_ON_ERROR);
+
+        self::assertSame(900, $candidate['massPaymentContainerInvoiceId']);
+        self::assertTrue($candidate['massPaymentContainerConflict']);
+        self::assertTrue($candidate['paidTriggerObserved']);
     }
 
     public function testHistoricalBackfillCannotTakeOverAnAutomaticDeliveryOwner(): void
@@ -203,6 +235,111 @@ final class JobRepositoryTest extends MariaDbTestCase
         self::assertNotNull($reclaimed);
         self::assertSame((int) $claimed->id, (int) $reclaimed->id);
         self::assertSame(2, (int) $reclaimed->attempts);
+    }
+
+    public function testCheckpointCannotOverwriteAConcurrentPaidTriggerSignal(): void
+    {
+        if (!function_exists('proc_open')) {
+            self::markTestSkipped('proc_open is required for the checkpoint concurrency test.');
+        }
+
+        $jobId = $this->jobs->create('automatic_export', [[
+            'invoice_id' => 423,
+            'action' => 'export_document',
+            'dedupe_key' => 'export_voucher:423',
+            'candidate' => $this->hybridCandidate('InvoiceCreated'),
+        ]]);
+        $claimed = $this->jobs->claimNext();
+        self::assertNotNull($claimed);
+
+        Capsule::connection()->beginTransaction();
+        try {
+            $locked = Capsule::table(Migrator::ITEMS_TABLE)
+                ->where('id', $claimed->id)
+                ->lockForUpdate()
+                ->first();
+            self::assertNotNull($locked);
+
+            $worker = $this->startCheckpointWorker(
+                (int) $claimed->id,
+                (string) $claimed->lease_token,
+            );
+            usleep(300_000);
+
+            $candidate = json_decode((string) $locked->candidate_json, true, 32, JSON_THROW_ON_ERROR);
+            $candidate['paidTriggerObserved'] = true;
+            $candidate['paidTriggerObservedAt'] = '2026-07-24 00:00:00';
+            Capsule::table(Migrator::ITEMS_TABLE)
+                ->where('id', $claimed->id)
+                ->update([
+                    'candidate_json' => json_encode($candidate, JSON_THROW_ON_ERROR),
+                    'updated_at' => '2026-07-24 00:00:00',
+                ]);
+            Capsule::connection()->commit();
+        } catch (\Throwable $error) {
+            Capsule::connection()->rollBack();
+            throw $error;
+        }
+
+        self::assertTrue($this->finishCheckpointWorker($worker));
+        $afterCheckpoint = Capsule::table(Migrator::ITEMS_TABLE)->where('id', $claimed->id)->first();
+        self::assertNotNull($afterCheckpoint);
+        $stored = json_decode((string) $afterCheckpoint->candidate_json, true, 32, JSON_THROW_ON_ERROR);
+        self::assertTrue($stored['paidTriggerObserved'] ?? false);
+        self::assertTrue($stored['invoicePaymentPending'] ?? false);
+
+        $this->jobs->finish($claimed, JobOutcome::skipped('Invoice requires payment.'));
+        $waiting = Capsule::table(Migrator::ITEMS_TABLE)->where('job_id', $jobId)->first();
+        self::assertSame('retry_wait', $waiting->status);
+        self::assertSame('invoice_payment_event_followup', $waiting->error_code);
+    }
+
+    public function testRepeatedContactLinkedCheckpointIsIdempotentWithinOneDatabaseSecond(): void
+    {
+        $jobId = $this->jobs->create('single_export', [[
+            'invoice_id' => 424,
+            'action' => 'export_document',
+        ]]);
+        $claimed = $this->jobs->claimNext();
+        self::assertNotNull($claimed);
+
+        try {
+            self::assertTrue(Capsule::statement(
+                "SET timestamp = UNIX_TIMESTAMP('2030-01-02 03:04:05')",
+            ));
+            $context = ['remoteContactId' => '900424'];
+
+            self::assertTrue($this->jobs->checkpoint(
+                (int) $claimed->id,
+                (string) $claimed->lease_token,
+                'contact_linked',
+                $context,
+            ));
+            $first = Capsule::table(Migrator::ITEMS_TABLE)->where('job_id', $jobId)->first();
+            self::assertNotNull($first);
+
+            self::assertTrue($this->jobs->checkpoint(
+                (int) $claimed->id,
+                (string) $claimed->lease_token,
+                'contact_linked',
+                $context,
+            ));
+            $repeated = Capsule::table(Migrator::ITEMS_TABLE)->where('job_id', $jobId)->first();
+            self::assertNotNull($repeated);
+        } finally {
+            Capsule::statement('SET timestamp = 0');
+        }
+
+        self::assertSame('running', $repeated->status);
+        self::assertSame($claimed->lease_token, $repeated->lease_token);
+        self::assertSame('contact_linked', $repeated->checkpoint);
+        self::assertSame($first->candidate_json, $repeated->candidate_json);
+        self::assertSame($first->sevdesk_id, $repeated->sevdesk_id);
+        self::assertSame($first->updated_at, $repeated->updated_at);
+        self::assertSame(
+            ['remoteContactId' => '900424'],
+            json_decode((string) $repeated->candidate_json, true, 32, JSON_THROW_ON_ERROR),
+        );
     }
 
     public function testAmbiguousOutcomeRetainsDedupeReservation(): void
@@ -1081,6 +1218,50 @@ final class JobRepositoryTest extends MariaDbTestCase
         fclose($pipes[0]);
 
         return [$process, $pipes[1], $pipes[2]];
+    }
+
+    /**
+     * @return array{resource,resource,resource}
+     */
+    private function startCheckpointWorker(int $itemId, string $token): array
+    {
+        $command = [
+            PHP_BINARY,
+            dirname(__DIR__, 2) . '/tests/Integration/Fixtures/checkpoint-worker.php',
+            (string) $itemId,
+            $token,
+        ];
+        $pipes = [];
+        $process = proc_open(
+            $command,
+            [
+                0 => ['pipe', 'r'],
+                1 => ['pipe', 'w'],
+                2 => ['pipe', 'w'],
+            ],
+            $pipes,
+            dirname(__DIR__, 2),
+            null,
+        );
+        self::assertIsResource($process);
+        fclose($pipes[0]);
+
+        return [$process, $pipes[1], $pipes[2]];
+    }
+
+    /** @param array{resource,resource,resource} $worker */
+    private function finishCheckpointWorker(array $worker): bool
+    {
+        [$process, $stdout, $stderr] = $worker;
+        $output = stream_get_contents($stdout);
+        $errors = stream_get_contents($stderr);
+        fclose($stdout);
+        fclose($stderr);
+        $exitCode = proc_close($process);
+
+        self::assertSame(0, $exitCode, $errors === false ? 'Checkpoint worker failed.' : $errors);
+
+        return trim((string) $output) === '1';
     }
 
     /**

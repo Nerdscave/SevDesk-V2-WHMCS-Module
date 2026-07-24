@@ -105,6 +105,27 @@ final class ExportJobHandlerTest extends TestCase
         }
     }
 
+    public function testTransientFrozenInvoiceReferenceReadCanRetryBeforeInvoiceWrite(): void
+    {
+        foreach (
+            [
+                ['httpStatus' => 429, 'sevdeskCode' => 'RATE_LIMIT', 'retryAfterSeconds' => 60],
+                ['httpStatus' => null, 'sevdeskCode' => 'transport_error'],
+            ] as $context
+        ) {
+            $outcome = $this->invokeFailureOutcome(
+                $context['httpStatus'] === 429
+                    ? 'api_rate_limited'
+                    : 'invoice_reference_revalidation_failed',
+                $context + ['outcomeUnknown' => false],
+                'e_invoice_target_selected',
+            );
+
+            self::assertSame('retry_wait', $outcome->status);
+            self::assertSame('e_invoice_target_selected', $outcome->checkpoint);
+        }
+    }
+
     public function testPermanentCountryReferenceReadFailureDoesNotRetry(): void
     {
         $outcome = $this->invokeFailureOutcome(

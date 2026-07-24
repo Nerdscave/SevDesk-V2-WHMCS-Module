@@ -7,6 +7,7 @@ namespace WHMCS\Module\Addon\SevDesk\Service;
 use DateTimeImmutable;
 use WHMCS\Module\Addon\SevDesk\Domain\Decimal;
 use WHMCS\Module\Addon\SevDesk\Domain\EInvoiceContext;
+use WHMCS\Module\Addon\SevDesk\Domain\InvoiceAddressContext;
 use WHMCS\Module\Addon\SevDesk\Domain\InvoiceSnapshot;
 
 /** Exact, read-only verification shared by Invoice creation and recovery. */
@@ -33,6 +34,7 @@ final class InvoiceRemoteVerifier
         ?string $expectedRemoteId = null,
         ?string $deliveryCountryCode = null,
         ?EInvoiceContext $eInvoiceContext = null,
+        ?InvoiceAddressContext $invoiceAddressContext = null,
     ): ?string {
         $actualRemoteId = self::numericId($remote['id'] ?? null);
         if ($actualRemoteId === null) {
@@ -62,8 +64,17 @@ final class InvoiceRemoteVerifier
         if ((int) ($remote['status'] ?? 0) !== $expectedStatus) {
             return 'status_mismatch';
         }
-        if (!self::markerMatches((string) ($remote['customerInternalNote'] ?? ''), $invoice->invoiceId)) {
+        $customerInternalNote = (string) ($remote['customerInternalNote'] ?? '');
+        if (!self::markerMatches($customerInternalNote, $invoice->invoiceId)) {
             return 'marker_mismatch';
+        }
+        $discountFingerprint = $invoice->discountFingerprint();
+        if ($discountFingerprint !== null) {
+            if (!self::discountMarkerMatches($customerInternalNote, $discountFingerprint)) {
+                return 'discount_marker_mismatch';
+            }
+        } elseif (preg_match('/\[WHMCS-DISCOUNT:[a-f0-9]{64}\]/i', $customerInternalNote) === 1) {
+            return 'unexpected_discount_marker';
         }
         if ($sevdeskContactId !== null && (string) ($remote['contact']['id'] ?? '') !== $sevdeskContactId) {
             return 'contact_mismatch';
@@ -132,6 +143,11 @@ final class InvoiceRemoteVerifier
             if ($eInvoiceMismatch !== null) {
                 return $eInvoiceMismatch;
             }
+        } elseif ($invoiceAddressContext !== null) {
+            $addressMismatch = $invoiceAddressContext->remoteMismatch($remote);
+            if ($addressMismatch !== null) {
+                return $addressMismatch;
+            }
         }
 
         $sumGross = $remote['sumGross'] ?? null;
@@ -144,6 +160,32 @@ final class InvoiceRemoteVerifier
             }
         } catch (\InvalidArgumentException) {
             return 'total_invalid';
+        }
+        $sumDiscounts = $remote['sumDiscounts'] ?? null;
+        if ($invoice->discounts !== []) {
+            if (!is_string($sumDiscounts) && !is_int($sumDiscounts) && !is_float($sumDiscounts)) {
+                return 'discount_total_missing';
+            }
+            try {
+                if (
+                    Decimal::toMinorUnits((string) $sumDiscounts)
+                    !== $invoice->discountGrossMinorUnits()
+                ) {
+                    return 'discount_total_mismatch';
+                }
+            } catch (\InvalidArgumentException) {
+                return 'discount_total_invalid';
+            }
+        } elseif (
+            (is_string($sumDiscounts) || is_int($sumDiscounts) || is_float($sumDiscounts))
+        ) {
+            try {
+                if (Decimal::toMinorUnits((string) $sumDiscounts) !== 0) {
+                    return 'unexpected_discount_total';
+                }
+            } catch (\InvalidArgumentException) {
+                return 'discount_total_invalid';
+            }
         }
 
         return null;
@@ -170,6 +212,14 @@ final class InvoiceRemoteVerifier
         }
 
         return true;
+    }
+
+    private static function discountMarkerMatches(string $note, string $fingerprint): bool
+    {
+        return str_contains(
+            strtolower($note),
+            '[whmcs-discount:' . strtolower($fingerprint) . ']',
+        );
     }
 
     /**

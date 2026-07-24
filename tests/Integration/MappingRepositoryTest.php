@@ -85,12 +85,14 @@ final class MappingRepositoryTest extends MariaDbTestCase
             'RE-42',
             true,
             $xmlHash,
+            MappingRepository::DOCUMENT_AUTHORITY_SEVDESK,
         );
 
         $mapping = $this->mappings->findByInvoice(42);
         self::assertNotNull($mapping);
         self::assertSame(1, (int) $mapping->is_e_invoice);
         self::assertSame($xmlHash, $mapping->xml_sha256);
+        self::assertSame(MappingRepository::DOCUMENT_AUTHORITY_SEVDESK, $mapping->document_authority);
 
         $this->expectException(RuntimeException::class);
         $this->mappings->enrichDocumentMetadata(
@@ -113,5 +115,56 @@ final class MappingRepositoryTest extends MariaDbTestCase
             false,
             hash('sha256', '<synthetic/>'),
         );
+    }
+
+    public function testLegacyCustomerDeliveryMetadataRequiresPaidStatusAtomically(): void
+    {
+        Capsule::table('tblinvoices')->insert([
+            'id' => 46,
+            'status' => 'Unpaid',
+        ]);
+        $this->mappings->linkDocument(
+            46,
+            '90046',
+            MappingRepository::DOCUMENT_TYPE_INVOICE,
+            'RE-46',
+        );
+
+        try {
+            $this->mappings->enrichDocumentMetadata(
+                46,
+                '90046',
+                MappingRepository::DOCUMENT_TYPE_INVOICE,
+                'RE-46',
+                new \DateTimeImmutable('2030-01-01 12:00:00'),
+                pdfSha256: hash('sha256', 'synthetic-pdf'),
+                documentAuthority: MappingRepository::DOCUMENT_AUTHORITY_SEVDESK,
+                requiredWhmcsInvoiceStatus: 'Paid',
+            );
+            self::fail('An unpaid WHMCS invoice must not receive customer-delivery metadata.');
+        } catch (RuntimeException $error) {
+            self::assertStringContainsString('status', $error->getMessage());
+        }
+
+        $mapping = $this->mappings->findByInvoice(46);
+        self::assertNotNull($mapping);
+        self::assertNull($mapping->document_ready_at);
+        self::assertNull($mapping->document_authority);
+
+        Capsule::table('tblinvoices')->where('id', 46)->update(['status' => 'Paid']);
+        $this->mappings->enrichDocumentMetadata(
+            46,
+            '90046',
+            MappingRepository::DOCUMENT_TYPE_INVOICE,
+            'RE-46',
+            new \DateTimeImmutable('2030-01-01 12:00:00'),
+            pdfSha256: hash('sha256', 'synthetic-pdf'),
+            documentAuthority: MappingRepository::DOCUMENT_AUTHORITY_SEVDESK,
+            requiredWhmcsInvoiceStatus: 'Paid',
+        );
+
+        $mapping = $this->mappings->findByInvoice(46);
+        self::assertSame(MappingRepository::DOCUMENT_AUTHORITY_SEVDESK, $mapping->document_authority);
+        self::assertSame('2030-01-01 12:00:00', $mapping->document_ready_at);
     }
 }

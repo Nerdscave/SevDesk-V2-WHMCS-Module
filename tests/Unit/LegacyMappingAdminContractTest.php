@@ -35,7 +35,10 @@ final class LegacyMappingAdminContractTest extends TestCase
         );
 
         self::assertStringContainsString("trim((string) (\$current->sevdesk_id ?? '')) !== \$remoteId", $composition);
-        self::assertStringContainsString('($current->document_type ?? null) !== null', $composition);
+        self::assertStringContainsString("\$currentAuthority !== '' && \$currentAuthority !== \$documentAuthority", $composition);
+        self::assertStringContainsString('legacySevdeskAuthorityReady()', $composition);
+        self::assertStringContainsString('pdfSha256:', $composition);
+        self::assertStringContainsString('documentAuthority:', $composition);
         self::assertStringContainsString('enrichDocumentMetadata(', $composition);
         self::assertStringNotContainsString('linkDocument(', $composition);
         self::assertStringNotContainsString('unlink', $composition);
@@ -56,6 +59,8 @@ final class LegacyMappingAdminContractTest extends TestCase
         self::assertStringContainsString('name="inspect_legacy_type"', $template);
         self::assertStringContainsString('name="confirm_legacy_type"', $template);
         self::assertStringContainsString('name="document_type"', $template);
+        self::assertStringContainsString('name="document_authority"', $template);
+        self::assertStringContainsString('name="batch_authorities[', $template);
         self::assertStringContainsString('$typeInspection.context.numberEvidence', $template);
         self::assertStringContainsString('$typeInspection.context.markerEvidence', $template);
         self::assertStringContainsString('Schwächerer Legacy-Vorschlag', $template);

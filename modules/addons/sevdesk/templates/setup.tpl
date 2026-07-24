@@ -22,7 +22,7 @@
     <div class="panel panel-warning">
         <div class="panel-heading"><h3 class="panel-title">Übergangsinventur für Dokumentänderungen</h3></div>
         <div class="panel-body">
-            <p>Diese Bestandsaufnahme ist rein lesend. Sie zeigt, welche Zuordnungen und Jobs vor einer Änderung von Exportmodus, Dokumenthoheit, OSS- oder E-Rechnungsprofil zu prüfen sind.</p>
+            <p>Diese Bestandsaufnahme ist rein lesend. Sie zeigt, welche Zuordnungen und Jobs vor einer Änderung von Exportmodus, Dokumenthoheit, OSS-, E-Rechnungs-, Rule-11-Invoice- oder Kleinunternehmerprofil zu prüfen sind.</p>
             <div class="table-responsive">
                 <table class="table table-condensed">
                     <tbody>
@@ -118,12 +118,26 @@
             <div class="panel panel-warning">
                 <div class="panel-heading"><h4 class="panel-title">Invoice-API-Canary</h4></div>
                 <div class="panel-body">
-                    <p>Invoice-Modi bleiben fail-closed, bis der dokumentierte Testmandanten-Canary vollständig durchgeführt wurde. Dazu gehören Rule 19, finale Rechnungsnummer, Marker, Pflichtreferenzen, Open/PDF/Versand/Booking und die Prüfung möglicher ID-Kollisionen.</p>
+                    <p>Invoice-Modi bleiben fail-closed, bis der dokumentierte Testmandanten-Canary vollständig durchgeführt wurde. Dazu gehören Rule 19, effektive WHMCS-Rechnungsnummer, Marker, Pflichtreferenzen, Open/PDF/Versand/Booking und die Prüfung möglicher ID-Kollisionen.</p>
                     <div class="checkbox">
                         <label for="invoice-canary-confirmed">
                             <input type="checkbox" id="invoice-canary-confirmed" name="invoice_canary_confirmed" value="on"{if $settings.invoice_canary_confirmed === 'on' || $settings.invoice_canary_confirmed === true || $settings.invoice_canary_confirmed == 1} checked{/if}>
                             Ich bestätige, dass der Canary im aktuell konfigurierten sevdesk-Testmandanten vollständig bestanden wurde.
                         </label>
+                    </div>
+                    <div class="checkbox">
+                        <label for="small-business-invoice-canary-confirmed">
+                            <input type="checkbox" id="small-business-invoice-canary-confirmed" name="small_business_invoice_canary_confirmed" value="on"{if $settings.small_business_invoice_canary_confirmed === 'on' || $settings.small_business_invoice_canary_confirmed === true || $settings.small_business_invoice_canary_confirmed == 1} checked{/if}>
+                            Der separate Canary für normale Kleinunternehmer-Invoices mit Rule 11 und 0&nbsp;% wurde im aktuell verbundenen sevdesk-Mandanten vollständig bestanden.
+                        </label>
+                        <small class="help-block">Diese Freigabe gilt für alle Rule-11-Invoices. Beim Speichern prüft das Modul zusätzlich, ob Receipt Guidance aktuell mindestens ein <code>REVENUE</code>-Konto mit Rule 11 und 0&nbsp;% anbietet. Ein Live-Test zeigte, dass sevdesk einen Rule-11-Entwurf zwar anlegen, das anschließende Öffnen aber wegen des automatisch gewählten Kontenbereichs ablehnen kann. Invoice-Positionen erlauben kein eigenes <code>accountDatev</code>.</small>
+                    </div>
+                    <div class="checkbox">
+                        <label for="invoice-discount-canary-confirmed">
+                            <input type="checkbox" id="invoice-discount-canary-confirmed" name="invoice_discount_canary_confirmed" value="on"{if $settings.invoice_discount_canary_confirmed === 'on' || $settings.invoice_discount_canary_confirmed === true || $settings.invoice_discount_canary_confirmed == 1} checked{/if}>
+                            Der zusätzliche Canary für einen festen <code>PromoHosting</code>-Rabatt mit Rule 11 und 0&nbsp;% wurde bestanden.
+                        </label>
+                        <small class="help-block">Die Rabattfreigabe setzt den allgemeinen Rule-11-Invoice-Canary zusätzlich voraus. Sie gilt nur für eindeutig zugeordnete Hosting-Rabatte aus dem Kleinunternehmerzeitraum. Andere negative Positionen bleiben gesperrt.</small>
                     </div>
                 </div>
             </div>
@@ -166,6 +180,7 @@
                 <div class="panel-heading"><h4 class="panel-title">Native ZUGFeRD-E-Rechnungen</h4></div>
                 <div class="panel-body">
                     <p>ZUGFeRD wird von sevdesk als Eigenschaft einer normalen Invoice erzeugt. Der Modus ist nur mit <strong>Invoice only</strong>, sevdesk-Dokumenthoheit, einem separaten Canary und einem ausdrücklich gesetzten Kunden-Tickbox-Feld zulässig. Fehlen nach dem Opt-in Pflichtdaten, wird die Rechnung blockiert; es gibt keinen stillen Rückfall auf eine normale PDF-Invoice.</p>
+                    <p class="text-warning"><strong>Derzeitige Grenze:</strong> Rechnungen mit angewendetem WHMCS-Guthaben werden nicht als ZUGFeRD erzeugt. Das gilt auch für eindeutig erkannte Sammelzahlungen. Der Worker blockiert den Fall, statt eine normale PDF-Invoice zu erzeugen.</p>
                     <div class="form-group">
                         <label class="control-label" for="e-invoice-mode">E-Rechnungsmodus</label>
                         <select id="e-invoice-mode" name="e_invoice_mode" class="form-control">
@@ -262,8 +277,11 @@
                         <label class="control-label" for="invoice-delivery-channel">Versandkanal</label>
                         <select id="invoice-delivery-channel" name="invoice_delivery_channel" class="form-control">
                             <option value="sevdesk"{if $settings.invoice_delivery_channel === 'sevdesk'} selected{/if}>sevdesk sendViaEmail</option>
-                            <option value="whmcs_template"{if $settings.invoice_delivery_channel === 'whmcs_template'} selected{/if}>WHMCS-Mailvorlage mit sevdesk-PDF</option>
+                            <option value="whmcs_template"{if $settings.invoice_delivery_channel === 'whmcs_template'} selected{elseif !$whmcsTemplateDeliverySupported} disabled{/if}>WHMCS-Mailvorlage mit sevdesk-PDF{if !$whmcsTemplateDeliverySupported} – unter WHMCS 8.13 nicht unterstützt{/if}</option>
                         </select>
+                        {if !$whmcsTemplateDeliverySupported}
+                            <small class="help-block">WHMCS 8.13 führt <code>EmailPreSend</code> aus, übernimmt daraus aber keine Binäranhänge. Eine bestehende Auswahl bleibt sichtbar und muss bewusst auf <strong>sevdesk sendViaEmail</strong> umgestellt werden; das Modul fällt nicht still auf einen anderen Kanal zurück.</small>
+                        {/if}
                     </div>
                     <div class="form-group">
                         <label class="control-label" for="whmcs-invoice-email-template">Aktive benutzerdefinierte Invoice-Mailvorlage</label>
@@ -367,7 +385,15 @@
                                     <input type="checkbox" id="small-business-owner" name="smallBusinessOwner" value="on"{if $settings.smallBusinessOwner === 'on' || $settings.smallBusinessOwner === true || $settings.smallBusinessOwner == 1} checked{/if}>
                                     Steuer wird nach § 19 UStG nicht erhoben
                                 </label>
-                                <small class="help-block">Nur aktivieren, wenn die Regel für den gesamten Exportzeitraum gilt. Das zugehörige Rule-11-Profil muss unten zusätzlich bestätigt werden.</small>
+                                <small class="help-block">Das zugehörige Rule-11-Profil muss unten zusätzlich bestätigt werden.</small>
+                            </div>
+                            <div class="form-group">
+                                <label class="control-label" for="small-business-until">Gültig bis einschließlich</label>
+                                <input type="date" id="small-business-until" name="small_business_until" class="form-control" value="{$settings.small_business_until_iso|default:''|escape:'html':'UTF-8'}" aria-describedby="small-business-until-help">
+                                <small id="small-business-until-help" class="help-block">Optional. Ein gesetzter Stichtag wendet Rule 11 nur auf Rechnungen bis zu diesem Datum an. Leer bleibt aus Gründen der Rückwärtskompatibilität der bisherige unbegrenzte Modus aktiv.</small>
+                                {if $settings.small_business_until_invalid|default:false}
+                                    <p class="text-danger">Der gespeicherte Stichtag ist ungültig. Bis zur Korrektur bleibt der Export fail-closed.</p>
+                                {/if}
                             </div>
                         </div>
                     </div>
@@ -675,7 +701,7 @@
                     <h3 class="panel-title" id="tax-profile-small-business-title">Kleinunternehmer (§ 19 UStG)</h3>
                 </div>
                 <div class="panel-body">
-                    <p class="text-muted">Rule 11 mit 0 % Steuer; wird nur verwendet, wenn die Kleinunternehmerregelung oben für den gesamten Exportzeitraum aktiviert ist.</p>
+                    <p class="text-muted">Rule 11 mit 0 % Steuer; wird nur verwendet, wenn die Kleinunternehmerregelung oben für das jeweilige Rechnungsdatum gilt.</p>
 
                     {assign var="smallBusinessAccountId" value=$settings.accountingTypeSmallBusinessOwner|default:''}
                     {assign var="smallBusinessAccountFound" value=false}

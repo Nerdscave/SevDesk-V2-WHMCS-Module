@@ -76,6 +76,7 @@
                             <td>{$invoice.date|default:'—'|escape:'html':'UTF-8'}{if $invoice.datepaid}<small>bezahlt {$invoice.datepaid|escape:'html':'UTF-8'}</small>{/if}</td>
                             <td class="text-right sd-mono">{$invoice.gross_formatted|default:$invoice.total|default:'—'|escape:'html':'UTF-8'}
                                 {if $invoice.credit_formatted && $invoice.credit_formatted != '0,00'}<small>Guthaben {$invoice.credit_formatted|escape:'html':'UTF-8'} · Zahlbetrag {$invoice.payable_formatted|escape:'html':'UTF-8'}</small>{/if}
+                                {if $invoice.payment_booking_note}<small>{$invoice.payment_booking_note|escape:'html':'UTF-8'}</small>{/if}
                             </td>
                             <td>{$invoice.status|default:'—'|escape:'html':'UTF-8'}</td>
                             <td>

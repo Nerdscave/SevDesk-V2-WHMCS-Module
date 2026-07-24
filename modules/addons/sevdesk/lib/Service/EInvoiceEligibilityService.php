@@ -160,7 +160,7 @@ final class EInvoiceEligibilityService
             );
         }
 
-        $countryId = $this->referenceData->countryId('DE');
+        $countryId = $this->referenceData->exactCountryId('DE');
         if ($countryId === null || !self::numericId($countryId)) {
             return Result::failure(
                 'e_invoice_country_reference_missing',
@@ -277,7 +277,7 @@ final class EInvoiceEligibilityService
                 || !$this->referenceData->hasPaymentMethod($context->paymentMethodId)
                 || !$this->referenceData->hasUnity($context->unityId)
                 || !$this->referenceData->hasSevUser($sevUserId)
-                || $this->referenceData->countryId('DE') !== $context->countryId
+                || $this->referenceData->exactCountryId('DE') !== $context->countryId
             ) {
                 return Result::failure(
                     'e_invoice_frozen_reference_changed',

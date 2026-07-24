@@ -8,20 +8,23 @@ use PHPUnit\Framework\TestCase;
 
 final class InvoiceTaxConfigurationContractTest extends TestCase
 {
-    public function testApplicationComposesInvoiceTaxPolicyWithoutReceiptGuidance(): void
+    public function testApplicationComposesInvoiceTaxPolicyWithConditionalRuleElevenGuidance(): void
     {
         $application = $this->source('lib/Application.php');
         $method = $this->between(
             $application,
-            'public function invoiceTaxPolicy(): TaxPolicy',
+            'public function invoiceTaxPolicy(bool $freshGuidance = false): TaxPolicy',
             'public function runner(): JobRunner',
         );
 
         self::assertStringContainsString('new TaxPolicy(', $method);
         self::assertStringContainsString("get('eu_b2c_mode'", $method);
         self::assertStringContainsString("get('oss_profile'", $method);
-        self::assertStringContainsString("\n            null,", $method);
-        self::assertStringNotContainsString('receiptGuidance(', $method);
+        self::assertStringContainsString(
+            "'small_business_invoice_canary_confirmed'",
+            $method,
+        );
+        self::assertStringContainsString('receiptGuidance($freshGuidance)', $method);
     }
 
     public function testSetupUsesInvoicePolicyWithoutVoucherGuidanceInInvoiceOnlyMode(): void
@@ -55,16 +58,37 @@ final class InvoiceTaxConfigurationContractTest extends TestCase
             'private function dryRunTaxReason(string $code, string $fallback = \'\'): string',
         );
 
-        self::assertStringContainsString('$this->application->invoiceTaxPolicy()', $method);
+        self::assertStringContainsString('$this->application->invoiceTaxPolicy(true)', $method);
         self::assertStringContainsString('$invoiceTaxPolicy->decideInvoice(...$arguments)', $method);
         self::assertStringContainsString('$voucherTaxPolicy ??= $this->application->taxPolicy();', $method);
         self::assertStringContainsString(
             '$exportMode === DocumentTargetResolver::MODE_INVOICE_FOR_OSS',
             $method,
         );
+        self::assertStringContainsString(
+            "'small_business_invoice_canary_not_confirmed'",
+            $controller,
+        );
     }
 
-    public function testHealthSkipsReceiptGuidanceForInvoiceOnly(): void
+    public function testWorkerChecksTheRuleElevenCanaryAndCurrentTenantScope(): void
+    {
+        $worker = $this->source('lib/Jobs/ExportJobHandler.php');
+        $method = $this->between(
+            $worker,
+            'private function taxDecision(',
+            '/** @param array<string,mixed> $candidate */',
+        );
+
+        self::assertStringContainsString(
+            "bool(\n                'small_business_invoice_canary_confirmed'",
+            $method,
+        );
+        self::assertStringContainsString('invoiceRuleElevenTenantScopeSupported()', $method);
+        self::assertStringContainsString('$ruleElevenTenantScopeSupported', $method);
+    }
+
+    public function testHealthUsesFreshGuidanceOnlyForTheRuleElevenInvoiceCapability(): void
     {
         $health = $this->source('lib/Health/HealthService.php');
         $method = $this->between(
@@ -74,13 +98,39 @@ final class InvoiceTaxConfigurationContractTest extends TestCase
         );
 
         self::assertStringContainsString("\$exportMode === 'invoice_only'", $method);
-        self::assertStringContainsString('$this->addInvoiceTaxChecks($checks);', $method);
+        self::assertStringContainsString(
+            '$invoicePolicy = $this->application->invoiceTaxPolicy(true);',
+            $method,
+        );
+        self::assertStringContainsString(
+            '$this->addInvoiceTaxChecks($checks, $invoicePolicy);',
+            $method,
+        );
         self::assertStringContainsString('$this->application->referenceData()->receiptGuidance(true);', $method);
         $voucherBranch = strpos($method, '} elseif ($modeValid) {');
         $guidanceRead = strpos($method, '$this->application->referenceData()->receiptGuidance(true);');
         self::assertNotFalse($voucherBranch);
         self::assertNotFalse($guidanceRead);
         self::assertLessThan($guidanceRead, $voucherBranch);
+    }
+
+    public function testWorkerAndCorrectionClassifySmallBusinessByOriginalInvoiceDate(): void
+    {
+        $worker = $this->source('lib/Jobs/ExportJobHandler.php');
+        $correction = $this->source('lib/Jobs/CorrectionJobHandler.php');
+
+        self::assertStringContainsString(
+            'smallBusinessAppliesOn($invoice->invoiceDate)',
+            $worker,
+        );
+        self::assertStringContainsString(
+            'smallBusinessAppliesOn($invoice->invoiceDate)',
+            $correction,
+        );
+        self::assertStringNotContainsString(
+            "\$this->config->bool('smallBusinessOwner')",
+            $worker . $correction,
+        );
     }
 
     private function source(string $relativePath): string

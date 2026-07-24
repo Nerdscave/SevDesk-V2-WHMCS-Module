@@ -20,11 +20,15 @@ namespace WHMCS\Module\Addon\SevDesk\Tests\Unit\Fixtures {
 
         public static bool $moduleActive = true;
 
+        public static string $invoiceStatus = 'Paid';
+
         public static int $pdfCalls = 0;
 
         public static int $mappingCalls = 0;
 
         public static bool $authenticationFailure = false;
+
+        public static bool $changeStatusDuringPdfFetch = false;
 
         public static ?string $failedConfigSetting = null;
 
@@ -44,23 +48,12 @@ namespace WHMCS\Module\Addon\SevDesk\Tests\Unit\Fixtures {
             self::$mapping = (object) [
                 'sevdesk_id' => '701',
                 'document_type' => 'invoice',
+                'document_authority' => 'sevdesk',
                 'document_number' => 'RE-42',
                 'document_ready_at' => '2026-07-19 12:00:00',
                 'pdf_sha256' => hash('sha256', self::PDF),
             ];
-            self::$context = [
-                'itemId' => 1,
-                'itemStatus' => 'succeeded',
-                'checkpoint' => 'mapping_persisted',
-                'source' => 'frozen',
-                'allowed' => true,
-                'documentType' => 'invoice',
-                'documentAuthority' => 'sevdesk',
-                'exportMode' => 'invoice_only',
-                'ossProfile' => 'blocked',
-                'euB2cMode' => 'blocked',
-                'deliveryChannel' => 'sevdesk',
-            ];
+            self::$context = null;
         }
     }
 
@@ -122,6 +115,11 @@ namespace WHMCS\Module\Addon\SevDesk\Tests\Unit\Fixtures {
         {
             return ClientAreaState::$ownerId;
         }
+
+        public function invoiceStatusForDelivery(int $invoiceId): string
+        {
+            return ClientAreaState::$invoiceStatus;
+        }
     }
 
     final class ClientAreaMappings
@@ -151,6 +149,9 @@ namespace WHMCS\Module\Addon\SevDesk\Tests\Unit\Fixtures {
             ++ClientAreaState::$pdfCalls;
             if (ClientAreaState::$authenticationFailure) {
                 throw new ApiException('Synthetic authentication failure.', 401, 'AUTHENTICATION');
+            }
+            if (ClientAreaState::$changeStatusDuringPdfFetch) {
+                ClientAreaState::$invoiceStatus = 'Unpaid';
             }
 
             return [
@@ -265,6 +266,12 @@ namespace {
         ClientAreaState::$mapping->document_type = 'voucher';
     } elseif ($scenario === 'not_ready') {
         ClientAreaState::$mapping->document_ready_at = null;
+    } elseif ($scenario === 'unpaid') {
+        ClientAreaState::$invoiceStatus = 'Unpaid';
+    } elseif ($scenario === 'refunded') {
+        ClientAreaState::$invoiceStatus = 'Refunded';
+    } elseif ($scenario === 'status_changes_during_pdf') {
+        ClientAreaState::$changeStatusDuringPdfFetch = true;
     } elseif ($scenario === 'hash_mismatch') {
         ClientAreaState::$mapping->pdf_sha256 = str_repeat('a', 64);
     } elseif ($scenario === 'auth_failure') {
@@ -275,6 +282,8 @@ namespace {
     } elseif ($scenario === 'auth_sync_write_failure') {
         ClientAreaState::$authenticationFailure = true;
         ClientAreaState::$failedConfigSetting = 'sync_enabled';
+    } elseif ($scenario === 'whmcs_authority') {
+        ClientAreaState::$mapping->document_authority = 'whmcs';
     }
 
     $_GET = ['a' => 'download', 'id' => '42'];

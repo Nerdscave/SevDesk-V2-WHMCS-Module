@@ -44,6 +44,24 @@ final class ClientAreaBehaviorTest extends TestCase
         self::assertStringContainsString('noch nicht verfügbar', $result['result']['vars']['message']);
     }
 
+    public function testUnpaidInvoiceNeverFetchesAnAlreadyReadyRemotePdf(): void
+    {
+        $result = $this->runJsonScenario('unpaid');
+
+        self::assertSame(409, $result['httpStatus']);
+        self::assertSame(0, $result['pdfCalls']);
+        self::assertStringContainsString('noch nicht verfügbar', $result['result']['vars']['message']);
+    }
+
+    public function testStatusChangeDuringRemoteReadPreventsStreaming(): void
+    {
+        $result = $this->runJsonScenario('status_changes_during_pdf');
+
+        self::assertSame(409, $result['httpStatus']);
+        self::assertSame(1, $result['pdfCalls']);
+        self::assertStringContainsString('noch nicht verfügbar', $result['result']['vars']['message']);
+    }
+
     public function testChangedFinalPdfHashFailsClosedWithSanitisedResponse(): void
     {
         $result = $this->runJsonScenario('hash_mismatch');
@@ -86,6 +104,22 @@ final class ClientAreaBehaviorTest extends TestCase
 
         self::assertSame(0, $result['exitCode'], $result['stderr']);
         self::assertSame("%PDF-1.7\nsynthetic sevdesk invoice\n%%EOF", $result['stdout']);
+    }
+
+    public function testPreviouslyFinalInvoiceRemainsAvailableAfterRefundedStatus(): void
+    {
+        $result = $this->runProcess('refunded');
+
+        self::assertSame(0, $result['exitCode'], $result['stderr']);
+        self::assertSame("%PDF-1.7\nsynthetic sevdesk invoice\n%%EOF", $result['stdout']);
+    }
+
+    public function testWhmcsAuthorityNeverFetchesTheSevdeskCustomerPdf(): void
+    {
+        $result = $this->runJsonScenario('whmcs_authority');
+
+        self::assertSame(404, $result['httpStatus']);
+        self::assertSame(0, $result['pdfCalls']);
     }
 
     /** @return array<string,mixed> */

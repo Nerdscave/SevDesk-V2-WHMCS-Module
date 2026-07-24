@@ -36,7 +36,7 @@ final class SevdeskClientTest extends TestCase
 
         self::assertSame([['id' => 12]], $client->get('/Contact', ['customerNumber' => '42']));
         self::assertSame('raw-api-token', $history[0]['request']->getHeaderLine('Authorization'));
-        self::assertSame('WHMCS-sevdesk/2.1.0-rc.4', $history[0]['request']->getHeaderLine('User-Agent'));
+        self::assertSame('WHMCS-sevdesk/2.1.0-rc.5', $history[0]['request']->getHeaderLine('User-Agent'));
         self::assertSame(5.0, $history[0]['options']['connect_timeout']);
         self::assertSame(30.0, $history[0]['options']['timeout']);
         self::assertStringContainsString('customerNumber=42', (string) $history[0]['request']->getUri());
@@ -242,6 +242,24 @@ final class SevdeskClientTest extends TestCase
         } catch (ApiException $exception) {
             self::assertSame('redacted', $exception->sevdeskCode);
             self::assertStringNotContainsString($token, $exception->getMessage());
+        }
+    }
+
+    public function testAnEchoedLongTokenIsRedactedAfterTheErrorCodeLimit(): void
+    {
+        $token = str_repeat('0123456789abcdef', 12);
+        $client = new SevdeskClient(new Client([
+            'handler' => HandlerStack::create(new MockHandler([
+                new Response(400, [], '{"error":{"code":"' . $token . '"}}'),
+            ])),
+        ]), $token);
+
+        try {
+            $client->post('/Contact', []);
+            self::fail('Expected ApiException.');
+        } catch (ApiException $exception) {
+            self::assertSame('redacted', $exception->sevdeskCode);
+            self::assertStringNotContainsString(substr($token, 0, 120), $exception->getMessage());
         }
     }
 

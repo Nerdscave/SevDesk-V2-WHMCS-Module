@@ -63,6 +63,33 @@ final class ApplicationTest extends TestCase
         self::assertCount(0, $history, 'Optional contact reference IDs must stay lazy until a new contact exists.');
     }
 
+    public function testContactCompositionUsesTheExactCountryResolverForSevdeskDuplicates(): void
+    {
+        $history = [];
+        $stack = HandlerStack::create(new MockHandler([
+            new \GuzzleHttp\Psr7\Response(200, [], '{"objects":[
+                {"id":74,"code":"GB","nameEn":"England"},
+                {"id":9,"code":"GB","nameEn":"Great Britain"},
+                {"id":77,"code":"GB","nameEn":"United Kingdom"}
+            ]}'),
+        ]));
+        $stack->push(Middleware::history($history));
+        $client = new SevdeskClient(new Client(['handler' => $stack]), 'synthetic-token');
+        $reflection = new ReflectionClass(Application::class);
+        /** @var Application $application */
+        $application = $reflection->newInstanceWithoutConstructor();
+        $reflection->getProperty('client')->setValue($application, $client);
+
+        $service = $application->contacts();
+        $countryResolver = (new ReflectionClass(ContactService::class))
+            ->getProperty('resolveCountryId')
+            ->getValue($service);
+
+        self::assertInstanceOf(\Closure::class, $countryResolver);
+        self::assertSame('77', $countryResolver('GB'));
+        self::assertCount(1, $history);
+    }
+
     #[DataProvider('checkpointProvider')]
     public function testRemoteWriteCheckpointClassification(string $checkpoint, bool $expectedRisk): void
     {

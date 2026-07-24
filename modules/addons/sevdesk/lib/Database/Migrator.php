@@ -25,6 +25,7 @@ final class Migrator
                 $table->integer('invoice_id')->nullable();
                 $table->string('sevdesk_id', 255)->nullable();
                 $table->string('document_type', 16)->nullable();
+                $table->string('document_authority', 16)->nullable();
                 $table->string('document_number', 191)->nullable();
                 $table->dateTime('document_ready_at')->nullable();
                 $table->dateTime('delivered_at')->nullable();
@@ -96,7 +97,7 @@ final class Migrator
         $missing = [];
         foreach (
             [
-                'document_type', 'document_number', 'document_ready_at', 'delivered_at',
+                'document_type', 'document_authority', 'document_number', 'document_ready_at', 'delivered_at',
                 'pdf_sha256', 'is_e_invoice', 'xml_sha256',
             ] as $column
         ) {
@@ -111,6 +112,9 @@ final class Migrator
         $schema->table(self::MAPPING_TABLE, static function ($table) use ($missing): void {
             if (in_array('document_type', $missing, true)) {
                 $table->string('document_type', 16)->nullable();
+            }
+            if (in_array('document_authority', $missing, true)) {
+                $table->string('document_authority', 16)->nullable();
             }
             if (in_array('document_number', $missing, true)) {
                 $table->string('document_number', 191)->nullable();
@@ -183,7 +187,7 @@ final class Migrator
         $required = [
             self::MAPPING_TABLE => [
                 'id', 'invoice_id', 'sevdesk_id', 'document_type', 'document_number',
-                'document_ready_at', 'delivered_at', 'pdf_sha256', 'is_e_invoice',
+                'document_authority', 'document_ready_at', 'delivered_at', 'pdf_sha256', 'is_e_invoice',
                 'xml_sha256',
             ],
             self::JOBS_TABLE => [

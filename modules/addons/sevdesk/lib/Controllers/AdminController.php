@@ -16,12 +16,19 @@ use WHMCS\Module\Addon\SevDesk\Domain\Decimal;
 use WHMCS\Module\Addon\SevDesk\Domain\DocumentTargetDecision;
 use WHMCS\Module\Addon\SevDesk\Domain\InvoiceSnapshot;
 use WHMCS\Module\Addon\SevDesk\Domain\LineItem;
+use WHMCS\Module\Addon\SevDesk\Domain\WhmcsInvoiceItem;
 use WHMCS\Module\Addon\SevDesk\Health\HealthService;
 use WHMCS\Module\Addon\SevDesk\Repository\JobRepository;
+use WHMCS\Module\Addon\SevDesk\Repository\MappingRepository;
 use WHMCS\Module\Addon\SevDesk\Service\CorrectionService;
 use WHMCS\Module\Addon\SevDesk\Service\DocumentTargetResolver;
+use WHMCS\Module\Addon\SevDesk\Service\InvoiceItemNormalizer;
+use WHMCS\Module\Addon\SevDesk\Service\TaxPolicy;
+use WHMCS\Module\Addon\SevDesk\Service\WhmcsGateway;
+use WHMCS\Module\Addon\SevDesk\Service\WhmcsPaymentStructureService;
 use WHMCS\Module\Addon\SevDesk\Support\AdminInvoiceControls;
 use WHMCS\Module\Addon\SevDesk\Support\Csrf;
+use WHMCS\Module\Addon\SevDesk\Support\DocumentDeliveryContext;
 use WHMCS\Module\Addon\SevDesk\Support\QuickExportGuard;
 use WHMCS\Module\Addon\SevDesk\View;
 
@@ -71,7 +78,7 @@ final class AdminController
                 $this->view->flash('success', 'Die Einstellungen wurden gespeichert. Das Speichern selbst hat keinen Export gestartet.', 'Konfiguration aktualisiert');
             } catch (Throwable $error) {
                 $saveFailed = true;
-                $this->view->flash('danger', $error->getMessage(), 'Einstellungen nicht gespeichert');
+                $this->flashSetupFailure($error);
             }
         }
 
@@ -90,6 +97,15 @@ final class AdminController
         $settings['e_invoice_active_from_iso'] = $eInvoiceStart instanceof DateTimeImmutable
             ? $eInvoiceStart->format('Y-m-d')
             : '';
+        $storedSmallBusinessUntil = trim((string) ($settings['small_business_until'] ?? ''));
+        try {
+            $smallBusinessUntil = Config::parseSmallBusinessUntil($storedSmallBusinessUntil);
+            $settings['small_business_until_iso'] = $smallBusinessUntil?->format('Y-m-d') ?? '';
+            $settings['small_business_until_invalid'] = false;
+        } catch (RuntimeException) {
+            $settings['small_business_until_iso'] = '';
+            $settings['small_business_until_invalid'] = true;
+        }
 
         $accountOptions = [];
         $sevUsers = [];
@@ -147,6 +163,8 @@ final class AdminController
             'paymentMethods' => $paymentMethods,
             'eInvoiceClientFields' => $eInvoiceClientFields,
             'emailTemplates' => $emailTemplates,
+            'whmcsTemplateDeliverySupported' => $this->application->whmcs
+                ->supportsEmailPreSendAttachments(),
             'proformaEnabled' => $this->application->whmcs->proformaInvoicingEnabled(),
             'themeAdapterInstalled' => $this->application->whmcs->themeAdapterManifestInstalled(),
             'transitionInventory' => $transitionInventory,
@@ -172,6 +190,7 @@ final class AdminController
                     $creditConfirmed = isset($_POST['confirm_credit_export'])
                         && (string) ($_POST['credit_treatment_confirmed'] ?? '') === '1'
                         && ($preflight['reason_code'] ?? '') === 'credit_applied_requires_review'
+                        && ($preflight['credit_voucher_confirmation_allowed'] ?? false) === true
                         && $this->application->config->get('export_mode')
                             === DocumentTargetResolver::MODE_VOUCHER_ONLY;
                     $confirmed = isset($_POST['confirm_export']) || isset($_POST['confirm_credit_export']);
@@ -246,14 +265,19 @@ final class AdminController
                     $notice = 'blocked';
                 } else {
                     $invoiceItems = Capsule::table('tblinvoiceitems')->where('invoiceid', $invoiceId);
-                    $reason = QuickExportGuard::blockReason(
-                        $invoice,
-                        $mapping,
-                        $this->application->config->bool('import_only_paid', true),
-                        (string) $this->application->config->get('import_after', '01-01-1999'),
-                        (clone $invoiceItems)->exists(),
-                        (clone $invoiceItems)->where('amount', '<', 0)->exists(),
-                    );
+                    $hasMassPaymentReference = (clone $invoiceItems)
+                        ->whereRaw('LOWER(TRIM(type)) = ?', ['invoice'])
+                        ->exists();
+                    $reason = $hasMassPaymentReference
+                        ? WhmcsPaymentStructureService::MASS_PAYMENT_REQUIRES_REVIEW
+                        : QuickExportGuard::blockReason(
+                            $invoice,
+                            $mapping,
+                            $this->application->config->bool('import_only_paid', true),
+                            (string) $this->application->config->get('import_after', '01-01-1999'),
+                            (clone $invoiceItems)->exists(),
+                            (clone $invoiceItems)->where('amount', '<', 0)->exists(),
+                        );
                     if ($reason === QuickExportGuard::ALREADY_MAPPED) {
                         $notice = 'already_mapped';
                     } elseif ($reason === QuickExportGuard::AMBIGUOUS_LEGACY) {
@@ -566,24 +590,50 @@ final class AdminController
                             'invoiceId' => (int) $mapping->invoice_id,
                             'remoteId' => (string) $mapping->sevdesk_id,
                             'invoiceNumber' => (string) $mapping->invoicenum,
+                            'invoicePaid' => self::legacyInvoiceIsPaid($mapping),
+                            'frozenDocumentType' => (string) $mapping->frozen_document_type,
+                            'frozenDocumentAuthority' => (string) $mapping->frozen_document_authority,
                         ];
                     } else {
                         $this->handleLegacyMappingTypeFailure($inspection);
                     }
                 } elseif (isset($_POST['confirm_legacy_type'])) {
                     $submittedDocumentType = $_POST['document_type'] ?? null;
+                    $submittedDocumentAuthority = $_POST['document_authority'] ?? null;
                     if (
                         !is_string($submittedDocumentType)
                         || !in_array($submittedDocumentType, ['voucher', 'invoice'], true)
                     ) {
                         throw new RuntimeException('Der bestätigte Belegtyp ist ungültig.');
                     }
+                    if (
+                        !is_string($submittedDocumentAuthority)
+                        || !in_array($submittedDocumentAuthority, ['whmcs', 'sevdesk'], true)
+                        || ($submittedDocumentType === 'voucher' && $submittedDocumentAuthority !== 'whmcs')
+                    ) {
+                        throw new RuntimeException('Die bestätigte Dokumenthoheit ist ungültig.');
+                    }
+                    if (
+                        $submittedDocumentAuthority === 'sevdesk'
+                        && !$this->application->legacySevdeskAuthorityReady()
+                    ) {
+                        throw new RuntimeException(
+                            'Für sevdesk-Hoheit fehlen Proforma, Theme-Adapter oder Versandvoraussetzungen.',
+                        );
+                    }
                     $mapping = $this->legacyMappingContext($mappingId);
+                    self::assertLegacyAuthorityStatus($mapping, $submittedDocumentAuthority);
+                    self::assertLegacyFrozenDocument(
+                        $mapping,
+                        $submittedDocumentType,
+                        $submittedDocumentAuthority,
+                    );
                     $result = $this->application->legacyMappingType()->confirm(
                         (int) $mapping->invoice_id,
                         (string) $mapping->invoicenum,
                         (string) $mapping->sevdesk_id,
                         $submittedDocumentType,
+                        $submittedDocumentAuthority,
                     );
                     if (($result['status'] ?? '') === 'confirmed') {
                         if (function_exists('logActivity')) {
@@ -591,13 +641,14 @@ final class AdminController
                                 'sevdesk: legacy mapping type confirmed by admin ' . $this->adminId()
                                 . '; invoice ' . (int) $mapping->invoice_id
                                 . '; mapping ' . $mappingId
-                                . '; type ' . (string) ($result['suggestedType'] ?? ''),
+                                . '; type ' . (string) ($result['suggestedType'] ?? '')
+                                . '; authority ' . $submittedDocumentAuthority,
                             );
                         }
                         $this->view->flash(
                             'success',
-                            'Der Belegtyp wurde nach erneuter Remote-Prüfung additiv bestätigt.',
-                            'Legacy-Zuordnung typisiert',
+                            'Belegtyp und Dokumenthoheit wurden nach erneuter Remote-Prüfung additiv bestätigt.',
+                            'Legacy-Zuordnung bestätigt',
                         );
                     } else {
                         $this->handleLegacyMappingTypeFailure($result);
@@ -623,7 +674,7 @@ final class AdminController
             if (
                 ($mapping->invoice_exists ?? false) !== false
                 && trim((string) ($mapping->sevdesk_id ?? '')) !== ''
-                && ($mapping->document_type ?? null) === null
+                && trim((string) ($mapping->stored_document_authority ?? '')) === ''
             ) {
                 $legacyBatchIds[] = (int) ($mapping->mapping_id ?? $mapping->id ?? 0);
             }
@@ -643,6 +694,7 @@ final class AdminController
                 static fn (array $inspection): bool => ($inspection['batchEligible'] ?? false) === true,
             )),
             'legacyBatchIds' => implode(',', array_slice($legacyBatchIds, 0, 25)),
+            'legacySevdeskAuthorityReady' => $this->application->legacySevdeskAuthorityReady(),
             'pagination' => $this->pagination($result['page'], $result['pages'], $base),
         ]);
     }
@@ -696,7 +748,16 @@ final class AdminController
                     'code' => (string) ($result['code'] ?? 'legacy_mapping_type_check_failed'),
                     'suggestedType' => (string) ($result['suggestedType'] ?? ''),
                     'markerEvidence' => $markerEvidence,
-                    'batchEligible' => ($result['status'] ?? '') === 'suggested' && $markerEvidence,
+                    'deliveryReady' => ($result['context']['deliveryReady'] ?? false) === true,
+                    'invoicePaid' => self::legacyInvoiceIsPaid($mapping),
+                    'frozenDocumentType' => (string) $mapping->frozen_document_type,
+                    'frozenDocumentAuthority' => (string) $mapping->frozen_document_authority,
+                    'batchEligible' => ($result['status'] ?? '') === 'suggested'
+                        && $markerEvidence
+                        && self::legacyFrozenDocumentMatches(
+                            $mapping,
+                            (string) ($result['suggestedType'] ?? ''),
+                        ),
                     'message' => self::legacyBatchResultMessage($result, $markerEvidence),
                 ];
             } catch (Throwable) {
@@ -708,6 +769,10 @@ final class AdminController
                     'code' => 'legacy_mapping_type_check_failed',
                     'suggestedType' => '',
                     'markerEvidence' => false,
+                    'deliveryReady' => false,
+                    'invoicePaid' => false,
+                    'frozenDocumentType' => '',
+                    'frozenDocumentAuthority' => '',
                     'batchEligible' => false,
                     'message' => 'Die Zuordnung konnte nicht eindeutig read-only geprüft werden.',
                 ];
@@ -720,6 +785,7 @@ final class AdminController
     private function confirmLegacyMappingsBatch(): void
     {
         $submitted = $_POST['batch_confirmations'] ?? null;
+        $submittedAuthorities = $_POST['batch_authorities'] ?? null;
         if (!is_array($submitted) || $submitted === []) {
             throw new RuntimeException('Es wurden keine markerbestätigten Legacy-Typen ausgewählt.');
         }
@@ -739,8 +805,25 @@ final class AdminController
             }
             $mappingId = (int) $mappingKey;
             $documentType = $submittedDocumentType;
+            $documentAuthority = is_array($submittedAuthorities)
+                ? ($submittedAuthorities[$mappingKey] ?? null)
+                : null;
+            if (
+                !is_string($documentAuthority)
+                || !in_array($documentAuthority, ['whmcs', 'sevdesk'], true)
+                || ($documentType === 'voucher' && $documentAuthority !== 'whmcs')
+                || (
+                    $documentAuthority === 'sevdesk'
+                    && !$this->application->legacySevdeskAuthorityReady()
+                )
+            ) {
+                $blocked++;
+                continue;
+            }
             try {
                 $mapping = $this->legacyMappingContext($mappingId);
+                self::assertLegacyAuthorityStatus($mapping, $documentAuthority);
+                self::assertLegacyFrozenDocument($mapping, $documentType, $documentAuthority);
                 $inspection = $this->application->legacyMappingType()->inspect(
                     (int) $mapping->invoice_id,
                     (string) $mapping->invoicenum,
@@ -764,6 +847,7 @@ final class AdminController
                     (string) $mapping->invoicenum,
                     (string) $mapping->sevdesk_id,
                     $documentType,
+                    $documentAuthority,
                 );
                 if (($result['status'] ?? '') === 'confirmed') {
                     $confirmed++;
@@ -771,7 +855,8 @@ final class AdminController
                         logActivity(
                             'sevdesk: marker-backed legacy mapping type confirmed by admin '
                                 . $this->adminId() . '; invoice ' . (int) $mapping->invoice_id
-                                . '; mapping ' . $mappingId,
+                                . '; mapping ' . $mappingId
+                                . '; authority ' . $documentAuthority,
                         );
                     }
                 } else {
@@ -1130,22 +1215,74 @@ final class AdminController
                 'mapping.invoice_id',
                 'mapping.sevdesk_id',
                 'mapping.document_type',
+                'mapping.document_authority',
                 'invoice.id as existing_invoice_id',
                 'invoice.invoicenum',
+                'invoice.status as invoice_status',
             ]);
         if (
             $mapping === null
             || (int) ($mapping->invoice_id ?? 0) < 1
             || (int) ($mapping->existing_invoice_id ?? 0) !== (int) $mapping->invoice_id
             || preg_match('/^[1-9]\d*$/', trim((string) ($mapping->sevdesk_id ?? ''))) !== 1
-            || ($mapping->document_type ?? null) !== null
+            || trim((string) ($mapping->document_authority ?? '')) !== ''
+            || (
+                trim((string) ($mapping->document_type ?? '')) !== ''
+                && !in_array((string) $mapping->document_type, ['voucher', 'invoice'], true)
+            )
         ) {
             throw new RuntimeException(
-                'Nur vollständige Legacy-Zuordnungen ohne bestätigten Dokumenttyp können geprüft werden.',
+                'Nur vollständige Legacy-Zuordnungen ohne bestätigte Dokumenthoheit können geprüft werden.',
             );
         }
+        $frozenDocument = DocumentDeliveryContext::frozenConfirmedDocument(
+            $this->application->jobs->latestDocumentContextForInvoice((int) $mapping->invoice_id, true),
+        );
+        $mapping->frozen_document_type = $frozenDocument['documentType'] ?? '';
+        $mapping->frozen_document_authority = $frozenDocument['documentAuthority'] ?? '';
 
         return $mapping;
+    }
+
+    private static function legacyInvoiceIsPaid(object $mapping): bool
+    {
+        return strcasecmp(trim((string) ($mapping->invoice_status ?? '')), 'Paid') === 0;
+    }
+
+    private static function assertLegacyAuthorityStatus(object $mapping, string $documentAuthority): void
+    {
+        if (
+            $documentAuthority === MappingRepository::DOCUMENT_AUTHORITY_SEVDESK
+            && !self::legacyInvoiceIsPaid($mapping)
+        ) {
+            throw new RuntimeException(
+                'sevdesk-Hoheit kann erst nach vollständiger Zahlung der WHMCS-Rechnung bestätigt werden.',
+            );
+        }
+    }
+
+    private static function legacyFrozenDocumentMatches(object $mapping, string $documentType): bool
+    {
+        $frozenType = trim((string) ($mapping->frozen_document_type ?? ''));
+
+        return $frozenType === '' || $frozenType === $documentType;
+    }
+
+    private static function assertLegacyFrozenDocument(
+        object $mapping,
+        string $documentType,
+        string $documentAuthority,
+    ): void {
+        $frozenType = trim((string) ($mapping->frozen_document_type ?? ''));
+        $frozenAuthority = trim((string) ($mapping->frozen_document_authority ?? ''));
+        if (
+            ($frozenType !== '' && $frozenType !== $documentType)
+            || ($frozenAuthority !== '' && $frozenAuthority !== $documentAuthority)
+        ) {
+            throw new RuntimeException(
+                'Typ und Hoheit müssen der bereits eingefrorenen Dokumententscheidung entsprechen.',
+            );
+        }
     }
 
     /** @param array<string,mixed> $result */
@@ -1464,6 +1601,8 @@ final class AdminController
             'oss_profile',
             'eu_b2c_mode',
             'invoice_canary_confirmed',
+            'small_business_invoice_canary_confirmed',
+            'invoice_discount_canary_confirmed',
             'invoice_sev_user_id',
             'invoice_unity_id',
             'e_invoice_mode',
@@ -1472,6 +1611,11 @@ final class AdminController
             'e_invoice_active_from',
             'e_invoice_canary_confirmed',
             'invoice_delivery_channel',
+            'smallBusinessOwner',
+            'small_business_until',
+            'small_business_confirmed',
+            'accountingTypeSmallBusinessOwner',
+            'taxRuleSmallBusinessOwner',
         ];
         foreach ($protectedSettings as $setting) {
             $protectedProfile[$setting] = (string) $this->application->config->get($setting, '');
@@ -1542,6 +1686,36 @@ final class AdminController
         }
     }
 
+    private function flashSetupFailure(Throwable $error): void
+    {
+        if (get_class($error) === RuntimeException::class) {
+            $message = $error->getMessage();
+        } elseif ($error instanceof ApiException) {
+            $message = 'Die sevdesk-Prüfung konnte nicht abgeschlossen werden'
+                . ($error->httpStatus !== null ? ' (HTTP ' . $error->httpStatus . ')' : '')
+                . '.';
+        } else {
+            $reference = substr(
+                hash('sha256', get_class($error) . '|' . microtime(true)),
+                0,
+                12,
+            );
+            if (function_exists('logActivity')) {
+                try {
+                    logActivity(
+                        'sevdesk setup failed [' . $reference . ']: ' . get_class($error),
+                    );
+                } catch (Throwable) {
+                    // The sanitized setup response must not depend on logging.
+                }
+            }
+            $message = 'Die Einstellungen konnten aufgrund eines internen Fehlers nicht gespeichert werden. '
+                . 'Es wurden keine Fehlerdetails ausgegeben. Referenz: ' . $reference;
+        }
+
+        $this->view->flash('danger', $message, 'Einstellungen nicht gespeichert');
+    }
+
     private function saveSetupWhileLocked(): void
     {
         // Runtime settings are locked before any remote validation. This follows
@@ -1589,6 +1763,14 @@ final class AdminController
         if ($date === null) {
             throw new RuntimeException('Bitte einen gültigen Exportstichtag wählen.');
         }
+        $smallBusinessOwner = isset($_POST['smallBusinessOwner']);
+        $smallBusinessUntilInput = trim((string) ($_POST['small_business_until'] ?? ''));
+        $smallBusinessUntil = $smallBusinessUntilInput === ''
+            ? null
+            : $this->parseIsoDate($smallBusinessUntilInput);
+        if ($smallBusinessUntilInput !== '' && !($smallBusinessUntil instanceof DateTimeImmutable)) {
+            throw new RuntimeException('Bitte einen gültigen Kleinunternehmer-Stichtag wählen.');
+        }
         $customFieldId = (int) ($_POST['custom_field_id'] ?? 0);
         if ($customFieldId < 1 || !Capsule::table('tblcustomfields')->where('id', $customFieldId)->where('type', 'client')->exists()) {
             throw new RuntimeException('Das gewählte WHMCS-Kundenfeld existiert nicht.');
@@ -1632,6 +1814,10 @@ final class AdminController
         }
 
         $invoiceCanaryConfirmed = isset($_POST['invoice_canary_confirmed']);
+        $smallBusinessInvoiceCanaryConfirmed = isset(
+            $_POST['small_business_invoice_canary_confirmed'],
+        );
+        $invoiceDiscountCanaryConfirmed = isset($_POST['invoice_discount_canary_confirmed']);
         $sevUserId = trim((string) ($_POST['invoice_sev_user_id'] ?? ''));
         $unityId = trim((string) ($_POST['invoice_unity_id'] ?? ''));
         if ($exportMode !== 'voucher_only') {
@@ -1641,6 +1827,25 @@ final class AdminController
             if (preg_match('/^[1-9]\d*$/', $sevUserId) !== 1 || preg_match('/^[1-9]\d*$/', $unityId) !== 1) {
                 throw new RuntimeException('Invoice-Modi benötigen einen gültigen SevUser und eine Standard-Unity.');
             }
+        }
+        if (
+            $invoiceDiscountCanaryConfirmed
+            && !$smallBusinessInvoiceCanaryConfirmed
+        ) {
+            throw new RuntimeException(
+                'Der Invoice-Rabatt-Canary setzt zuerst den allgemeinen Rule-11-Invoice-Canary voraus.',
+            );
+        }
+        if (
+            $smallBusinessInvoiceCanaryConfirmed
+            && !TaxPolicy::guidanceSupportsInvoiceRuleEleven(
+                $this->application->referenceData()->receiptGuidance(true),
+            )
+        ) {
+            throw new RuntimeException(
+                'Der aktuelle sevdesk-Mandant bietet in Receipt Guidance kein REVENUE-Konto '
+                    . 'für Rule 11 mit 0 % an. Rule-11-Invoices bleiben gesperrt.',
+            );
         }
 
         $eInvoiceMode = trim((string) ($_POST['e_invoice_mode'] ?? 'off'));
@@ -1708,6 +1913,17 @@ final class AdminController
         $deliveryChannel = trim((string) ($_POST['invoice_delivery_channel'] ?? 'sevdesk'));
         if (!in_array($deliveryChannel, ['sevdesk', 'whmcs_template'], true)) {
             throw new RuntimeException('Ungültiger Versandkanal.');
+        }
+        if (
+            $documentAuthority === DocumentTargetResolver::AUTHORITY_SEVDESK
+            &&
+            $deliveryChannel === 'whmcs_template'
+            && !$this->application->whmcs->supportsEmailPreSendAttachments()
+        ) {
+            throw new RuntimeException(
+                'WHMCS 8.13 unterstützt keine Binäranhänge aus EmailPreSend. '
+                    . 'Bitte den Versandkanal „sevdesk sendViaEmail“ wählen.',
+            );
         }
         $emailTemplate = trim((string) ($_POST['whmcs_invoice_email_template'] ?? ''));
         $emailSubject = trim((string) ($_POST['sevdesk_email_subject']
@@ -1777,12 +1993,36 @@ final class AdminController
             || ($eInvoiceActiveFrom?->format('d-m-Y') ?? '')
                 !== (string) $this->application->config->get('e_invoice_active_from', '')
             || ($eInvoiceCanaryConfirmed ? 'on' : '')
-                !== (string) $this->application->config->get('e_invoice_canary_confirmed', '');
+                !== (string) $this->application->config->get('e_invoice_canary_confirmed', '')
+            || ($smallBusinessInvoiceCanaryConfirmed ? 'on' : '')
+                !== (string) $this->application->config->get(
+                    'small_business_invoice_canary_confirmed',
+                    '',
+                )
+            || ($invoiceDiscountCanaryConfirmed ? 'on' : '')
+                !== (string) $this->application->config->get('invoice_discount_canary_confirmed', '')
+            || ($smallBusinessOwner ? 'on' : '')
+                !== (string) $this->application->config->get('smallBusinessOwner', '')
+            || ($smallBusinessUntil?->format('d-m-Y') ?? '')
+                !== (string) $this->application->config->get('small_business_until', '')
+            || (isset($_POST['small_business_confirmed']) ? 'on' : '')
+                !== (string) $this->application->config->get('small_business_confirmed', '')
+            || trim((string) ($_POST['accountingTypeSmallBusinessOwner'] ?? ''))
+                !== (string) $this->application->config->get('accountingTypeSmallBusinessOwner', '')
+            || trim((string) ($_POST['taxRuleSmallBusinessOwner'] ?? ''))
+                !== (string) $this->application->config->get('taxRuleSmallBusinessOwner', '');
         if (
             $documentProfileChanged
             && Capsule::table(Migrator::ITEMS_TABLE)
                 ->whereIn('action', ['export_document', 'export_voucher', 'reconcile_voucher'])
-                ->whereIn('status', ['pending', 'running', 'retry_wait', 'ambiguous'])
+                ->where(static function ($query): void {
+                    $query->whereIn('status', ['pending', 'running', 'retry_wait', 'ambiguous'])
+                        ->orWhere(static function ($riskyTerminal): void {
+                            $riskyTerminal
+                                ->whereIn('status', ['permanent_failed', 'cancelled'])
+                                ->whereIn('checkpoint', JobRepository::riskyCheckpoints());
+                        });
+                })
                 ->exists()
         ) {
             throw new RuntimeException(
@@ -1799,7 +2039,8 @@ final class AdminController
                 || !hash_equals((string) $inventory['fingerprint'], $submittedFingerprint)
             ) {
                 throw new RuntimeException(
-                    'Vor einer Änderung an Dokumentmodus, Hoheit, OSS- oder E-Rechnungsprofil muss die aktuelle '
+                    'Vor einer Änderung an Dokumentmodus, Hoheit, OSS-, E-Rechnungs- oder Kleinunternehmerprofil '
+                        . 'sowie an den Rule-11-Invoice-Gates muss die aktuelle '
                         . 'Übergangsinventur auf dieser Seite geprüft und ausdrücklich bestätigt werden.',
                 );
             }
@@ -1830,6 +2071,14 @@ final class AdminController
         $this->application->config->set('document_authority', $documentAuthority);
         $this->application->config->set('oss_profile', $ossProfile);
         $this->application->config->set('invoice_canary_confirmed', $invoiceCanaryConfirmed);
+        $this->application->config->set(
+            'small_business_invoice_canary_confirmed',
+            $smallBusinessInvoiceCanaryConfirmed,
+        );
+        $this->application->config->set(
+            'invoice_discount_canary_confirmed',
+            $invoiceDiscountCanaryConfirmed,
+        );
         $this->application->config->set('invoice_sev_user_id', $sevUserId);
         $this->application->config->set('invoice_unity_id', $unityId);
         $this->application->config->set('e_invoice_mode', $eInvoiceMode);
@@ -1846,7 +2095,11 @@ final class AdminController
         $this->application->config->set('sevdesk_email_body', $emailBody);
         $this->application->config->set('theme_adapter_confirmed', $themeAdapterConfirmed);
         $this->application->config->set('import_only_paid', isset($_POST['import_only_paid']));
-        $this->application->config->set('smallBusinessOwner', isset($_POST['smallBusinessOwner']));
+        $this->application->config->set('smallBusinessOwner', $smallBusinessOwner);
+        $this->application->config->set(
+            'small_business_until',
+            $smallBusinessUntil?->format('d-m-Y') ?? '',
+        );
         $this->application->config->set('eu_b2b_goods_confirmed', isset($_POST['eu_b2b_goods_confirmed']));
         $this->application->config->set('eu_b2c_mode', $mode);
         $this->application->config->set('third_country_confirmed', isset($_POST['third_country_confirmed']));
@@ -1964,11 +2217,21 @@ final class AdminController
     private function operationalSettingsChanged(): bool
     {
         $date = $this->parseIsoDate((string) ($_POST['import_after'] ?? ''));
+        $smallBusinessUntilInput = trim((string) ($_POST['small_business_until'] ?? ''));
+        $smallBusinessUntil = $smallBusinessUntilInput === ''
+            ? ''
+            : ($this->parseIsoDate($smallBusinessUntilInput)?->format('d-m-Y') ?? '__invalid__');
         $proposed = [
             'export_mode' => (string) ($_POST['export_mode'] ?? 'voucher_only'),
             'document_authority' => (string) ($_POST['document_authority'] ?? 'whmcs'),
             'oss_profile' => (string) ($_POST['oss_profile'] ?? 'blocked'),
             'invoice_canary_confirmed' => isset($_POST['invoice_canary_confirmed']) ? 'on' : '',
+            'small_business_invoice_canary_confirmed' => isset(
+                $_POST['small_business_invoice_canary_confirmed'],
+            ) ? 'on' : '',
+            'invoice_discount_canary_confirmed' => isset($_POST['invoice_discount_canary_confirmed'])
+                ? 'on'
+                : '',
             'invoice_sev_user_id' => trim((string) ($_POST['invoice_sev_user_id'] ?? '')),
             'invoice_unity_id' => trim((string) ($_POST['invoice_unity_id'] ?? '')),
             'e_invoice_mode' => trim((string) ($_POST['e_invoice_mode'] ?? 'off')),
@@ -1993,6 +2256,7 @@ final class AdminController
                 $_POST['customer_number_contact_creation_confirmed']
             ) ? 'on' : '',
             'smallBusinessOwner' => isset($_POST['smallBusinessOwner']) ? 'on' : '',
+            'small_business_until' => $smallBusinessUntil,
             'eu_b2b_goods_confirmed' => isset($_POST['eu_b2b_goods_confirmed']) ? 'on' : '',
             'eu_b2c_mode' => (string) ($_POST['eu_b2c_mode'] ?? 'blocked'),
             'third_country_confirmed' => isset($_POST['third_country_confirmed']) ? 'on' : '',
@@ -2221,7 +2485,7 @@ final class AdminController
             Capsule::table('tblinvoiceitems')
                 ->whereIn('invoiceid', $invoiceIds)
                 ->orderBy('id')
-                ->get(['invoiceid', 'type', 'description', 'amount', 'taxed']) as $item
+                ->get(['invoiceid', 'type', 'relid', 'description', 'amount', 'taxed']) as $item
         ) {
             $invoiceItems[(int) $item->invoiceid][] = $item;
         }
@@ -2237,12 +2501,13 @@ final class AdminController
             DocumentTargetResolver::MODE_INVOICE_FOR_OSS,
             DocumentTargetResolver::MODE_INVOICE_ONLY,
         ], true);
-        $invoiceTaxPolicy = $invoiceCapable ? $this->application->invoiceTaxPolicy() : null;
+        $invoiceTaxPolicy = $invoiceCapable ? $this->application->invoiceTaxPolicy(true) : null;
         $voucherTaxPolicy = $exportMode === DocumentTargetResolver::MODE_VOUCHER_ONLY
             ? $this->application->taxPolicy()
             : null;
         $taxType = strtolower((string) ($GLOBALS['CONFIG']['TaxType'] ?? 'Exclusive'));
-        $net = $taxType !== 'inclusive';
+        $taxTypeSupported = in_array($taxType, ['exclusive', 'inclusive'], true);
+        $net = $taxType === 'exclusive';
         $configuredStart = DateTimeImmutable::createFromFormat(
             '!d-m-Y',
             (string) $this->application->config->get('import_after', '01-01-1999'),
@@ -2250,14 +2515,33 @@ final class AdminController
         $result = [];
         foreach ($rows as $invoice) {
             $invoiceId = (int) $invoice->id;
+            $effectiveInvoiceNumber = WhmcsGateway::effectiveInvoiceNumber(
+                $invoiceId,
+                (string) ($invoice->invoicenum ?? ''),
+            );
             $mapping = $mappings[$invoiceId] ?? null;
             $mappingRemoteId = $mapping === null ? '' : trim((string) ($mapping->sevdesk_id ?? ''));
             $country = strtoupper((string) ($invoice->country ?? ''));
             $taxExempt = in_array(strtolower((string) ($invoice->taxexempt ?? '')), ['1', 'true', 'yes', 'on'], true);
+            $sourceItems = $invoiceItems[$invoiceId] ?? [];
+            $sourceTypes = array_values(array_unique(array_filter(array_map(
+                static fn (object $item): string => strtolower(trim((string) ($item->type ?? ''))),
+                $sourceItems,
+            ))));
+            $hasInvoiceReferenceItems = in_array('invoice', $sourceTypes, true);
+            $requiresPaymentStructure = $hasInvoiceReferenceItems
+                || (float) ($invoice->credit ?? 0) > 0;
+            $massPaymentExact = false;
+            $ordinaryVoucherCreditReview = false;
+            $paymentStructureCode = '';
             $exportable = true;
             $reason = '';
             $reasonCode = '';
-            if ($mapping !== null && $mappingRemoteId !== '') {
+            if (!$taxTypeSupported) {
+                $exportable = false;
+                $reason = 'Der konfigurierte WHMCS-Steuermodus wird nicht unterstützt';
+                $reasonCode = 'unsupported_whmcs_tax_type';
+            } elseif ($mapping !== null && $mappingRemoteId !== '') {
                 $exportable = false;
                 $reason = 'Bereits zugeordnet';
             } elseif ($mapping !== null) {
@@ -2269,48 +2553,142 @@ final class AdminController
                 $reason = $reasonCode === 'unresolved_export_history'
                     ? 'Ein älterer Export endete nach einem möglichen Remote-Write und muss zuerst geklärt werden'
                     : 'Ein aktiver oder ungeklärter Exportjob besitzt diese Rechnung bereits';
-            } elseif ((float) $invoice->credit > 0) {
+            }
+            if ($exportable && $requiresPaymentStructure) {
+                $paymentStructure = $this->application->paymentStructure()->classify($invoiceId);
+                $paymentStructureCode = (string) ($paymentStructure['code'] ?? '');
+                if ($paymentStructureCode === WhmcsPaymentStructureService::EXACT_MASS_PAYMENT_TARGET) {
+                    $massPaymentExact = true;
+                } elseif ($paymentStructureCode === WhmcsPaymentStructureService::CONTAINER_NOT_REVENUE) {
+                    $exportable = false;
+                    $reason = 'Reine Sammelzahlungsrechnung; die verknüpften Originalrechnungen sind die Umsatzbelege';
+                    $reasonCode = WhmcsPaymentStructureService::CONTAINER_NOT_REVENUE;
+                } elseif ($paymentStructureCode !== WhmcsPaymentStructureService::ORDINARY_INVOICE) {
+                    $paymentStructureReason = (string) (
+                        $paymentStructure['context']['reasonCode']
+                        ?? $paymentStructureCode
+                    );
+                    $exportable = false;
+                    if (
+                        self::ordinaryVoucherCreditReviewAllowed(
+                            $exportMode,
+                            $hasInvoiceReferenceItems,
+                            $paymentStructure,
+                            $paymentStructureReason,
+                        )
+                    ) {
+                        $ordinaryVoucherCreditReview = true;
+                        $reason = 'Angewendetes Guthaben benötigt Einzelprüfung';
+                        $reasonCode = 'credit_applied_requires_review';
+                    } else {
+                        $reason = 'Guthaben oder Sammelzahlung sind strukturell nicht vollständig beweisbar';
+                        $reasonCode = $paymentStructureReason;
+                    }
+                }
+            }
+            if ($exportable && (float) $invoice->credit > 0 && !$massPaymentExact) {
                 $exportable = false;
                 $reason = 'Angewendetes Guthaben benötigt Einzelprüfung';
                 $reasonCode = 'credit_applied_requires_review';
-            } elseif ((float) $invoice->total <= 0) {
+            }
+            $rawDocumentGross = '0.00';
+            $directCashMinor = 0;
+            try {
+                $rawDocumentGross = WhmcsGateway::documentGrossTotal(
+                    (string) ($invoice->subtotal ?? ''),
+                    (string) ($invoice->tax ?? ''),
+                    (string) ($invoice->tax2 ?? ''),
+                    (string) ($invoice->total ?? ''),
+                    (string) ($invoice->credit ?? ''),
+                );
+                $directCashMinor = Decimal::toMinorUnits((string) $invoice->total);
+            } catch (\InvalidArgumentException) {
+                if ($exportable) {
+                    $exportable = false;
+                    $reason = 'Die WHMCS-Rechnung erfüllt nicht subtotal + tax + tax2 = total + credit';
+                    $reasonCode = 'invoice_total_mismatch';
+                }
+            }
+            if ($exportable && Decimal::toMinorUnits($rawDocumentGross) <= 0) {
                 $exportable = false;
                 $reason = 'Null- oder Negativbetrag benötigt Einzelprüfung';
-            } elseif (strtoupper(trim((string) ($invoice->currencycode ?? ''))) !== 'EUR') {
+            } elseif ($exportable && strtoupper(trim((string) ($invoice->currencycode ?? ''))) !== 'EUR') {
                 $exportable = false;
                 $reason = 'Fremdwährung benötigt bis zur separaten Freigabe eine manuelle Prüfung';
                 $reasonCode = 'foreign_currency_requires_review';
-            } elseif ($this->application->config->bool('import_only_paid', true) && (string) $invoice->status !== 'Paid') {
+            } elseif (
+                $exportable
+                && $this->application->config->bool('import_only_paid', true)
+                && (string) $invoice->status !== 'Paid'
+            ) {
                 $exportable = false;
                 $reason = 'Nach der aktuellen Einstellung werden nur bezahlte Rechnungen exportiert';
-            } elseif ($configuredStart instanceof DateTimeImmutable && (string) $invoice->date < $configuredStart->format('Y-m-d')) {
+            } elseif (
+                $exportable
+                && $configuredStart instanceof DateTimeImmutable
+                && (string) $invoice->date < $configuredStart->format('Y-m-d')
+            ) {
                 $exportable = false;
                 $reason = 'Rechnung liegt vor dem konfigurierten Exportstichtag';
             }
 
             $lines = [];
+            $discounts = [];
             $types = [];
             $taxRate = (float) ($invoice->taxrate ?? 0) + (float) ($invoice->taxrate2 ?? 0);
             if ($exportable && (float) ($invoice->taxrate ?? 0) > 0 && (float) ($invoice->taxrate2 ?? 0) > 0) {
                 $exportable = false;
                 $reason = 'Zwei gleichzeitig angewendete WHMCS-Steuern benötigen eine manuelle Positionsprüfung';
             }
-            foreach ($invoiceItems[$invoiceId] ?? [] as $item) {
-                $type = strtolower(trim((string) $item->type));
-                if ($type !== '') {
-                    $types[] = $type;
+            $hasPromoOrNegativeItem = false;
+            try {
+                foreach ($sourceItems as $item) {
+                    $type = strtolower(trim((string) $item->type));
+                    if ($type !== '') {
+                        $types[] = $type;
+                    }
+                    if (
+                        $type === 'promohosting'
+                        || Decimal::toMinorUnits((string) $item->amount) < 0
+                    ) {
+                        $hasPromoOrNegativeItem = true;
+                    }
                 }
-                try {
-                    $lines[] = new LineItem(
-                        (string) $item->description,
-                        (string) $item->amount,
-                        self::truthy($item->taxed ?? false) ? $this->decimal($taxRate) : '0',
-                        $net,
-                    );
-                } catch (\InvalidArgumentException) {
-                    $exportable = false;
-                    $reason = 'Mindestens eine Rechnungsposition enthält ungültige Betrags- oder Steuerdaten';
+
+                if ($hasPromoOrNegativeItem) {
+                    $structuredItems = [];
+                    foreach ($sourceItems as $item) {
+                        $structuredItems[] = WhmcsInvoiceItem::fromWhmcs([
+                            'type' => (string) $item->type,
+                            'relid' => $item->relid,
+                            'description' => (string) $item->description,
+                            'amount' => (string) $item->amount,
+                            'taxed' => $item->taxed,
+                        ], $this->decimal($taxRate), $net ? 'Exclusive' : 'Inclusive');
+                    }
+                    $normalization = (new InvoiceItemNormalizer())->normalize($structuredItems);
+                    if (!$normalization->allowed) {
+                        $exportable = false;
+                        $reason = $normalization->message;
+                        $reasonCode = $normalization->code;
+                    } else {
+                        $lines = $normalization->lines;
+                        $discounts = $normalization->discounts;
+                    }
+                } else {
+                    foreach ($sourceItems as $item) {
+                        $lines[] = new LineItem(
+                            (string) $item->description,
+                            (string) $item->amount,
+                            self::truthy($item->taxed ?? false) ? $this->decimal($taxRate) : '0',
+                            $net,
+                        );
+                    }
                 }
+            } catch (\InvalidArgumentException) {
+                $exportable = false;
+                $reason = 'Mindestens eine Rechnungsposition enthält ungültige Betrags-, Steuer- oder Referenzdaten';
+                $reasonCode = 'invalid_invoice_item';
             }
             $types = array_values(array_unique($types));
             $addFunds = in_array('addfunds', $types, true);
@@ -2326,19 +2704,26 @@ final class AdminController
             $decision = null;
             $target = null;
             $snapshot = null;
+            $smallBusinessApplies = false;
             if ($exportable) {
                 try {
                     $snapshot = new InvoiceSnapshot(
                         $invoiceId,
                         (int) $invoice->userid,
-                        trim((string) $invoice->invoicenum) !== '' ? (string) $invoice->invoicenum : (string) $invoiceId,
+                        $effectiveInvoiceNumber,
                         new DateTimeImmutable((string) $invoice->date),
                         (string) $invoice->currencycode,
-                        (string) $invoice->total,
+                        $rawDocumentGross,
                         (string) $invoice->credit,
                         $lines,
+                        $discounts,
                     );
-                    if (abs($snapshot->lineGrossMinorUnits() - $snapshot->totalMinorUnits()) > 1) {
+                    if (
+                        abs(
+                            $snapshot->calculatedDocumentGrossMinorUnits()
+                            - $snapshot->totalMinorUnits(),
+                        ) > 1
+                    ) {
                         $exportable = false;
                         $reason = 'Positionssumme und WHMCS-Rechnungsbetrag weichen um mehr als 0,01 ab';
                     }
@@ -2347,12 +2732,26 @@ final class AdminController
                     $reason = 'Die WHMCS-Rechnung konnte nicht konsistent normalisiert werden';
                 }
             }
+            if ($exportable && $snapshot instanceof InvoiceSnapshot) {
+                try {
+                    $smallBusinessApplies = $this->application->config->smallBusinessAppliesOn(
+                        $snapshot->invoiceDate,
+                    );
+                } catch (RuntimeException) {
+                    $exportable = false;
+                    $reason = 'Der gespeicherte Kleinunternehmer-Stichtag ist ungültig';
+                    $reasonCode = 'small_business_period_invalid';
+                }
+            } elseif ($exportable) {
+                $exportable = false;
+                $reason = 'Die WHMCS-Rechnung konnte nicht konsistent normalisiert werden';
+            }
             if ($exportable) {
                 $arguments = [
                     $country,
                     $taxExempt,
                     trim((string) ($invoice->tax_id ?? '')) ?: null,
-                    $this->application->config->bool('smallBusinessOwner'),
+                    $smallBusinessApplies,
                     $addFunds,
                     $lines,
                     trim((string) ($invoice->companyname ?? '')) !== '',
@@ -2384,17 +2783,51 @@ final class AdminController
                 $target = $this->application->documentTargetResolver()->resolve(
                     $decision,
                     (string) $invoice->status === 'Paid',
-                    trim((string) $invoice->invoicenum) !== '',
+                    $effectiveInvoiceNumber !== '',
                 );
                 if (
                     $target->allowed
                     && $target->documentType === DocumentTargetDecision::DOCUMENT_INVOICE
                     && $snapshot instanceof InvoiceSnapshot
-                    && $snapshot->lineGrossMinorUnits() !== $snapshot->totalMinorUnits()
+                    && $snapshot->calculatedDocumentGrossMinorUnits() !== $snapshot->totalMinorUnits()
                 ) {
                     $exportable = false;
                     $reason = 'Für Invoices müssen Positionssumme und WHMCS-Rechnungsbetrag centgenau übereinstimmen';
                     $reasonCode = 'invoice_total_mismatch';
+                } elseif (
+                    $target->allowed
+                    && $target->documentType !== DocumentTargetDecision::DOCUMENT_INVOICE
+                    && $snapshot instanceof InvoiceSnapshot
+                    && $snapshot->discounts !== []
+                ) {
+                    $exportable = false;
+                    $reason = 'Strukturelle PromoHosting-Rabatte sind nur im Modus „Invoice only“ freigegeben';
+                    $reasonCode = 'voucher_discount_not_supported';
+                } elseif (
+                    $target->allowed
+                    && $snapshot instanceof InvoiceSnapshot
+                    && $snapshot->discounts !== []
+                    && (
+                        $decision->taxRuleId !== '11'
+                        || array_filter(
+                            $snapshot->lineItems,
+                            static fn (LineItem $line): bool =>
+                                Decimal::toMinorUnits($line->taxRate) !== 0,
+                        ) !== []
+                    )
+                ) {
+                    $exportable = false;
+                    $reason = 'PromoHosting-Rabatte sind zunächst nur für Rule 11 mit 0 % freigegeben';
+                    $reasonCode = 'invoice_discount_tax_rule_not_supported';
+                } elseif (
+                    $target->allowed
+                    && $snapshot instanceof InvoiceSnapshot
+                    && $snapshot->discounts !== []
+                    && !$this->application->config->bool('invoice_discount_canary_confirmed')
+                ) {
+                    $exportable = false;
+                    $reason = 'Der separate sevdesk-Canary für feste Invoice-Rabatte ist noch nicht bestätigt';
+                    $reasonCode = 'invoice_discount_canary_not_confirmed';
                 } elseif (
                     $target->allowed
                     && $target->documentType === DocumentTargetDecision::DOCUMENT_INVOICE
@@ -2423,18 +2856,24 @@ final class AdminController
             $documentAuthority = $target instanceof DocumentTargetDecision
                 ? $target->documentAuthority
                 : (string) $this->application->config->get('document_authority', 'whmcs');
+            $documentGross = $rawDocumentGross;
             $result[] = [
                 'id' => (int) $invoice->id,
                 'invoice_id' => (int) $invoice->id,
-                'invoicenum' => (string) $invoice->invoicenum,
+                'invoicenum' => $effectiveInvoiceNumber,
                 'client_name' => $clientName,
                 'countrycode' => $country,
                 'date' => (string) $invoice->date,
                 'datepaid' => (string) $invoice->datepaid,
-                'total' => number_format((float) $invoice->total, 2, ',', '.'),
-                'gross_formatted' => number_format((float) $invoice->total, 2, ',', '.'),
+                'total' => number_format((float) $documentGross, 2, ',', '.'),
+                'gross_formatted' => number_format((float) $documentGross, 2, ',', '.'),
                 'credit_formatted' => number_format((float) $invoice->credit, 2, ',', '.'),
-                'payable_formatted' => number_format(max(0, (float) $invoice->total - (float) $invoice->credit), 2, ',', '.'),
+                'payable_formatted' => number_format(
+                    (float) Decimal::fromMinorUnits($directCashMinor),
+                    2,
+                    ',',
+                    '.',
+                ),
                 'status' => (string) $invoice->status,
                 'mapped' => $mappingRemoteId !== '',
                 'sevdesk_id' => $mappingRemoteId !== '' ? $mappingRemoteId : null,
@@ -2442,9 +2881,16 @@ final class AdminController
                 'exportable' => $exportable,
                 'reason' => $reason,
                 'reason_code' => $reasonCode,
-                'credit_voucher_confirmation_allowed' => $reasonCode === 'credit_applied_requires_review'
-                    && $this->application->config->get('export_mode')
-                        === DocumentTargetResolver::MODE_VOUCHER_ONLY,
+                'payment_structure' => $paymentStructureCode !== '' ? $paymentStructureCode : null,
+                'payment_booking_note' => $massPaymentExact
+                    ? 'Umsatzbeleg freigegeben; die Sammelzahlung bleibt in sevdesk manuell zuzuordnen'
+                        . (
+                            (string) $this->application->config->get('e_invoice_mode', 'off') !== 'off'
+                                ? '. ZUGFeRD mit angewendetem Guthaben bleibt gesperrt'
+                                : ''
+                        )
+                    : null,
+                'credit_voucher_confirmation_allowed' => $ordinaryVoucherCreditReview,
                 'tax_profile' => $decision?->profile,
                 'tax_rule' => $decision?->taxRuleId,
                 'account_datev' => $decision?->accountDatevId,
@@ -2458,6 +2904,35 @@ final class AdminController
         }
 
         return $result;
+    }
+
+    /**
+     * The legacy full-gross Voucher confirmation is deliberately narrower than
+     * the mass-payment classifier. It is available only when no WHMCS Invoice
+     * item references this document and the structural read proves that no
+     * mass-payment parent exists.
+     *
+     * @param array<string,mixed> $paymentStructure
+     */
+    private static function ordinaryVoucherCreditReviewAllowed(
+        string $exportMode,
+        bool $hasInvoiceReferenceItems,
+        array $paymentStructure,
+        string $reasonCode,
+    ): bool {
+        $context = is_array($paymentStructure['context'] ?? null)
+            ? $paymentStructure['context']
+            : [];
+
+        return $exportMode === DocumentTargetResolver::MODE_VOUCHER_ONLY
+            && !$hasInvoiceReferenceItems
+            && ($paymentStructure['code'] ?? null) === WhmcsPaymentStructureService::CREDIT_REQUIRES_REVIEW
+            && $reasonCode === 'mass_payment_parent_missing'
+            && array_key_exists('parentInvoiceId', $paymentStructure)
+            && $paymentStructure['parentInvoiceId'] === null
+            && ($context['referencingParentCount'] ?? null) === 0
+            && is_int($context['invoiceCreditMinor'] ?? null)
+            && $context['invoiceCreditMinor'] > 0;
     }
 
     private function dryRunTaxReason(string $code, string $fallback = ''): string
@@ -2479,6 +2954,8 @@ final class AdminController
             'unsupported_receipt_guidance' => 'Konto und TaxRule werden von Receipt Guidance nicht angeboten',
             'unconfirmed_tax_profile' => 'Das benötigte Steuerprofil wurde noch nicht ausdrücklich bestätigt',
             'incomplete_tax_profile' => 'Für diesen Steuerfall fehlen Konto oder TaxRule',
+            'small_business_invoice_canary_not_confirmed' => 'Rule-11-Invoices bleiben bis zum eigenen sevDesk-Mandanten-Canary gesperrt',
+            'invoice_rule11_tenant_scope_unsupported' => 'Receipt Guidance bietet kein REVENUE-Konto für Rule 11 mit 0 % an',
         ][$code] ?? ($fallback !== '' ? $fallback : 'Steuerprofil oder Receipt Guidance blockiert diesen Beleg (' . $code . ')');
     }
 
@@ -2500,7 +2977,8 @@ final class AdminController
                 ?? $candidate['documentType']
                 ?? $candidate['targetDocumentType']
                 ?? ''));
-            $item->document_authority = trim((string) ($candidate['documentAuthority']
+            $item->document_authority = trim((string) ($item->mapping_document_authority
+                ?? $candidate['documentAuthority']
                 ?? $candidate['targetDocumentAuthority']
                 ?? ''));
             $item->tax_rule = trim((string) ($candidate['targetTaxRuleId'] ?? ''));

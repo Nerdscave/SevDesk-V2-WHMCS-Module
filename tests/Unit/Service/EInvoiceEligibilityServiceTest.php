@@ -351,6 +351,29 @@ final class EInvoiceEligibilityServiceTest extends TestCase
         $this->assertOnlyReadCalls($history, 6);
     }
 
+    public function testDuplicateGermanCountryReferencesBlockTheEInvoiceSelection(): void
+    {
+        $responses = array_slice($this->readyResponses(), 0, 4);
+        $responses[3] = new Response(200, [], '{"objects":[
+            {"id":"1","code":"DE","nameEn":"Germany"},
+            {"id":"2","code":"DE","nameEn":"Federal Republic of Germany"}
+        ]}');
+        $history = new ArrayObject();
+
+        $result = $this->service($responses, true, $history)->decide(
+            $this->invoice(),
+            $this->contact(),
+            '42',
+            $this->tax('1'),
+            $this->target('1'),
+            $this->candidate(),
+        );
+
+        self::assertTrue($result->isFailure());
+        self::assertSame('e_invoice_country_reference_missing', $result->errorCode());
+        $this->assertOnlyReadCalls($history, 4);
+    }
+
     public function testCompleteGermanB2bProfileCreatesRuntimeOnlyZugferdContext(): void
     {
         $history = new ArrayObject();

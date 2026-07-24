@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace WHMCS\Module\Addon\SevDesk;
 
+use DateTimeImmutable;
 use GuzzleHttp\Client;
 use RuntimeException;
 use WHMCS\Module\Addon\SevDesk\Api\SevdeskClient;
@@ -31,6 +32,8 @@ use WHMCS\Module\Addon\SevDesk\Service\ReferenceData;
 use WHMCS\Module\Addon\SevDesk\Service\TaxPolicy;
 use WHMCS\Module\Addon\SevDesk\Service\VoucherExporter;
 use WHMCS\Module\Addon\SevDesk\Service\WhmcsGateway;
+use WHMCS\Module\Addon\SevDesk\Service\WhmcsPaymentStructureService;
+use WHMCS\Module\Addon\SevDesk\Support\DocumentDeliveryContext;
 
 /** Lightweight composition root shared by the addon entrypoints and hooks. */
 final class Application
@@ -71,6 +74,8 @@ final class Application
 
     private ?CorrectionService $corrections = null;
 
+    private ?WhmcsPaymentStructureService $paymentStructure = null;
+
     private ?ExportJobHandler $exportJobHandler = null;
 
     private ?BookingJobHandler $bookingJobHandler = null;
@@ -109,7 +114,7 @@ final class Application
             new Client(),
             $token,
             'https://my.sevdesk.de/api/v1',
-            'Nerdscave WHMCS-sevdesk/2.1.0-rc.4',
+            'WHMCS-sevdesk/2.1.0-rc.5',
         );
     }
 
@@ -128,7 +133,7 @@ final class Application
         return $this->contacts = new ContactService(
             $this->client(),
             fn (int $clientId, string $contactId): bool => $this->storeContactId($clientId, $contactId),
-            fn (string $countryCode): ?string => $referenceData->countryId($countryCode),
+            fn (string $countryCode): ?string => $referenceData->exactCountryId($countryCode),
             '3',
             fn (): ?string => $referenceData->contactAddressCategoryId(),
             fn (): ?string => $referenceData->emailKeyId(),
@@ -162,6 +167,7 @@ final class Application
                 string $number,
                 bool $isEInvoice = false,
                 ?string $xmlSha256 = null,
+                string $documentAuthority = MappingRepository::DOCUMENT_AUTHORITY_WHMCS,
             ): bool => $this->storeTypedMapping(
                 $invoiceId,
                 $remoteId,
@@ -169,10 +175,16 @@ final class Application
                 $number,
                 $isEInvoice,
                 $xmlSha256,
+                $documentAuthority,
             ),
             (string) $this->config->get('invoice_sev_user_id', ''),
             (string) $this->config->get('invoice_unity_id', ''),
             fn (string $countryCode): ?string => $this->referenceData()->exactCountryId($countryCode),
+            $this->config->bool('invoice_discount_canary_confirmed')
+                && $this->config->bool('small_business_invoice_canary_confirmed'),
+            fn (string $sevUserId, string $unityId): bool =>
+                $this->referenceData()->hasSevUser($sevUserId)
+                && $this->referenceData()->hasUnity($unityId),
         );
     }
 
@@ -188,6 +200,7 @@ final class Application
                 string $number,
                 bool $isEInvoice = false,
                 ?string $xmlSha256 = null,
+                string $documentAuthority = MappingRepository::DOCUMENT_AUTHORITY_WHMCS,
             ): bool => $this->storeTypedMapping(
                 $invoiceId,
                 $remoteId,
@@ -195,6 +208,7 @@ final class Application
                 $number,
                 $isEInvoice,
                 $xmlSha256,
+                $documentAuthority,
             ),
             (string) $this->config->get('invoice_sev_user_id', ''),
             (string) $this->config->get('invoice_unity_id', ''),
@@ -225,14 +239,58 @@ final class Application
                 string $remoteId,
                 string $documentType,
                 string $documentNumber,
+                string $documentAuthority,
             ): void {
                 $current = $this->mappings->findByInvoice($invoiceId);
+                if ($current === null) {
+                    throw new RuntimeException('The legacy mapping changed before metadata confirmation.');
+                }
+                $currentType = trim((string) ($current->document_type ?? ''));
+                $currentAuthority = trim((string) ($current->document_authority ?? ''));
                 if (
-                    $current === null
-                    || trim((string) ($current->sevdesk_id ?? '')) !== $remoteId
-                    || ($current->document_type ?? null) !== null
+                    trim((string) ($current->sevdesk_id ?? '')) !== $remoteId
+                    || ($currentType !== '' && $currentType !== $documentType)
+                    || ($currentAuthority !== '' && $currentAuthority !== $documentAuthority)
                 ) {
-                    throw new RuntimeException('The legacy mapping changed before type confirmation.');
+                    throw new RuntimeException('The legacy mapping changed before metadata confirmation.');
+                }
+                $frozenDocument = DocumentDeliveryContext::frozenConfirmedDocument(
+                    $this->jobs->latestDocumentContextForInvoice($invoiceId, true),
+                );
+                if (
+                    $frozenDocument !== null
+                    && (
+                        $frozenDocument['documentType'] !== $documentType
+                        || $frozenDocument['documentAuthority'] !== $documentAuthority
+                    )
+                ) {
+                    throw new RuntimeException(
+                        'The selected legacy document metadata conflicts with its frozen export decision.',
+                    );
+                }
+
+                if ($documentAuthority === MappingRepository::DOCUMENT_AUTHORITY_SEVDESK) {
+                    if (
+                        $documentType !== MappingRepository::DOCUMENT_TYPE_INVOICE
+                        || !$this->legacySevdeskAuthorityReady()
+                    ) {
+                        throw new RuntimeException(
+                            'The sevdesk authority prerequisites are not ready for this legacy mapping.',
+                        );
+                    }
+                    $pdf = $this->invoicePdf()->fetch($remoteId);
+                    $this->mappings->enrichDocumentMetadata(
+                        $invoiceId,
+                        $remoteId,
+                        $documentType,
+                        $documentNumber,
+                        new DateTimeImmutable(),
+                        pdfSha256: $pdf['sha256'],
+                        documentAuthority: $documentAuthority,
+                        requiredWhmcsInvoiceStatus: 'Paid',
+                    );
+
+                    return;
                 }
 
                 $this->mappings->enrichDocumentMetadata(
@@ -240,8 +298,36 @@ final class Application
                     $remoteId,
                     $documentType,
                     $documentNumber,
+                    documentAuthority: $documentAuthority,
                 );
             },
+        );
+    }
+
+    public function legacySevdeskAuthorityReady(): bool
+    {
+        if (
+            !$this->whmcs->proformaInvoicingEnabled()
+            || !$this->whmcs->themeAdapterManifestInstalled()
+            || !$this->config->bool('theme_adapter_confirmed')
+        ) {
+            return false;
+        }
+
+        $channel = (string) $this->config->get('invoice_delivery_channel', 'sevdesk');
+        if ($channel === 'whmcs_template') {
+            return $this->whmcs->supportsEmailPreSendAttachments()
+                && $this->whmcs->isActiveCustomInvoiceTemplate(
+                    (string) $this->config->get('whmcs_invoice_email_template', ''),
+                );
+        }
+        if ($channel !== 'sevdesk') {
+            return false;
+        }
+
+        return self::validSevdeskDeliveryText(
+            (string) $this->config->get('sevdesk_email_subject', ''),
+            (string) $this->config->get('sevdesk_email_body', ''),
         );
     }
 
@@ -257,6 +343,11 @@ final class Application
     public function bookings(): BookingService
     {
         return $this->bookings ??= new BookingService($this->client());
+    }
+
+    public function paymentStructure(): WhmcsPaymentStructureService
+    {
+        return $this->paymentStructure ??= new WhmcsPaymentStructureService();
     }
 
     public function corrections(): CorrectionService
@@ -321,13 +412,24 @@ final class Application
         );
     }
 
-    public function invoiceTaxPolicy(): TaxPolicy
+    public function invoiceTaxPolicy(bool $freshGuidance = false): TaxPolicy
     {
+        $smallBusinessInvoiceCanary = $this->config->bool(
+            'small_business_invoice_canary_confirmed',
+        );
+        $ruleElevenGuidance = $smallBusinessInvoiceCanary
+            && $this->config->bool('smallBusinessOwner')
+            && (string) $this->config->get('export_mode', DocumentTargetResolver::MODE_VOUCHER_ONLY)
+                === DocumentTargetResolver::MODE_INVOICE_ONLY
+                ? $this->referenceData()->receiptGuidance($freshGuidance)
+                : null;
+
         return new TaxPolicy(
             $this->config->taxProfiles(),
             (string) $this->config->get('eu_b2c_mode', TaxPolicy::EU_B2C_BLOCKED),
-            null,
+            $ruleElevenGuidance,
             (string) $this->config->get('oss_profile', TaxPolicy::OSS_BLOCKED),
+            $smallBusinessInvoiceCanary,
         );
     }
 
@@ -370,6 +472,7 @@ final class Application
             $this->invoicePdf(),
             fn (): DocumentTargetResolver => $this->documentTargetResolver(),
             $this->eInvoiceEligibility(),
+            $this->paymentStructure(),
         );
     }
 
@@ -409,6 +512,7 @@ final class Application
             $remoteId,
             MappingRepository::DOCUMENT_TYPE_VOUCHER,
             isEInvoice: false,
+            documentAuthority: MappingRepository::DOCUMENT_AUTHORITY_WHMCS,
         );
 
         return true;
@@ -421,6 +525,7 @@ final class Application
         string $number,
         bool $isEInvoice = false,
         ?string $xmlSha256 = null,
+        string $documentAuthority = MappingRepository::DOCUMENT_AUTHORITY_WHMCS,
     ): bool {
         $this->mappings->linkDocument(
             $invoiceId,
@@ -429,6 +534,7 @@ final class Application
             $number,
             $isEInvoice,
             $xmlSha256,
+            $documentAuthority,
         );
 
         return true;
@@ -437,6 +543,27 @@ final class Application
     private function storeContactId(int $clientId, string $contactId): bool
     {
         $this->whmcs->storeContactId($clientId, $contactId);
+
+        return true;
+    }
+
+    private static function validSevdeskDeliveryText(string $subject, string $body): bool
+    {
+        if ($subject === '' || $body === '' || mb_strlen($subject) > 200 || mb_strlen($body) > 5000) {
+            return false;
+        }
+        foreach ([$subject, $body] as $value) {
+            preg_match_all('/\{[A-Za-z0-9_]+\}/', $value, $matches);
+            foreach ($matches[0] as $placeholder) {
+                if (!in_array($placeholder, ['{invoice_number}', '{company_name}'], true)) {
+                    return false;
+                }
+            }
+            $withoutAllowed = str_replace(['{invoice_number}', '{company_name}'], '', $value);
+            if (str_contains($withoutAllowed, '{') || str_contains($withoutAllowed, '}')) {
+                return false;
+            }
+        }
 
         return true;
     }

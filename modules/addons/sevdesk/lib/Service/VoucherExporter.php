@@ -23,6 +23,8 @@ final class VoucherExporter
     /** @var Closure(int, string): (bool|null) */
     private readonly Closure $persistMapping;
 
+    private readonly VoucherRemoteVerifier $remoteVerifier;
+
     /**
      * Collaborator signatures:
      *
@@ -40,6 +42,7 @@ final class VoucherExporter
     ) {
         $this->findMapping = Closure::fromCallable($findMapping);
         $this->persistMapping = Closure::fromCallable($persistMapping);
+        $this->remoteVerifier = new VoucherRemoteVerifier();
     }
 
     public function export(
@@ -50,8 +53,10 @@ final class VoucherExporter
         string $pdfContents,
         ?callable $checkpoint = null,
         bool $creditTreatmentConfirmed = false,
+        ?callable $preWriteGuard = null,
     ): ExportResult {
         $checkpoint = $checkpoint === null ? null : Closure::fromCallable($checkpoint);
+        $preWriteGuard = $preWriteGuard === null ? null : Closure::fromCallable($preWriteGuard);
 
         try {
             $existingMapping = ($this->findMapping)($invoice->invoiceId);
@@ -140,12 +145,30 @@ final class VoucherExporter
         if ($mappingBeforeWrite !== null && trim((string) $mappingBeforeWrite) !== '') {
             return ExportResult::skipped($invoice->invoiceId, (string) $mappingBeforeWrite);
         }
+        if ($preWriteGuard !== null) {
+            try {
+                $writeStillAllowed = $preWriteGuard();
+            } catch (Throwable) {
+                $writeStillAllowed = false;
+            }
+            if ($writeStillAllowed !== true) {
+                return ExportResult::failed(
+                    $invoice->invoiceId,
+                    'pre_write_guard_failed',
+                    'Local invoice evidence changed before voucher creation. No Voucher was written.',
+                );
+            }
+        }
 
         if (
             !$this->emitCheckpoint(
                 $checkpoint,
                 'voucher_write_requested',
-                ['invoiceId' => $invoice->invoiceId],
+                [
+                    'invoiceId' => $invoice->invoiceId,
+                    'targetTaxRuleId' => $taxDecision->taxRuleId,
+                    'targetAccountDatevId' => $taxDecision->accountDatevId,
+                ],
             )
         ) {
             return ExportResult::failed(
@@ -190,38 +213,14 @@ final class VoucherExporter
             );
         }
 
-        $remoteGross = self::extractRemoteGross($response);
-        if ($remoteGross === null) {
-            return ExportResult::ambiguous(
-                $invoice->invoiceId,
-                'remote_total_missing',
-                'The created sevdesk voucher has no verifiable gross total. Reconcile before retrying.',
-                $remoteId,
-            );
-        }
-
-        try {
-            $remoteMinor = Decimal::toMinorUnits($remoteGross);
-        } catch (\InvalidArgumentException) {
-            return ExportResult::ambiguous(
-                $invoice->invoiceId,
-                'remote_total_invalid',
-                'The created sevdesk voucher returned an invalid gross total. Reconcile before retrying.',
-                $remoteId,
-            );
-        }
-
-        if (abs($remoteMinor - $invoice->totalMinorUnits()) > 1) {
-            return ExportResult::ambiguous(
-                $invoice->invoiceId,
-                'remote_total_mismatch',
-                'The created sevdesk voucher total differs from WHMCS. No mapping was written.',
-                $remoteId,
-                [
-                    'expectedMinorUnits' => $invoice->totalMinorUnits(),
-                    'remoteMinorUnits' => $remoteMinor,
-                ],
-            );
+        $verificationFailure = $this->verifyCreatedVoucher(
+            $invoice,
+            $sevdeskContactId,
+            $taxDecision,
+            $remoteId,
+        );
+        if ($verificationFailure !== null) {
+            return $verificationFailure;
         }
 
         try {
@@ -352,7 +351,7 @@ final class VoucherExporter
                 [
                     'invoiceGrossMinorUnits' => $invoice->totalMinorUnits(),
                     'creditMinorUnits' => $invoice->appliedCreditMinorUnits(),
-                    'remainingMinorUnits' => $invoice->totalMinorUnits() - $invoice->appliedCreditMinorUnits(),
+                    'remainingMinorUnits' => $invoice->directCashMinorUnits(),
                 ],
             );
         }
@@ -370,6 +369,22 @@ final class VoucherExporter
                 $invoice->invoiceId,
                 'mixed_net_gross_modes',
                 'sevdesk requires all voucher positions to use the same net/gross mode.',
+            );
+        }
+
+        if ($invoice->discounts !== []) {
+            return ExportResult::failed(
+                $invoice->invoiceId,
+                'voucher_discount_not_supported',
+                'Structurally matched WHMCS discounts are supported only by the confirmed Invoice path.',
+            );
+        }
+
+        if (count($invoice->lineItems) >= 1000) {
+            return ExportResult::failed(
+                $invoice->invoiceId,
+                'voucher_position_limit_exceeded',
+                'Vouchers with 1000 or more positions cannot be verified safely through the sevdesk API.',
             );
         }
 
@@ -532,6 +547,91 @@ final class VoucherExporter
         );
     }
 
+    private function verifyCreatedVoucher(
+        InvoiceSnapshot $invoice,
+        string $sevdeskContactId,
+        TaxDecision $taxDecision,
+        string $remoteId,
+    ): ?ExportResult {
+        try {
+            $remote = $this->client->get('/Voucher/' . rawurlencode($remoteId));
+        } catch (ApiException $exception) {
+            return ExportResult::ambiguous(
+                $invoice->invoiceId,
+                $exception->isAuthenticationFailure()
+                    ? 'api_authentication_failed'
+                    : 'voucher_readback_failed',
+                'The created sevdesk Voucher could not be read back safely. Reconcile before retrying.',
+                $remoteId,
+                $exception->context(),
+            );
+        }
+
+        $mismatch = $this->remoteVerifier->voucherMismatch(
+            $remote,
+            $invoice,
+            $sevdeskContactId,
+            $taxDecision->taxRuleId ?? '',
+            $taxDecision->accountDatevId ?? '',
+            100,
+            $remoteId,
+        );
+        if ($mismatch !== null) {
+            return ExportResult::ambiguous(
+                $invoice->invoiceId,
+                self::voucherMismatchCode($mismatch),
+                'The created sevdesk Voucher does not exactly match the frozen WHMCS document.',
+                $remoteId,
+            );
+        }
+
+        try {
+            $positions = $this->client->get('/VoucherPos', [
+                'voucher[id]' => $remoteId,
+                'voucher[objectName]' => 'Voucher',
+                'limit' => 1000,
+                'offset' => 0,
+            ]);
+        } catch (ApiException $exception) {
+            return ExportResult::ambiguous(
+                $invoice->invoiceId,
+                $exception->isAuthenticationFailure()
+                    ? 'api_authentication_failed'
+                    : 'voucher_position_readback_failed',
+                'The created sevdesk Voucher positions could not be read back safely. Reconcile before retrying.',
+                $remoteId,
+                $exception->context(),
+            );
+        }
+
+        $positionMismatch = $this->remoteVerifier->positionsMismatch(
+            $positions,
+            $invoice,
+            $remoteId,
+            $taxDecision->accountDatevId ?? '',
+        );
+        if ($positionMismatch !== null) {
+            return ExportResult::ambiguous(
+                $invoice->invoiceId,
+                'voucher_remote_' . $positionMismatch,
+                'The created sevdesk Voucher positions do not exactly match the frozen WHMCS document.',
+                $remoteId,
+            );
+        }
+
+        return null;
+    }
+
+    private static function voucherMismatchCode(string $mismatch): string
+    {
+        return match ($mismatch) {
+            'total_missing' => 'remote_total_missing',
+            'total_invalid' => 'remote_total_invalid',
+            'total_mismatch' => 'remote_total_mismatch',
+            default => 'voucher_remote_' . $mismatch,
+        };
+    }
+
     /** @param array<array-key, mixed> $response */
     private static function extractTemporaryFileName(array $response): ?string
     {
@@ -562,20 +662,6 @@ final class VoucherExporter
         $id = trim((string) $id);
 
         return $id !== '' && preg_match('/^\d+$/', $id) === 1 ? $id : null;
-    }
-
-    /** @param array<array-key, mixed> $response */
-    private static function extractRemoteGross(array $response): ?string
-    {
-        $voucher = isset($response['voucher']) && is_array($response['voucher'])
-            ? $response['voucher']
-            : $response;
-        $gross = $voucher['sumGross'] ?? $voucher['total'] ?? null;
-        if (!is_string($gross) && !is_int($gross) && !is_float($gross)) {
-            return null;
-        }
-
-        return (string) $gross;
     }
 
     private static function payloadId(string $id): int|string

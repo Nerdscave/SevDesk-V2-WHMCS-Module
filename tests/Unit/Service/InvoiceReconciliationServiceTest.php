@@ -15,9 +15,11 @@ use PHPUnit\Framework\TestCase;
 use WHMCS\Module\Addon\SevDesk\Api\SevdeskClient;
 use WHMCS\Module\Addon\SevDesk\Domain\EInvoiceContext;
 use WHMCS\Module\Addon\SevDesk\Domain\ExportResult;
+use WHMCS\Module\Addon\SevDesk\Domain\InvoiceDiscount;
 use WHMCS\Module\Addon\SevDesk\Domain\InvoiceSnapshot;
 use WHMCS\Module\Addon\SevDesk\Domain\LineItem;
 use WHMCS\Module\Addon\SevDesk\Domain\TaxDecision;
+use WHMCS\Module\Addon\SevDesk\Service\InvoiceExporter;
 use WHMCS\Module\Addon\SevDesk\Service\InvoiceReconciliationService;
 
 final class InvoiceReconciliationServiceTest extends TestCase
@@ -95,6 +97,91 @@ final class InvoiceReconciliationServiceTest extends TestCase
             (string) $history[0]['request']->getUri()->getQuery(),
         );
         self::assertSame('/api/v1/Invoice/99/getPositions', $history[1]['request']->getUri()->getPath());
+    }
+
+    public function testKnownRemoteDiscountRecoveryVerifiesTheFrozenDiscountWithoutWritingAgain(): void
+    {
+        $history = [];
+        $persistCalls = 0;
+        $invoice = $this->discountInvoice();
+        $candidate = $this->candidate('99');
+        $candidate['invoiceDate'] = '01.07.2025';
+        $candidate['taxRule'] = ['id' => '11', 'objectName' => 'TaxRule'];
+        $candidate['showNet'] = false;
+        $candidate['sumGross'] = '80.00';
+        $candidate['sumDiscounts'] = '20.00';
+        $candidate['customerInternalNote'] = InvoiceExporter::documentMarker($invoice);
+        $service = new InvoiceReconciliationService(
+            $this->client([
+                new Response(200, [], json_encode(['objects' => [$candidate]], JSON_THROW_ON_ERROR)),
+                $this->positionResponse('100.00', '0'),
+            ], $history),
+            static fn (): null => null,
+            static function () use (&$persistCalls): void {
+                ++$persistCalls;
+            },
+            '7',
+            '8',
+        );
+
+        $result = $service->reconcile(
+            $invoice,
+            '42',
+            TaxDecision::allow('small_business', '1000', '11', 'Small-business period.'),
+            'DE',
+            '99',
+        );
+
+        self::assertSame(ExportResult::SUCCEEDED, $result->status);
+        self::assertSame('99', $result->remoteId);
+        self::assertSame(1, $persistCalls);
+        self::assertSame(['GET', 'GET'], array_map(
+            static fn (array $entry): string => $entry['request']->getMethod(),
+            $history,
+        ));
+    }
+
+    public function testSameDiscountSumWithWrongFrozenMarkerNeverRestoresAMapping(): void
+    {
+        $history = [];
+        $persistCalls = 0;
+        $invoice = $this->discountInvoice();
+        $candidate = $this->candidate('99');
+        $candidate['invoiceDate'] = '01.07.2025';
+        $candidate['taxRule'] = ['id' => '11', 'objectName' => 'TaxRule'];
+        $candidate['showNet'] = false;
+        $candidate['sumGross'] = '80.00';
+        $candidate['sumDiscounts'] = '20.00';
+        $candidate['customerInternalNote'] = InvoiceExporter::marker(10)
+            . ' [WHMCS-DISCOUNT:' . str_repeat('0', 64) . ']';
+        $service = new InvoiceReconciliationService(
+            $this->client(
+                new Response(200, [], json_encode(['objects' => [$candidate]], JSON_THROW_ON_ERROR)),
+                $history,
+            ),
+            static fn (): null => null,
+            static function () use (&$persistCalls): void {
+                ++$persistCalls;
+            },
+            '7',
+            '8',
+        );
+
+        $result = $service->reconcile(
+            $invoice,
+            '42',
+            TaxDecision::allow('small_business', '1000', '11', 'Small-business period.'),
+            'DE',
+            '99',
+        );
+
+        self::assertSame(ExportResult::AMBIGUOUS, $result->status);
+        self::assertSame('invoice_reconciliation_no_match', $result->code);
+        self::assertSame(0, $persistCalls);
+        self::assertSame(['GET'], array_map(
+            static fn (array $entry): string => $entry['request']->getMethod(),
+            $history,
+        ));
     }
 
     #[DataProvider('rule19RecoveryProvider')]
@@ -671,6 +758,21 @@ final class InvoiceReconciliationServiceTest extends TestCase
         return TaxDecision::allow('domestic', '1000', '1', 'Domestic profile.');
     }
 
+    private function discountInvoice(): InvoiceSnapshot
+    {
+        return new InvoiceSnapshot(
+            10,
+            20,
+            'RE-10',
+            new DateTimeImmutable('2025-07-01'),
+            'EUR',
+            '80.00',
+            '0',
+            [new LineItem('Hosting', '100.00', '0', false)],
+            [new InvoiceDiscount('PromoHosting', '20.00', '0', false, 42)],
+        );
+    }
+
     private function rule19Invoice(): InvoiceSnapshot
     {
         return new InvoiceSnapshot(
@@ -788,7 +890,7 @@ final class InvoiceReconciliationServiceTest extends TestCase
         ]]], JSON_THROW_ON_ERROR));
     }
 
-    private function positionResponse(string $price = '100.00'): Response
+    private function positionResponse(string $price = '100.00', string $taxRate = '19'): Response
     {
         return new Response(200, [], json_encode(['objects' => [[
             'id' => '901',
@@ -800,7 +902,7 @@ final class InvoiceReconciliationServiceTest extends TestCase
             'name' => 'Hosting',
             'text' => 'Hosting',
             'price' => $price,
-            'taxRate' => '19',
+            'taxRate' => $taxRate,
         ]]], JSON_THROW_ON_ERROR));
     }
 

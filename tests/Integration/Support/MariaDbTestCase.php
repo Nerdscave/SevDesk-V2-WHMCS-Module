@@ -108,6 +108,17 @@ abstract class MariaDbTestCase extends TestCase
             $table->decimal('total', 16, 2)->default(0);
         });
 
+        Capsule::schema()->create('tblinvoiceitems', static function ($table): void {
+            $table->increments('id');
+            $table->unsignedInteger('invoiceid')->default(0);
+            $table->string('type', 64)->default('');
+            $table->unsignedInteger('relid')->default(0);
+            $table->text('description')->nullable();
+            $table->decimal('amount', 16, 2)->default(0);
+            $table->boolean('taxed')->default(false);
+            $table->index(['invoiceid', 'type'], 'tblinvoiceitems_invoice_type_index');
+        });
+
         Capsule::schema()->create('tblclients', static function ($table): void {
             $table->increments('id');
             $table->unsignedInteger('currency')->default(0);
@@ -145,6 +156,7 @@ abstract class MariaDbTestCase extends TestCase
                 Migrator::JOBS_TABLE,
                 Migrator::MAPPING_TABLE,
                 'tblaccounts',
+                'tblinvoiceitems',
                 'tblinvoices',
                 'tblclients',
                 'tblcurrencies',

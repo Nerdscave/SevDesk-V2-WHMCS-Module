@@ -2,7 +2,8 @@
 
 <div class="alert alert-warning" role="status">
     Eine vollständige Zuordnung kann nur aufgehoben werden, wenn Voucher und Invoice unter der gespeicherten ID read-only nachweislich fehlen.
-    Legacy-Zuordnungen ohne Typ werden ausschließlich gelesen und erst nach einer zweiten Remote-Prüfung bestätigt.
+    Legacy-Zuordnungen ohne Typ oder ohne dauerhaft gespeicherte Dokumenthoheit werden ausschließlich gelesen.
+    Typ und Hoheit werden erst nach einer zweiten Remote-Prüfung bestätigt.
 </div>
 
 <div class="well well-sm">
@@ -18,7 +19,7 @@
             <select id="mapping-status" name="status" class="form-control input-sm">
                 <option value="">Alle</option>
                 <option value="mapped"{if $filters.status === 'mapped'} selected{/if}>Vollständig</option>
-                <option value="untyped"{if $filters.status === 'untyped'} selected{/if}>Legacy-Typ ungeklärt</option>
+                <option value="untyped"{if $filters.status === 'untyped'} selected{/if}>Legacy-Typ oder Hoheit ungeklärt</option>
                 <option value="incomplete"{if $filters.status === 'incomplete'} selected{/if}>Ohne sevdesk-ID</option>
                 <option value="orphan"{if $filters.status === 'orphan'} selected{/if}>Ohne WHMCS-Rechnung</option>
             </select>
@@ -56,13 +57,27 @@
                 <input type="hidden" name="filter_q" value="{$filters.q|escape:'html':'UTF-8'}">
                 <div class="table-responsive">
                     <table class="table table-condensed">
-                        <thead><tr><th scope="col">Mapping</th><th scope="col">WHMCS-Rechnung</th><th scope="col">Vorschlag</th><th scope="col">Nachweis</th></tr></thead>
+                        <thead><tr><th scope="col">Mapping</th><th scope="col">WHMCS-Rechnung</th><th scope="col">Vorschlag</th><th scope="col">Hoheit</th><th scope="col">Nachweis</th></tr></thead>
                         <tbody>
                         {foreach from=$batchTypeInspections item=inspection}
                             <tr>
                                 <td class="sd-mono">{$inspection.mappingId|escape:'html':'UTF-8'}</td>
                                 <td>{$inspection.invoiceNumber|default:$inspection.invoiceId|escape:'html':'UTF-8'}</td>
                                 <td>{if $inspection.suggestedType === 'invoice'}Invoice{elseif $inspection.suggestedType === 'voucher'}Voucher{else}—{/if}</td>
+                                <td>
+                                    {if $inspection.batchEligible && $inspection.suggestedType === 'invoice'}
+                                        <label class="sr-only" for="batch-authority-{$inspection.mappingId|escape:'html':'UTF-8'}">Dokumenthoheit</label>
+                                        <select id="batch-authority-{$inspection.mappingId|escape:'html':'UTF-8'}" name="batch_authorities[{$inspection.mappingId|escape:'html':'UTF-8'}]" class="form-control input-sm" required>
+                                            <option value="whmcs"{if $inspection.frozenDocumentAuthority === 'sevdesk'} disabled{else} selected{/if}>WHMCS (sicherer Legacy-Standard)</option>
+                                            <option value="sevdesk"{if $inspection.frozenDocumentAuthority === 'sevdesk'} selected{/if}{if !$legacySevdeskAuthorityReady || !$inspection.deliveryReady || !$inspection.invoicePaid || $inspection.frozenDocumentAuthority === 'whmcs'} disabled{/if}>sevdesk (finale PDF)</option>
+                                        </select>
+                                    {elseif $inspection.batchEligible}
+                                        WHMCS
+                                        <input type="hidden" name="batch_authorities[{$inspection.mappingId|escape:'html':'UTF-8'}]" value="whmcs">
+                                    {else}
+                                        —
+                                    {/if}
+                                </td>
                                 <td>
                                     {$inspection.message|escape:'html':'UTF-8'}
                                     {if $inspection.batchEligible}
@@ -130,7 +145,11 @@
                             <span class="text-muted">—</span>
                         {/if}
                         <small class="sd-mono">{$mapping.document_number|default:'keine Dokumentnummer'|escape:'html':'UTF-8'}</small>
-                        <small>Hoheit: {$mapping.document_authority|default:'nicht historisch erfasst'|escape:'html':'UTF-8'} · Rule: {$mapping.tax_rule|default:'—'|escape:'html':'UTF-8'}</small>
+                        <small>
+                            Hoheit: {$mapping.document_authority|default:'nicht historisch erfasst'|escape:'html':'UTF-8'}
+                            {if $mapping.document_authority_source === 'frozen_job'} (nur über Altjob belegt){/if}
+                            · Rule: {$mapping.tax_rule|default:'—'|escape:'html':'UTF-8'}
+                        </small>
                         {if $mapping.document_type === 'invoice'}
                             <small>E-Rechnung: {if $mapping.is_e_invoice == 1}<strong>ja</strong>{if $mapping.xml_sha256} · XML geprüft{/if}{elseif $mapping.is_e_invoice === null}historisch ungeklärt{else}nein{/if}</small>
                         {/if}
@@ -149,16 +168,16 @@
                         {elseif !$mapping.sevdesk_id}
                             {include file="partials/status_badge.tpl" status="ambiguous"}
                             <small>vor erneutem Export abgleichen</small>
-                        {elseif !$mapping.document_type}
+                        {elseif !$mapping.document_type || !$mapping.stored_document_authority}
                             {include file="partials/status_badge.tpl" status="ambiguous"}
-                            <small>Belegtyp manuell bestätigen</small>
+                            <small>Belegtyp und Hoheit manuell bestätigen</small>
                         {else}
                             {include file="partials/status_badge.tpl" status="mapped"}
                         {/if}
                     </td>
                     <td><span class="sd-mono">{$mapping.mapping_id|escape:'html':'UTF-8'}</span></td>
                     <td class="sd-table-action">
-                        {if $mapping.invoice_exists !== false && $mapping.sevdesk_id && !$mapping.document_type}
+                        {if $mapping.invoice_exists !== false && $mapping.sevdesk_id && !$mapping.stored_document_authority}
                             {if $typeInspection && $typeInspection.mappingId == $mapping.mapping_id}
                                 <div class="alert {if $typeInspection.context.markerEvidence}alert-info{else}alert-warning{/if}">
                                     Genau ein Remote-Typ passt: <strong>{if $typeInspection.suggestedType === 'invoice'}Invoice{else}Voucher{/if}</strong>
@@ -176,10 +195,32 @@
                                     <input type="hidden" name="token" value="{$csrfToken|escape:'html':'UTF-8'}">
                                     <input type="hidden" name="mapping_id" value="{$mapping.mapping_id|default:$mapping.id|escape:'html':'UTF-8'}">
                                     <input type="hidden" name="document_type" value="{$typeInspection.suggestedType|escape:'html':'UTF-8'}">
+                                    {if $typeInspection.suggestedType === 'invoice'}
+                                        <div class="form-group">
+                                            <label for="legacy-authority-{$mapping.mapping_id|escape:'html':'UTF-8'}">Dokumenthoheit</label>
+                                            <select id="legacy-authority-{$mapping.mapping_id|escape:'html':'UTF-8'}" name="document_authority" class="form-control input-sm" required>
+                                                <option value="whmcs"{if $typeInspection.frozenDocumentAuthority === 'sevdesk'} disabled{else} selected{/if}>WHMCS (sicherer Legacy-Standard)</option>
+                                                <option value="sevdesk"{if $typeInspection.frozenDocumentAuthority === 'sevdesk'} selected{/if}{if !$legacySevdeskAuthorityReady || !$typeInspection.context.deliveryReady || !$typeInspection.invoicePaid || $typeInspection.frozenDocumentAuthority === 'whmcs'} disabled{/if}>sevdesk (finale PDF im Kundenbereich)</option>
+                                            </select>
+                                            {if !$typeInspection.context.deliveryReady}
+                                                <p class="help-block">sevdesk-Hoheit ist gesperrt, weil die Remote-Invoice noch nicht finalisiert ist.</p>
+                                            {elseif !$typeInspection.invoicePaid}
+                                                <p class="help-block">sevdesk-Hoheit ist erst nach vollständiger Zahlung der WHMCS-Rechnung zulässig.</p>
+                                            {elseif !$legacySevdeskAuthorityReady}
+                                                <p class="help-block">sevdesk-Hoheit benötigt Proforma, den bestätigten Theme-Adapter und einen gültigen Versandkanal.</p>
+                                            {/if}
+                                            {if $typeInspection.frozenDocumentAuthority}
+                                                <p class="help-block">Die Hoheit ist durch den früheren Export auf {$typeInspection.frozenDocumentAuthority|escape:'html':'UTF-8'} festgelegt.</p>
+                                            {/if}
+                                        </div>
+                                    {else}
+                                        <input type="hidden" name="document_authority" value="whmcs">
+                                        <p class="help-block">Voucher behalten immer WHMCS-Dokumenthoheit.</p>
+                                    {/if}
                                     <input type="hidden" name="page" value="{$pagination.page|escape:'html':'UTF-8'}">
                                     <input type="hidden" name="filter_status" value="{$filters.status|escape:'html':'UTF-8'}">
                                     <input type="hidden" name="filter_q" value="{$filters.q|escape:'html':'UTF-8'}">
-                                    <button type="submit" name="confirm_legacy_type" value="1" class="btn btn-primary btn-sm">Typ bestätigen</button>
+                                    <button type="submit" name="confirm_legacy_type" value="1" class="btn btn-primary btn-sm">Typ und Hoheit bestätigen</button>
                                 </form>
                             {else}
                                 <form method="post" action="{$moduleLink|escape:'html':'UTF-8'}&amp;a=assignmentManager">

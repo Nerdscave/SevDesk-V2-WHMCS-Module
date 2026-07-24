@@ -51,6 +51,22 @@ final class ClientDocumentPresenterTest extends TestCase
         self::assertSame('index.php?m=sevdesk&a=download&id=44', $result['downloadUrl']);
     }
 
+    public function testUnpaidInvoiceCannotExposeAnAlreadyReadyMapping(): void
+    {
+        $mapping = (object) [
+            'sevdesk_id' => '701',
+            'document_type' => 'invoice',
+            'document_number' => 'RE-2026-44',
+            'document_ready_at' => '2026-07-18 12:34:56',
+            'pdf_sha256' => str_repeat('a', 64),
+        ];
+
+        $result = ClientDocumentPresenter::present('Unpaid', 'PRO-44', $mapping, 'succeeded', '/download');
+
+        self::assertSame('proforma', $result['state']);
+        self::assertSame('', $result['downloadUrl']);
+    }
+
     public function testFinalInvoiceRemainsAvailableAfterWhmcsStatusChangesToRefunded(): void
     {
         $mapping = (object) [

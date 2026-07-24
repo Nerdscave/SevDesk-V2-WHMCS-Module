@@ -10,6 +10,21 @@ use WHMCS\Module\Addon\SevDesk\Support\DocumentDeliveryContext;
 
 final class DocumentDeliveryContextTest extends TestCase
 {
+    public function testFrozenConfirmedDocumentExposesOnlyAConsistentIdentity(): void
+    {
+        $context = self::context('frozen', true, 'invoice', 'sevdesk', 'invoice_only', 'succeeded');
+        self::assertSame([
+            'documentType' => 'invoice',
+            'documentAuthority' => 'sevdesk',
+        ], DocumentDeliveryContext::frozenConfirmedDocument($context));
+
+        $context['allowed'] = false;
+        self::assertNull(DocumentDeliveryContext::frozenConfirmedDocument($context));
+        $context['allowed'] = true;
+        $context['documentType'] = 'voucher';
+        self::assertNull(DocumentDeliveryContext::frozenConfirmedDocument($context));
+    }
+
     /** @return iterable<string, array{array<string,mixed>,object|null,bool}> */
     public static function contextProvider(): iterable
     {
@@ -70,6 +85,40 @@ final class DocumentDeliveryContextTest extends TestCase
             $expected,
             DocumentDeliveryContext::usesSevdeskInvoiceAuthority($context, $mapping),
         );
+    }
+
+    public function testDurableSevdeskAuthoritySurvivesMissingJobContext(): void
+    {
+        $mapping = (object) [
+            'document_type' => 'invoice',
+            'document_authority' => 'sevdesk',
+        ];
+
+        self::assertTrue(DocumentDeliveryContext::usesSevdeskInvoiceAuthority(null, $mapping));
+        self::assertFalse(DocumentDeliveryContext::usesWhmcsInvoiceAuthority(null, $mapping));
+    }
+
+    public function testDurableWhmcsAuthoritySurvivesMissingJobContext(): void
+    {
+        $mapping = (object) [
+            'document_type' => 'invoice',
+            'document_authority' => 'whmcs',
+        ];
+
+        self::assertTrue(DocumentDeliveryContext::usesWhmcsInvoiceAuthority(null, $mapping));
+        self::assertFalse(DocumentDeliveryContext::usesSevdeskInvoiceAuthority(null, $mapping));
+    }
+
+    public function testConflictingDurableAndFrozenAuthoritiesFailClosed(): void
+    {
+        $mapping = (object) [
+            'document_type' => 'invoice',
+            'document_authority' => 'sevdesk',
+        ];
+        $context = self::context('frozen', true, 'invoice', 'whmcs', 'invoice_only', 'succeeded');
+
+        self::assertFalse(DocumentDeliveryContext::usesWhmcsInvoiceAuthority($context, $mapping));
+        self::assertFalse(DocumentDeliveryContext::usesSevdeskInvoiceAuthority($context, $mapping));
     }
 
     /** @return array<string,mixed> */

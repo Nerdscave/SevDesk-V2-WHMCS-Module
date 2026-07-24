@@ -15,9 +15,17 @@ final class MappingRepository
 {
     public const DOCUMENT_TYPE_VOUCHER = 'voucher';
     public const DOCUMENT_TYPE_INVOICE = 'invoice';
+    public const DOCUMENT_AUTHORITY_WHMCS = 'whmcs';
+    public const DOCUMENT_AUTHORITY_SEVDESK = 'sevdesk';
 
     /** @var list<string> */
     private const DOCUMENT_TYPES = [self::DOCUMENT_TYPE_VOUCHER, self::DOCUMENT_TYPE_INVOICE];
+
+    /** @var list<string> */
+    private const DOCUMENT_AUTHORITIES = [
+        self::DOCUMENT_AUTHORITY_WHMCS,
+        self::DOCUMENT_AUTHORITY_SEVDESK,
+    ];
 
     public function findCompleteByInvoice(int $invoiceId): ?object
     {
@@ -63,11 +71,14 @@ final class MappingRepository
         ?string $documentNumber = null,
         ?bool $isEInvoice = null,
         ?string $xmlSha256 = null,
+        ?string $documentAuthority = null,
     ): void {
         self::validateMappingIds($invoiceId, $sevdeskId);
         $documentType = self::validateDocumentType($documentType);
         $documentNumber = self::validateDocumentNumber($documentNumber);
         $xmlSha256 = self::validateSha256($xmlSha256, 'XML');
+        $documentAuthority = self::validateDocumentAuthority($documentAuthority);
+        self::validateDocumentAuthorityForType($documentType, $documentAuthority);
         self::validateEInvoiceMetadata($documentType, $isEInvoice, $xmlSha256);
 
         $this->persistLink(
@@ -77,6 +88,7 @@ final class MappingRepository
             $documentNumber,
             $isEInvoice,
             $xmlSha256,
+            $documentAuthority,
         );
     }
 
@@ -90,12 +102,22 @@ final class MappingRepository
         ?string $pdfSha256 = null,
         ?bool $isEInvoice = null,
         ?string $xmlSha256 = null,
+        ?string $documentAuthority = null,
+        ?string $requiredWhmcsInvoiceStatus = null,
     ): void {
         self::validateMappingIds($invoiceId, $sevdeskId);
         $documentType = self::validateDocumentType($documentType);
         $documentNumber = self::validateDocumentNumber($documentNumber);
         $pdfSha256 = self::validateSha256($pdfSha256, 'PDF');
         $xmlSha256 = self::validateSha256($xmlSha256, 'XML');
+        $documentAuthority = self::validateDocumentAuthority($documentAuthority);
+        $requiredWhmcsInvoiceStatus = $requiredWhmcsInvoiceStatus !== null
+            ? trim($requiredWhmcsInvoiceStatus)
+            : null;
+        if ($requiredWhmcsInvoiceStatus === '') {
+            throw new InvalidArgumentException('A required WHMCS invoice status must not be empty.');
+        }
+        self::validateDocumentAuthorityForType($documentType, $documentAuthority);
         self::validateEInvoiceMetadata($documentType, $isEInvoice, $xmlSha256);
         $readyAt = $documentReadyAt?->format('Y-m-d H:i:s');
         $deliveryAt = $deliveredAt?->format('Y-m-d H:i:s');
@@ -110,7 +132,21 @@ final class MappingRepository
             $pdfSha256,
             $isEInvoice,
             $xmlSha256,
+            $documentAuthority,
+            $requiredWhmcsInvoiceStatus,
         ): void {
+            if ($requiredWhmcsInvoiceStatus !== null) {
+                $invoiceStatus = Capsule::table('tblinvoices')
+                    ->where('id', $invoiceId)
+                    ->lockForUpdate()
+                    ->value('status');
+                if (!is_string($invoiceStatus) || strcasecmp(trim($invoiceStatus), $requiredWhmcsInvoiceStatus) !== 0) {
+                    throw new RuntimeException(
+                        'The WHMCS invoice status no longer permits this document metadata update.',
+                    );
+                }
+            }
+
             $existing = Capsule::table(Migrator::MAPPING_TABLE)
                 ->where('invoice_id', $invoiceId)
                 ->lockForUpdate()
@@ -122,7 +158,12 @@ final class MappingRepository
                 throw new RuntimeException('The complete sevdesk mapping changed before metadata enrichment.');
             }
 
-            $updates = self::compatibleDocumentUpdates($existing, $documentType, $documentNumber);
+            $updates = self::compatibleDocumentUpdates(
+                $existing,
+                $documentType,
+                $documentNumber,
+                $documentAuthority,
+            );
             if ($readyAt !== null && $existing->document_ready_at === null) {
                 $updates['document_ready_at'] = $readyAt;
             }
@@ -179,6 +220,7 @@ final class MappingRepository
         ?string $documentNumber,
         ?bool $isEInvoice = null,
         ?string $xmlSha256 = null,
+        ?string $documentAuthority = null,
     ): void {
         Capsule::connection()->transaction(static function () use (
             $invoiceId,
@@ -187,6 +229,7 @@ final class MappingRepository
             $documentNumber,
             $isEInvoice,
             $xmlSha256,
+            $documentAuthority,
         ): void {
             $existing = Capsule::table(Migrator::MAPPING_TABLE)
                 ->where('invoice_id', $invoiceId)
@@ -201,6 +244,9 @@ final class MappingRepository
                     if ($documentType !== null) {
                         $insert['document_type'] = $documentType;
                         $insert['document_number'] = $documentNumber;
+                        if ($documentAuthority !== null) {
+                            $insert['document_authority'] = $documentAuthority;
+                        }
                         if ($isEInvoice !== null) {
                             $insert['is_e_invoice'] = $isEInvoice ? 1 : 0;
                         }
@@ -233,7 +279,12 @@ final class MappingRepository
 
             $updates = $documentType === null
                 ? []
-                : self::compatibleDocumentUpdates($existing, $documentType, $documentNumber);
+                : self::compatibleDocumentUpdates(
+                    $existing,
+                    $documentType,
+                    $documentNumber,
+                    $documentAuthority,
+                );
             if ($documentType !== null) {
                 $currentEInvoice = self::storedNullableBool($existing->is_e_invoice ?? null);
                 if ($isEInvoice !== null && $currentEInvoice !== null && $currentEInvoice !== $isEInvoice) {
@@ -278,6 +329,7 @@ final class MappingRepository
         object $existing,
         string $documentType,
         ?string $documentNumber,
+        ?string $documentAuthority,
     ): array {
         $updates = [];
         $currentType = trim((string) ($existing->document_type ?? ''));
@@ -294,6 +346,18 @@ final class MappingRepository
         }
         if ($documentNumber !== null && $currentNumber === '') {
             $updates['document_number'] = $documentNumber;
+        }
+
+        $currentAuthority = trim((string) ($existing->document_authority ?? ''));
+        if (
+            $documentAuthority !== null
+            && $currentAuthority !== ''
+            && $currentAuthority !== $documentAuthority
+        ) {
+            throw new RuntimeException('A different document authority already exists for this mapping.');
+        }
+        if ($documentAuthority !== null && $currentAuthority === '') {
+            $updates['document_authority'] = $documentAuthority;
         }
 
         return $updates;
@@ -330,6 +394,32 @@ final class MappingRepository
         }
 
         return $documentNumber;
+    }
+
+    private static function validateDocumentAuthority(?string $documentAuthority): ?string
+    {
+        if ($documentAuthority === null || trim($documentAuthority) === '') {
+            return null;
+        }
+
+        $documentAuthority = strtolower(trim($documentAuthority));
+        if (!in_array($documentAuthority, self::DOCUMENT_AUTHORITIES, true)) {
+            throw new InvalidArgumentException('Document authority must be whmcs or sevdesk.');
+        }
+
+        return $documentAuthority;
+    }
+
+    private static function validateDocumentAuthorityForType(
+        string $documentType,
+        ?string $documentAuthority,
+    ): void {
+        if (
+            $documentType === self::DOCUMENT_TYPE_VOUCHER
+            && $documentAuthority === self::DOCUMENT_AUTHORITY_SEVDESK
+        ) {
+            throw new InvalidArgumentException('Voucher mappings always keep WHMCS document authority.');
+        }
     }
 
     private static function validateSha256(?string $sha256, string $label): ?string
@@ -481,7 +571,11 @@ final class MappingRepository
         } elseif ($status === 'untyped') {
             $query->whereNotNull('m.sevdesk_id')
                 ->whereRaw("TRIM(m.sevdesk_id) <> ''")
-                ->whereNull('m.document_type')
+                ->where(static function ($query): void {
+                    $query->whereNull('m.document_type')
+                        ->orWhereNull('m.document_authority')
+                        ->orWhereRaw("TRIM(m.document_authority) = ''");
+                })
                 ->whereNotNull('i.id');
         } elseif ($status === 'orphan') {
             $query->whereNull('i.id');
@@ -490,7 +584,7 @@ final class MappingRepository
         $items = $query
             ->select([
                 'm.id as mapping_id', 'm.id', 'm.invoice_id', 'm.sevdesk_id',
-                'm.document_type', 'm.document_number', 'm.document_ready_at',
+                'm.document_type', 'm.document_authority', 'm.document_number', 'm.document_ready_at',
                 'm.delivered_at', 'm.pdf_sha256', 'm.is_e_invoice', 'm.xml_sha256',
                 'i.id as existing_invoice_id', 'i.invoicenum', 'i.date', 'i.status',
             ])
@@ -527,8 +621,17 @@ final class MappingRepository
         foreach ($mappings as $mapping) {
             $context = $contexts[(int) ($mapping->invoice_id ?? 0)] ?? null;
             $type = trim((string) ($mapping->document_type ?? ''));
-            $mapping->document_authority = trim((string) ($context['documentAuthority']
-                ?? ($type === self::DOCUMENT_TYPE_VOUCHER ? 'whmcs' : '')));
+            $storedAuthority = trim((string) ($mapping->document_authority ?? ''));
+            $frozenAuthority = trim((string) ($context['documentAuthority'] ?? ''));
+            $mapping->stored_document_authority = $storedAuthority;
+            $mapping->document_authority_source = $storedAuthority !== ''
+                ? 'mapping'
+                : ($frozenAuthority !== '' ? 'frozen_job' : 'missing');
+            $mapping->document_authority = $storedAuthority !== ''
+                ? $storedAuthority
+                : ($frozenAuthority !== ''
+                    ? $frozenAuthority
+                    : ($type === self::DOCUMENT_TYPE_VOUCHER ? self::DOCUMENT_AUTHORITY_WHMCS : ''));
             $mapping->tax_rule = trim((string) ($context['taxRuleId'] ?? ''));
             $mapping->delivery_state = match (true) {
                 trim((string) ($mapping->delivered_at ?? '')) !== '' => 'delivered',

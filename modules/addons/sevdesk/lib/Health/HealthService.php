@@ -171,6 +171,20 @@ final class HealthService
             'warning',
         );
 
+        $smallBusinessNotice = self::smallBusinessPeriodNotice(
+            $this->application->config->bool('smallBusinessOwner'),
+            (string) $this->application->config->get('small_business_until', ''),
+        );
+        $this->add(
+            $checks,
+            'Kleinunternehmer-Zeitraum',
+            $smallBusinessNotice['status'] === 'healthy',
+            $smallBusinessNotice['message'],
+            $smallBusinessNotice['status'],
+            'addonmodules.php?module=sevdesk&a=setup',
+            'Zeitraum prüfen',
+        );
+
         if ($invoiceCapable) {
             $invoiceReferencesValid = preg_match(
                 '/^[1-9]\d*$/',
@@ -189,6 +203,34 @@ final class HealthService
                 'error',
                 'addonmodules.php?module=sevdesk&a=setup',
                 'Invoice-Gate prüfen',
+            );
+            $smallBusinessInvoiceNotice = self::smallBusinessInvoiceCanaryNotice(
+                $exportMode === 'invoice_only'
+                    && $this->application->config->bool('smallBusinessOwner'),
+                $this->application->config->bool('small_business_invoice_canary_confirmed'),
+            );
+            $this->add(
+                $checks,
+                'Rule 11 / Invoice-Canary',
+                $smallBusinessInvoiceNotice['status'] === 'healthy',
+                $smallBusinessInvoiceNotice['message'],
+                $smallBusinessInvoiceNotice['status'],
+                'addonmodules.php?module=sevdesk&a=setup',
+                'Rule-11-Gate prüfen',
+            );
+            $discountCanary = $this->application->config->bool('invoice_discount_canary_confirmed')
+                && $this->application->config->bool('small_business_invoice_canary_confirmed');
+            $this->add(
+                $checks,
+                'Invoice-Rabatte',
+                $discountCanary,
+                $discountCanary
+                    ? 'Die Canaries für normale Rule-11-Invoices und feste PromoHosting-Rabatte sind bestätigt.'
+                    : 'PromoHosting-Rabatte bleiben gesperrt, bis der allgemeine Rule-11-Invoice-Canary '
+                        . 'und der zusätzliche Rabatt-Canary bestanden wurden.',
+                $discountCanary ? 'healthy' : 'warning',
+                'addonmodules.php?module=sevdesk&a=setup',
+                'Rabatt-Gate prüfen',
             );
         }
 
@@ -223,12 +265,44 @@ final class HealthService
             'addonmodules.php?module=sevdesk&a=setup',
             'E-Rechnungsprofil prüfen',
         );
+        if ($eInvoiceMode === 'zugferd_domestic_b2b') {
+            $creditNotice = self::eInvoiceCreditNotice();
+            $this->add(
+                $checks,
+                'ZUGFeRD und WHMCS-Guthaben',
+                true,
+                $creditNotice['message'],
+                $creditNotice['status'],
+                'addonmodules.php?module=sevdesk&a=setup',
+                'Produktgrenze prüfen',
+            );
+        }
 
         if ($documentAuthority === 'sevdesk') {
             $deliveryChannel = (string) $this->application->config->get('invoice_delivery_channel', 'sevdesk');
-            $templateOk = $deliveryChannel !== 'whmcs_template' || $this->application->whmcs->isActiveCustomInvoiceTemplate(
-                (string) $this->application->config->get('whmcs_invoice_email_template', ''),
-            );
+            $templateAttachmentSupported = $deliveryChannel !== 'whmcs_template'
+                || $this->application->whmcs->supportsEmailPreSendAttachments();
+            $templateOk = $deliveryChannel !== 'whmcs_template'
+                || (
+                    $templateAttachmentSupported
+                    && $this->application->whmcs->isActiveCustomInvoiceTemplate(
+                        (string) $this->application->config->get('whmcs_invoice_email_template', ''),
+                    )
+                );
+            if ($deliveryChannel === 'whmcs_template') {
+                $this->add(
+                    $checks,
+                    'WHMCS-Mailanhang',
+                    $templateAttachmentSupported,
+                    $templateAttachmentSupported
+                        ? 'Die installierte WHMCS-Version kann den geprüften Binäranhang übernehmen.'
+                        : 'WHMCS 8.13 ignoriert Binäranhänge aus EmailPreSend. '
+                            . 'Bitte im Setup „sevdesk sendViaEmail“ wählen.',
+                    'error',
+                    'addonmodules.php?module=sevdesk&a=setup',
+                    'Versandkanal umstellen',
+                );
+            }
             $authorityReady = $this->application->whmcs->proformaInvoicingEnabled()
                 && $this->application->whmcs->themeAdapterManifestInstalled()
                 && $this->application->config->bool('theme_adapter_confirmed')
@@ -366,7 +440,28 @@ final class HealthService
                 );
 
                 if ($modeValid && $exportMode === 'invoice_only') {
-                    $this->addInvoiceTaxChecks($checks);
+                    $invoicePolicy = $this->application->invoiceTaxPolicy(true);
+                    if ($this->application->config->bool('smallBusinessOwner')) {
+                        $ruleElevenScopeSupported = $invoicePolicy
+                            ->invoiceRuleElevenTenantScopeSupported();
+                        $this->add(
+                            $checks,
+                            'Rule 11 / Mandanten-Scope',
+                            $ruleElevenScopeSupported,
+                            $ruleElevenScopeSupported
+                                ? 'Receipt Guidance bietet aktuell mindestens ein REVENUE-Konto '
+                                    . 'für Rule 11 mit 0 % an.'
+                                : 'Receipt Guidance bietet aktuell kein REVENUE-Konto '
+                                    . 'für Rule 11 mit 0 % an. Rule-11-Invoices bleiben gesperrt.',
+                            'error',
+                            'addonmodules.php?module=sevdesk&a=setup',
+                            'Rule-11-Gate prüfen',
+                            $ruleElevenScopeSupported
+                                ? null
+                                : 'invoice_rule11_tenant_scope_unsupported',
+                        );
+                    }
+                    $this->addInvoiceTaxChecks($checks, $invoicePolicy);
                 } elseif ($modeValid) {
                     $guidance = $this->application->referenceData()->receiptGuidance(true);
                     $this->add(
@@ -450,7 +545,7 @@ final class HealthService
             'stats' => [
                 'health_status' => $hasError ? 'error' : ($hasWarning ? 'warning' : 'healthy'),
                 'healthy' => $healthy,
-                'module_version' => '2.1.0-rc.4',
+                'module_version' => '2.1.0-rc.5',
                 'whmcs_version' => $whmcsVersion,
                 'php_version' => PHP_VERSION,
                 'bookkeeping_version' => $bookkeepingVersion,
@@ -511,8 +606,10 @@ final class HealthService
     }
 
     /** @param list<array<string,mixed>> $checks */
-    private function addInvoiceTaxChecks(array &$checks): void
-    {
+    private function addInvoiceTaxChecks(
+        array &$checks,
+        ?\WHMCS\Module\Addon\SevDesk\Service\TaxPolicy $policy = null,
+    ): void {
         /** @var array<string, array{string,bool,?string,bool,bool,string,bool,bool}> $profiles */
         $profiles = [
             'Deutschland / Rule 1 (Invoice)' => ['DE', false, null, false, false, '19', false, false],
@@ -535,7 +632,7 @@ final class HealthService
             ];
         }
 
-        $policy = $this->application->invoiceTaxPolicy();
+        $policy ??= $this->application->invoiceTaxPolicy();
         foreach ($profiles as $name => [$country, $exempt, $vat, $smallBusiness, $addFunds, $rate, $organisation, $optional]) {
             $line = new \WHMCS\Module\Addon\SevDesk\Domain\LineItem('Health check', '1.00', $rate, true);
             $decision = $policy->decideInvoice(
@@ -630,6 +727,74 @@ final class HealthService
         return [
             'status' => 'healthy',
             'message' => 'OSS bleibt fail-closed. Rules 18 und 20 sowie unklare oder gemischte Leistungen sind nicht freigegeben.',
+        ];
+    }
+
+    /** @return array{status:'healthy'|'warning'|'error',message:string} */
+    public static function smallBusinessPeriodNotice(bool $enabled, string $storedUntil): array
+    {
+        try {
+            $until = Config::parseSmallBusinessUntil($storedUntil);
+        } catch (\RuntimeException) {
+            return [
+                'status' => 'error',
+                'message' => 'Der gespeicherte Kleinunternehmer-Stichtag ist ungültig. '
+                    . 'Bis zur Korrektur wird keine Steuerregel daraus abgeleitet.',
+            ];
+        }
+
+        if (!$enabled) {
+            return [
+                'status' => 'healthy',
+                'message' => 'Die Kleinunternehmerregelung ist nicht aktiv.',
+            ];
+        }
+        if ($until === null) {
+            return [
+                'status' => 'warning',
+                'message' => 'Die Kleinunternehmerregelung gilt ohne Enddatum für alle Rechnungszeiträume. '
+                    . 'Das entspricht dem bisherigen globalen Verhalten.',
+            ];
+        }
+
+        return [
+            'status' => 'warning',
+            'message' => 'Die Kleinunternehmerregelung gilt für Rechnungen bis einschließlich '
+                . $until->format('d.m.Y') . '.',
+        ];
+    }
+
+    /** @return array{status:string,message:string} */
+    public static function smallBusinessInvoiceCanaryNotice(bool $profileEnabled, bool $confirmed): array
+    {
+        if (!$profileEnabled) {
+            return [
+                'status' => 'healthy',
+                'message' => 'Das Kleinunternehmerprofil ist nicht aktiv; es wird keine Rule-11-Invoice ausgewählt.',
+            ];
+        }
+        if (!$confirmed) {
+            return [
+                'status' => 'error',
+                'message' => 'Rule-11-Invoices bleiben gesperrt, bis der eigene Mandanten-Canary bestanden wurde. '
+                    . 'Der Remote-Health-Check prüft zusätzlich den aktuellen REVENUE-Scope aus Receipt Guidance.',
+            ];
+        }
+
+        return [
+            'status' => 'healthy',
+            'message' => 'Der Rule-11-Invoice-Canary ist bestätigt. Der Remote-Health-Check prüft zusätzlich, '
+                . 'ob Receipt Guidance Rule 11 mit 0 % für mindestens ein REVENUE-Konto anbietet.',
+        ];
+    }
+
+    /** @return array{status:'warning',message:string} */
+    public static function eInvoiceCreditNotice(): array
+    {
+        return [
+            'status' => 'warning',
+            'message' => 'ZUGFeRD mit angewendetem WHMCS-Guthaben ist noch nicht freigegeben. '
+                . 'Auch eine eindeutig erkannte Sammelzahlung wird ohne stillen PDF-Fallback blockiert.',
         ];
     }
 

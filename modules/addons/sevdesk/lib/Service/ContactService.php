@@ -62,14 +62,81 @@ final class ContactService
     /**
      * @param null|callable(string, array<string, scalar|null>): (bool|null) $checkpoint
      * @param bool $recoveryOnly Allow read-only relinking, but never a new contact create.
+     * @param null|callable(?string):bool $preWriteGuard Fresh local contract
+     *     check before Contact and optional address/email writes. Follow-up
+     *     writes pass the contact ID created by this workflow.
+     * @param null|string $expectedRecoveryContactId A remote ID already frozen
+     *     by the workflow. Recovery must verify and relink exactly this ID and
+     *     must not reinterpret the recipient through customer-number search.
      * @return Result
      */
     public function resolve(
         ContactData $contact,
         ?callable $checkpoint = null,
         bool $recoveryOnly = false,
+        ?callable $preWriteGuard = null,
+        ?string $expectedRecoveryContactId = null,
     ): Result {
         $checkpoint = $checkpoint === null ? null : Closure::fromCallable($checkpoint);
+        $preWriteGuard = $preWriteGuard === null ? null : Closure::fromCallable($preWriteGuard);
+        $expectedRecoveryContactId = trim((string) $expectedRecoveryContactId);
+        if (
+            $expectedRecoveryContactId !== ''
+            && preg_match('/^[1-9]\d*$/', $expectedRecoveryContactId) !== 1
+        ) {
+            return Result::failure(
+                'invalid_recovery_contact_id',
+                'The frozen sevdesk contact ID is invalid.',
+                ['ambiguous' => true],
+            );
+        }
+        if ($recoveryOnly && $expectedRecoveryContactId !== '') {
+            if (
+                $contact->sevdeskContactId !== null
+                && !hash_equals($expectedRecoveryContactId, $contact->sevdeskContactId)
+            ) {
+                return Result::failure(
+                    'contact_recovery_link_changed',
+                    'The WHMCS contact link differs from the frozen recovery recipient.',
+                    ['ambiguous' => true, 'remoteContactId' => $expectedRecoveryContactId],
+                );
+            }
+
+            try {
+                if (!$this->remoteContactExists($expectedRecoveryContactId)) {
+                    return Result::failure(
+                        'contact_recovery_snapshot_missing',
+                        'The frozen sevdesk contact could not be verified during recovery.',
+                        ['ambiguous' => true, 'remoteContactId' => $expectedRecoveryContactId],
+                    );
+                }
+            } catch (ApiException $exception) {
+                return $this->apiFailure('contact_verification_failed', $exception);
+            }
+
+            $persistFailure = $this->persistLink(
+                $contact->whmcsClientId,
+                $expectedRecoveryContactId,
+                false,
+            );
+            if ($persistFailure !== null) {
+                return $persistFailure;
+            }
+
+            $checkpointFailure = $this->checkpoint(
+                $checkpoint,
+                'contact_linked',
+                ['remoteContactId' => $expectedRecoveryContactId],
+            );
+            if ($checkpointFailure !== null) {
+                return $checkpointFailure;
+            }
+
+            return Result::success(new ContactResolution(
+                $expectedRecoveryContactId,
+                'configured',
+            ));
+        }
 
         if ($contact->sevdeskContactId !== null) {
             try {
@@ -170,6 +237,12 @@ final class ContactService
                 'Creating a new sevdesk contact from the WHMCS customer number requires operator confirmation.',
             );
         }
+        if (!self::writeStillAllowed($preWriteGuard, null)) {
+            return Result::failure(
+                'contact_pre_write_guard_failed',
+                'Local invoice or contact evidence changed before contact creation.',
+            );
+        }
 
         $checkpointFailure = $this->checkpoint(
             $checkpoint,
@@ -213,10 +286,22 @@ final class ContactService
         }
 
         $warnings = [];
-        $this->addAddress($contact, $contactId, $warnings);
-        $this->addEmail($contact, $contactId, $warnings);
+        $this->addAddress($contact, $contactId, $warnings, $preWriteGuard);
+        $this->addEmail($contact, $contactId, $warnings, $preWriteGuard);
 
         return Result::success(new ContactResolution($contactId, 'created', $warnings));
+    }
+
+    private static function writeStillAllowed(?Closure $guard, ?string $resolvedContactId): bool
+    {
+        if ($guard === null) {
+            return true;
+        }
+        try {
+            return $guard($resolvedContactId) === true;
+        } catch (Throwable) {
+            return false;
+        }
     }
 
     private function remoteContactExists(string $contactId): bool
@@ -334,8 +419,12 @@ final class ContactService
     }
 
     /** @param list<string> $warnings */
-    private function addAddress(ContactData $contact, string $contactId, array &$warnings): void
-    {
+    private function addAddress(
+        ContactData $contact,
+        string $contactId,
+        array &$warnings,
+        ?Closure $preWriteGuard,
+    ): void {
         $hasAddress = trim($contact->street . $contact->addressLine2 . $contact->postcode . $contact->city) !== '';
         if (!$hasAddress) {
             return;
@@ -381,6 +470,11 @@ final class ContactService
         if (trim($contact->addressLine2) !== '') {
             $street .= ($street === '' ? '' : "\n") . trim($contact->addressLine2);
         }
+        if (!self::writeStillAllowed($preWriteGuard, $contactId)) {
+            $warnings[] = 'address_not_added:local_contract_changed';
+
+            return;
+        }
 
         try {
             $this->client->post('/ContactAddress', [
@@ -404,8 +498,12 @@ final class ContactService
     }
 
     /** @param list<string> $warnings */
-    private function addEmail(ContactData $contact, string $contactId, array &$warnings): void
-    {
+    private function addEmail(
+        ContactData $contact,
+        string $contactId,
+        array &$warnings,
+        ?Closure $preWriteGuard,
+    ): void {
         $email = trim($contact->email);
         if ($email === '') {
             return;
@@ -428,6 +526,11 @@ final class ContactService
         }
         if ($emailKeyId === null) {
             $warnings[] = 'email_not_added:key_not_configured';
+            return;
+        }
+        if (!self::writeStillAllowed($preWriteGuard, $contactId)) {
+            $warnings[] = 'email_not_added:local_contract_changed';
+
             return;
         }
 

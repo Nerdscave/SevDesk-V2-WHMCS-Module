@@ -155,7 +155,7 @@ final class ReferenceData
             return $this->exactCountries[$countryCode];
         }
 
-        $matchingIds = [];
+        $matchingRows = [];
         foreach (self::rows($this->client->get('/StaticCountry', ['code' => $countryCode])) as $country) {
             $code = strtoupper(trim((string) ($country['code'] ?? $country['countryCode'] ?? '')));
             if ($code !== $countryCode) {
@@ -163,15 +163,42 @@ final class ReferenceData
             }
             $id = self::numericId($country['id'] ?? null);
             if ($id !== null) {
-                $matchingIds[] = $id;
+                $matchingRows[] = [
+                    'id' => $id,
+                    'nameEn' => trim((string) ($country['nameEn'] ?? '')),
+                ];
             }
         }
 
-        if (count($matchingIds) !== 1) {
-            return $this->exactCountries[$countryCode] = null;
+        if (count($matchingRows) === 1) {
+            return $this->exactCountries[$countryCode] = $matchingRows[0]['id'];
         }
 
-        return $this->exactCountries[$countryCode] = $matchingIds[0];
+        $canonicalEnglishName = self::canonicalCountryName($countryCode);
+        if ($canonicalEnglishName !== null) {
+            $canonicalRows = array_values(array_filter(
+                $matchingRows,
+                static fn (array $row): bool => strcasecmp($row['nameEn'], $canonicalEnglishName) === 0
+            ));
+            if (count($canonicalRows) === 1) {
+                return $this->exactCountries[$countryCode] = $canonicalRows[0]['id'];
+            }
+        }
+
+        return $this->exactCountries[$countryCode] = null;
+    }
+
+    /**
+     * sevDesk currently returns England, Great Britain and United Kingdom for
+     * ISO code GB. WHMCS uses GB for the sovereign country, not a constituent
+     * country, so only the unambiguous English label is safe to select.
+     */
+    private static function canonicalCountryName(string $countryCode): ?string
+    {
+        return match ($countryCode) {
+            'GB' => 'United Kingdom',
+            default => null,
+        };
     }
 
     public function contactAddressCategoryId(): ?string

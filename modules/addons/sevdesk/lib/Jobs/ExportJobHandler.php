@@ -11,9 +11,12 @@ use WHMCS\Module\Addon\SevDesk\Api\ApiException;
 use WHMCS\Module\Addon\SevDesk\Config;
 use WHMCS\Module\Addon\SevDesk\Domain\ContactData;
 use WHMCS\Module\Addon\SevDesk\Domain\ContactResolution;
+use WHMCS\Module\Addon\SevDesk\Domain\Decimal;
 use WHMCS\Module\Addon\SevDesk\Domain\DocumentTargetDecision;
 use WHMCS\Module\Addon\SevDesk\Domain\EInvoiceContext;
 use WHMCS\Module\Addon\SevDesk\Domain\ExportResult;
+use WHMCS\Module\Addon\SevDesk\Domain\InvoiceAddressContext;
+use WHMCS\Module\Addon\SevDesk\Domain\InvoiceItemNormalizationException;
 use WHMCS\Module\Addon\SevDesk\Domain\InvoiceSnapshot;
 use WHMCS\Module\Addon\SevDesk\Domain\TaxDecision;
 use WHMCS\Module\Addon\SevDesk\Repository\JobRepository;
@@ -29,6 +32,7 @@ use WHMCS\Module\Addon\SevDesk\Service\ReconciliationService;
 use WHMCS\Module\Addon\SevDesk\Service\TaxPolicy;
 use WHMCS\Module\Addon\SevDesk\Service\VoucherExporter;
 use WHMCS\Module\Addon\SevDesk\Service\WhmcsGateway;
+use WHMCS\Module\Addon\SevDesk\Service\WhmcsPaymentStructureService;
 use WHMCS\Module\Addon\SevDesk\Support\EmailAttachmentContext;
 
 /** Executes one isolated, document-aware invoice export item. */
@@ -63,6 +67,7 @@ final class ExportJobHandler
         private readonly ?InvoicePdf $invoicePdf = null,
         ?callable $targetResolver = null,
         private readonly ?EInvoiceEligibilityService $eInvoiceEligibility = null,
+        private readonly ?WhmcsPaymentStructureService $paymentStructure = null,
     ) {
         $this->taxPolicy = Closure::fromCallable($taxPolicy);
         $this->targetResolver = Closure::fromCallable($targetResolver ?? static fn (): DocumentTargetResolver =>
@@ -112,6 +117,8 @@ final class ExportJobHandler
 
         try {
             $rawInvoice = null;
+            $invoiceContract = null;
+            $invoiceContractFrozen = false;
             $contact = null;
             $resolution = null;
 
@@ -119,13 +126,46 @@ final class ExportJobHandler
             // business terminals. Recovery searches and relinks, but never
             // creates a second contact.
             if ($contactRecoveryOnly) {
+                $invoiceContract = $this->whmcs->invoiceExportContract($invoiceId);
+                $contractFailure = $this->freezeWhmcsInvoiceContract(
+                    $invoiceContract['fingerprint'],
+                    $candidate,
+                    $item,
+                    $persistCheckpoint,
+                );
+                if ($contractFailure !== null) {
+                    return $contractFailure;
+                }
+                $invoiceContractFrozen = true;
+                $contactLinkFailure = $this->freezeWhmcsContactLink(
+                    $invoiceContract['configuredContactId'],
+                    $candidate,
+                    $item,
+                    $persistCheckpoint,
+                );
+                if ($contactLinkFailure !== null) {
+                    return $contactLinkFailure;
+                }
                 $clientId = self::contactRecoveryClientId($candidate);
                 if ($clientId < 1) {
-                    $rawInvoice = $this->whmcs->invoice($invoiceId);
-                    $clientId = (int) ($rawInvoice['userid'] ?? 0);
+                    $clientId = $invoiceContract['snapshot']->clientId;
                 }
                 $contact = $this->whmcs->contactData($clientId);
-                $contactResult = $this->contacts->resolve($contact, $persistCheckpoint, true);
+                $contactLinkFailure = $this->freezeWhmcsContactLink(
+                    $contact->sevdeskContactId,
+                    $candidate,
+                    $item,
+                    $persistCheckpoint,
+                );
+                if ($contactLinkFailure !== null) {
+                    return $contactLinkFailure;
+                }
+                $contactResult = $this->contacts->resolve(
+                    $contact,
+                    $persistCheckpoint,
+                    true,
+                    expectedRecoveryContactId: self::candidateRemoteContactId($candidate),
+                );
                 if ($contactResult->isFailure()) {
                     return $this->contactRecoveryFailureToOutcome(
                         $contactResult->errorCode() ?? 'contact_failed',
@@ -191,8 +231,186 @@ final class ExportJobHandler
             }
 
             $voucherRecovery = $this->requiresVoucherReconciliation($item, $candidate);
-            $rawInvoice ??= $this->whmcs->invoice($invoiceId);
+            $rawInvoice = $this->whmcs->invoice($invoiceId);
             $status = (string) ($rawInvoice['status'] ?? '');
+            $massPaymentCreditConfirmed = false;
+            $initialMassPaymentStructure = null;
+            $ordinaryVoucherCreditConfirmed = false;
+            $fullGrossVoucherConfirmation = $this->creditTreatmentConfirmed($candidate, $item);
+            $rawItemTypes = self::rawInvoiceItemTypes($rawInvoice);
+            $hookParentPresent = array_key_exists('massPaymentContainerInvoiceId', $candidate);
+            $hookParentValue = $candidate['massPaymentContainerInvoiceId'] ?? null;
+            $hookParentValid = !$hookParentPresent
+                || (
+                    (is_int($hookParentValue) || is_string($hookParentValue))
+                    && preg_match('/^[1-9]\d*$/', trim((string) $hookParentValue)) === 1
+                );
+            $hookParentInvoiceId = $hookParentValid && $hookParentPresent
+                ? (int) $hookParentValue
+                : 0;
+            $hookParentConflict = self::truthy(
+                $candidate['massPaymentContainerConflict'] ?? false,
+            );
+            $storedMassPaymentSelected = trim((string) (
+                $candidate['massPaymentFingerprint'] ?? ''
+            )) !== ''
+                || (
+                    array_key_exists('massPaymentParentInvoiceId', $candidate)
+                    && $candidate['massPaymentParentInvoiceId'] !== null
+                )
+                || self::truthy($candidate['massPaymentExact'] ?? false);
+            $frozenMassPaymentContext = $hookParentPresent
+                || $hookParentConflict
+                || $storedMassPaymentSelected;
+            $requiresPaymentStructure = in_array('invoice', $rawItemTypes, true)
+                || (float) ($rawInvoice['credit'] ?? 0) > 0
+                || $frozenMassPaymentContext;
+            if ($requiresPaymentStructure && $this->paymentStructure !== null && !$voucherRecovery) {
+                $paymentStructure = $this->paymentStructure->classify($invoiceId);
+                $structureCode = (string) ($paymentStructure['code'] ?? '');
+                $currentCheckpoint = (string) ($item->checkpoint ?? '');
+                $riskyCheckpoint = JobRepository::isRiskyCheckpoint($currentCheckpoint);
+
+                if (
+                    $frozenMassPaymentContext
+                    && $structureCode !== WhmcsPaymentStructureService::EXACT_MASS_PAYMENT_TARGET
+                ) {
+                    return $this->massPaymentStructureChangedOutcome($item);
+                }
+
+                if ($structureCode === WhmcsPaymentStructureService::CONTAINER_NOT_REVENUE) {
+                    if ($riskyCheckpoint) {
+                        return JobOutcome::ambiguous(
+                            'Die WHMCS-Rechnung ist jetzt als reine Sammelzahlungsrechnung erkennbar, '
+                                . 'nachdem bereits ein möglicher Remote-Write begonnen hatte.',
+                            $currentCheckpoint,
+                            isset($item->sevdesk_id) ? (string) $item->sevdesk_id : null,
+                            errorCode: 'mass_payment_structure_changed_after_write',
+                        );
+                    }
+
+                    return JobOutcome::skipped(
+                        'Reine WHMCS-Sammelzahlungsrechnung: kein eigener Umsatzbeleg; '
+                            . 'die verknüpften Originalrechnungen bleiben maßgeblich.',
+                    );
+                }
+
+                if ($structureCode === WhmcsPaymentStructureService::EXACT_MASS_PAYMENT_TARGET) {
+                    $fingerprint = (string) ($paymentStructure['fingerprint'] ?? '');
+                    $parentInvoiceId = (int) ($paymentStructure['parentInvoiceId'] ?? 0);
+                    $storedFingerprint = trim((string) ($candidate['massPaymentFingerprint'] ?? ''));
+                    $storedSnapshotPresent = array_key_exists('massPaymentFingerprint', $candidate)
+                        || array_key_exists('massPaymentParentInvoiceId', $candidate)
+                        || array_key_exists('massPaymentExact', $candidate);
+                    $storedSnapshotComplete = $storedFingerprint !== ''
+                        && (int) ($candidate['massPaymentParentInvoiceId'] ?? 0) > 0
+                        && self::truthy($candidate['massPaymentExact'] ?? false);
+                    if (
+                        preg_match('/^[a-f0-9]{64}$/', $fingerprint) !== 1
+                        || $parentInvoiceId < 1
+                        || $hookParentConflict
+                        || (
+                            $hookParentPresent
+                            && (!$hookParentValid || $hookParentInvoiceId !== $parentInvoiceId)
+                        )
+                        || (
+                            $storedSnapshotPresent
+                            && (
+                                !$storedSnapshotComplete
+                                || !hash_equals($storedFingerprint, $fingerprint)
+                                || (int) $candidate['massPaymentParentInvoiceId'] !== $parentInvoiceId
+                            )
+                        )
+                    ) {
+                        return $riskyCheckpoint
+                            ? JobOutcome::ambiguous(
+                                'Die bestätigte WHMCS-Sammelzahlung hat sich nach einem möglichen Write verändert.',
+                                $currentCheckpoint,
+                                isset($item->sevdesk_id) ? (string) $item->sevdesk_id : null,
+                                errorCode: 'mass_payment_structure_changed_after_write',
+                            )
+                            : JobOutcome::permanentFailure(
+                                'Die WHMCS-Sammelzahlung stimmt nicht mehr mit der Vorprüfung überein.',
+                                errorCode: 'mass_payment_structure_changed',
+                            );
+                    }
+                    $massPaymentCreditConfirmed = true;
+                    $initialMassPaymentStructure = $paymentStructure;
+                    $candidate['massPaymentFingerprint'] = $fingerprint;
+                    $candidate['massPaymentParentInvoiceId'] = $parentInvoiceId;
+                    $candidate['massPaymentExact'] = true;
+                    if (array_key_exists('targetAllowed', $candidate) && $storedFingerprint === '') {
+                        if ($riskyCheckpoint) {
+                            return JobOutcome::ambiguous(
+                                'Nach einem möglichen Invoice-Write fehlt der eingefrorene '
+                                    . 'Sammelzahlungsnachweis. Eine neue Interpretation ist gesperrt.',
+                                $currentCheckpoint,
+                                isset($item->sevdesk_id) ? (string) $item->sevdesk_id : null,
+                                errorCode: 'mass_payment_snapshot_missing_after_write',
+                            );
+                        }
+                        if (
+                            !$persistCheckpoint(
+                                $currentCheckpoint !== '' ? $currentCheckpoint : 'document_type_selected',
+                                [
+                                    'massPaymentFingerprint' => $fingerprint,
+                                    'massPaymentParentInvoiceId' => $candidate['massPaymentParentInvoiceId'],
+                                    'massPaymentExact' => true,
+                                ],
+                            )
+                        ) {
+                            return JobOutcome::permanentFailure(
+                                'Der bestätigte Sammelzahlungsnachweis konnte vor dem ersten Write '
+                                    . 'nicht gespeichert werden.',
+                                errorCode: 'mass_payment_snapshot_persist_failed',
+                            );
+                        }
+                    }
+                } elseif ($structureCode !== WhmcsPaymentStructureService::ORDINARY_INVOICE) {
+                    $reasonCode = trim((string) ($paymentStructure['context']['reasonCode'] ?? ''));
+                    if ($reasonCode === '') {
+                        $reasonCode = $structureCode !== ''
+                            ? $structureCode
+                            : WhmcsPaymentStructureService::CREDIT_REQUIRES_REVIEW;
+                    }
+                    if (
+                        $fullGrossVoucherConfirmation
+                        && self::ordinaryVoucherCreditStructure(
+                            $rawItemTypes,
+                            $paymentStructure,
+                            $reasonCode,
+                        )
+                    ) {
+                        $ordinaryVoucherCreditConfirmed = true;
+                    } else {
+                        if ($riskyCheckpoint) {
+                            return JobOutcome::ambiguous(
+                                'Die WHMCS-Zahlungsstruktur ist nach einem möglichen Remote-Write nicht mehr eindeutig.',
+                                $currentCheckpoint,
+                                isset($item->sevdesk_id) ? (string) $item->sevdesk_id : null,
+                                errorCode: 'mass_payment_structure_changed_after_write',
+                            );
+                        }
+
+                        return JobOutcome::permanentFailure(
+                            'Guthaben oder Sammelzahlung sind strukturell nicht vollständig beweisbar. '
+                                . 'Dieser Fall bleibt in der Einzelprüfung.',
+                            errorCode: $reasonCode,
+                        );
+                    }
+                }
+            } elseif (
+                (
+                    in_array('invoice', $rawItemTypes, true)
+                    || $frozenMassPaymentContext
+                )
+                && !$voucherRecovery
+            ) {
+                return JobOutcome::permanentFailure(
+                    'Eine WHMCS-Sammelzahlungsrechnung konnte nicht strukturell geprüft werden.',
+                    errorCode: 'mass_payment_structure_unavailable',
+                );
+            }
             if (!$voucherRecovery && !in_array($status, ['Paid', 'Unpaid'], true)) {
                 if (
                     self::candidateSelectsInvoice($item, $candidate)
@@ -217,18 +435,82 @@ final class ExportJobHandler
                 return JobOutcome::skipped('Die Rechnung liegt vor dem konfigurierten Exportstichtag.');
             }
 
-            $invoice = $this->whmcs->invoiceSnapshot($invoiceId);
-            $creditTreatmentConfirmed = $this->creditTreatmentConfirmed($candidate);
+            $invoiceContract ??= $this->whmcs->invoiceExportContract($invoiceId);
+            $invoice = $invoiceContract['snapshot'];
+            $currentItemTypes = $invoiceContract['itemTypes'];
+            $initialItemTypes = $rawItemTypes;
+            sort($initialItemTypes);
+            if (
+                $status !== $invoiceContract['status']
+                || $initialItemTypes !== $currentItemTypes
+                || Decimal::toMinorUnits((string) ($rawInvoice['credit'] ?? '0'))
+                    !== $invoiceContract['creditMinor']
+                || trim((string) ($rawInvoice['date'] ?? ''))
+                    !== $invoice->invoiceDate->format('Y-m-d')
+            ) {
+                return $this->whmcsInvoiceContractChangedOutcome($item);
+            }
+            $status = $invoiceContract['status'];
+            $rawItemTypes = $currentItemTypes;
+            if (
+                !$voucherRecovery
+                && !$invoiceContinuation
+                && !$this->isAfterConfiguredStart($invoice->invoiceDate->format('Y-m-d'))
+            ) {
+                return JobOutcome::skipped('Die Rechnung liegt vor dem konfigurierten Exportstichtag.');
+            }
+            $discountSnapshotFailure = $this->invoiceDiscountSnapshotFailure(
+                $invoice,
+                $candidate,
+                $item,
+            );
+            if ($discountSnapshotFailure !== null) {
+                return $discountSnapshotFailure;
+            }
+            $creditTreatmentConfirmed = $ordinaryVoucherCreditConfirmed
+                || $massPaymentCreditConfirmed;
             if (!$voucherRecovery) {
                 // These checks are document-independent and deliberately happen
                 // before Receipt Guidance, contact lookups, PDF rendering or any
                 // remote accounting write.
-                $documentValidation = $this->voucherExporter->validateInvoiceDocument(
-                    $invoice,
-                    $creditTreatmentConfirmed,
-                );
-                if ($documentValidation !== null) {
-                    return $this->toOutcome($documentValidation, $item, 'exported');
+                if ($invoice->discounts !== []) {
+                    if (!$this->config->bool('invoice_discount_canary_confirmed')) {
+                        return $this->discountPreflightFailure(
+                            $item,
+                            'Der separate sevdesk-Canary für feste Invoice-Rabatte ist noch nicht bestätigt.',
+                            'invoice_discount_canary_not_confirmed',
+                        );
+                    }
+                    if (
+                        $invoice->appliedCreditMinorUnits() > 0
+                        && !$massPaymentCreditConfirmed
+                    ) {
+                        return $this->discountPreflightFailure(
+                            $item,
+                            'Rechnungen mit gleichzeitigem PromoHosting-Rabatt und Guthaben bleiben Einzelprüfungen.',
+                            'discount_with_credit_requires_review',
+                        );
+                    }
+                    if (
+                        $invoice->currency !== 'EUR'
+                        || $invoice->totalMinorUnits() <= 0
+                        || $invoice->hasMixedNetModes()
+                        || $invoice->calculatedDocumentGrossMinorUnits() !== $invoice->totalMinorUnits()
+                    ) {
+                        return $this->discountPreflightFailure(
+                            $item,
+                            'Der strukturelle Invoice-Rabatt stimmt nicht centgenau mit dem WHMCS-Beleg überein.',
+                            'invoice_discount_total_mismatch',
+                        );
+                    }
+                } else {
+                    $documentValidation = $this->voucherExporter->validateInvoiceDocument(
+                        $invoice,
+                        $creditTreatmentConfirmed,
+                    );
+                    if ($documentValidation !== null) {
+                        return $this->toOutcome($documentValidation, $item, 'exported');
+                    }
                 }
             }
 
@@ -241,23 +523,99 @@ final class ExportJobHandler
             }
             $contact ??= $this->whmcs->contactData($invoice->clientId);
 
+            if ($initialMassPaymentStructure !== null) {
+                $massPaymentRevalidation = $this->revalidateExactMassPaymentTarget(
+                    $invoiceId,
+                    $invoice,
+                    $initialMassPaymentStructure,
+                    $candidate,
+                    $item,
+                );
+                if ($massPaymentRevalidation !== null) {
+                    return $massPaymentRevalidation;
+                }
+            }
+            if (!$invoiceContractFrozen) {
+                $contractFailure = $this->freezeWhmcsInvoiceContract(
+                    $invoiceContract['fingerprint'],
+                    $candidate,
+                    $item,
+                    $persistCheckpoint,
+                );
+                if ($contractFailure !== null) {
+                    return $contractFailure;
+                }
+                $invoiceContractFrozen = true;
+            }
+            $contactLinkFailure = $this->freezeWhmcsContactLink(
+                $invoiceContract['configuredContactId'],
+                $candidate,
+                $item,
+                $persistCheckpoint,
+            );
+            if ($contactLinkFailure !== null) {
+                return $contactLinkFailure;
+            }
+            $contactLinkFailure = $this->freezeWhmcsContactLink(
+                $contact->sevdeskContactId,
+                $candidate,
+                $item,
+                $persistCheckpoint,
+            );
+            if ($contactLinkFailure !== null) {
+                return $contactLinkFailure;
+            }
+
             if ($voucherRecovery) {
+                $voucherContract = self::voucherRecoveryContract($item, $candidate);
+                if ($voucherContract instanceof JobOutcome) {
+                    return $voucherContract;
+                }
                 $result = $this->voucherReconciliation->reconcile(
                     $invoice,
-                    $contact->sevdeskContactId,
+                    trim((string) ($candidate['remoteContactId'] ?? $contact->sevdeskContactId ?? '')),
                     isset($item->sevdesk_id) ? (string) $item->sevdesk_id : null,
+                    $voucherContract['taxRuleId'],
+                    $voucherContract['accountDatevId'],
                 );
 
                 return $this->toOutcome($result, $item, 'reconciled');
             }
 
             $tax = $this->taxDecision($invoiceId, $invoice, $contact, $item, $candidate);
+            if (
+                (string) ($candidate['targetDocumentType'] ?? '') === DocumentTargetDecision::DOCUMENT_INVOICE
+                && (string) ($candidate['targetTaxRuleId'] ?? '') === '11'
+                && !$tax->allowed
+                && in_array($tax->code, [
+                    'small_business_invoice_canary_not_confirmed',
+                    'invoice_rule11_tenant_scope_unsupported',
+                ], true)
+            ) {
+                return $this->runtimePreflightFailure(
+                    $item,
+                    self::messageFor($tax->code, $tax->message),
+                    $tax->code,
+                );
+            }
+            if ($initialMassPaymentStructure !== null) {
+                $massPaymentRevalidation = $this->revalidateExactMassPaymentTarget(
+                    $invoiceId,
+                    $invoice,
+                    $initialMassPaymentStructure,
+                    $candidate,
+                    $item,
+                );
+                if ($massPaymentRevalidation !== null) {
+                    return $massPaymentRevalidation;
+                }
+            }
             $target = $this->frozenOrNewTarget(
                 $item,
                 $candidate,
                 $tax,
                 $status,
-                trim((string) ($rawInvoice['invoicenum'] ?? '')),
+                $invoice->invoiceNumber,
                 $persistCheckpoint,
             );
             if (!$target instanceof DocumentTargetDecision) {
@@ -281,6 +639,26 @@ final class ExportJobHandler
                     $completeRemoteId,
                     errorCode: 'frozen_target_tax_rule_changed',
                 );
+            }
+            if (
+                $target->documentType === DocumentTargetDecision::DOCUMENT_VOUCHER
+                && $invoice->discounts !== []
+            ) {
+                return $this->discountPreflightFailure(
+                    $item,
+                    'Der bestätigte PromoHosting-Rabatt kann nur als sevdesk-Invoice übertragen werden.',
+                    'voucher_discount_not_supported',
+                );
+            }
+            $discountPreflight = $this->invoiceDiscountTargetPreflight(
+                $invoice,
+                $tax,
+                $target,
+                $candidate,
+                $item,
+            );
+            if ($discountPreflight !== null) {
+                return $discountPreflight;
             }
 
             if ($target->documentType === DocumentTargetDecision::DOCUMENT_INVOICE && $status !== 'Paid') {
@@ -307,6 +685,8 @@ final class ExportJobHandler
             if ($target->documentType === DocumentTargetDecision::DOCUMENT_VOUCHER) {
                 return $this->exportVoucher(
                     $item,
+                    $candidate,
+                    $initialMassPaymentStructure,
                     $invoice,
                     $contact,
                     $resolution,
@@ -320,6 +700,7 @@ final class ExportJobHandler
             return $this->exportInvoice(
                 $item,
                 $candidate,
+                $initialMassPaymentStructure,
                 $mapping,
                 $invoice,
                 $contact,
@@ -327,6 +708,12 @@ final class ExportJobHandler
                 $tax,
                 $target,
                 $persistCheckpoint,
+            );
+        } catch (InvoiceItemNormalizationException $exception) {
+            return $this->discountPreflightFailure(
+                $item,
+                $exception->getMessage(),
+                $exception->resultCode,
             );
         } catch (ApiException $exception) {
             return $this->failureResultToOutcome(
@@ -364,16 +751,19 @@ final class ExportJobHandler
                 );
             }
 
-            return JobOutcome::permanentFailure(
-                self::messageFor('local_preflight_failed', $exception->getMessage()),
-                errorCode: 'local_preflight_failed',
-            );
+            return self::unexpectedLocalPreflightFailure($exception);
         }
     }
 
-    /** @param callable(string, array<string, scalar|null>): bool $checkpoint */
+    /**
+     * @param array<string, mixed> $candidate
+     * @param array<string, mixed>|null $initialMassPaymentStructure
+     * @param callable(string, array<string, scalar|null>): bool $checkpoint
+     */
     private function exportVoucher(
         object $item,
+        array $candidate,
+        ?array $initialMassPaymentStructure,
         InvoiceSnapshot $invoice,
         ContactData $contact,
         ?ContactResolution $resolution,
@@ -414,7 +804,13 @@ final class ExportJobHandler
             );
         }
 
-        $resolution ??= $this->resolveContact($contact, $checkpoint, false, $item);
+        $resolution ??= $this->resolveContact(
+            $contact,
+            $checkpoint,
+            false,
+            $item,
+            $this->whmcsInvoiceContractGuard($invoice->invoiceId, $candidate),
+        );
         if (!$resolution instanceof ContactResolution) {
             return $resolution;
         }
@@ -426,6 +822,14 @@ final class ExportJobHandler
             $pdfContents,
             $checkpoint,
             $creditTreatmentConfirmed,
+            $this->invoicePreWriteGuard(
+                $invoice->invoiceId,
+                $invoice,
+                $initialMassPaymentStructure,
+                $candidate,
+                $item,
+                $resolution->contactId,
+            ),
         );
 
         return $this->toOutcome($result, $item, 'exported', [
@@ -435,10 +839,15 @@ final class ExportJobHandler
         ]);
     }
 
-    /** @param array<string,mixed> $candidate @param callable(string,array<string,scalar|null>):bool $checkpoint */
+    /**
+     * @param array<string, mixed> $candidate
+     * @param array<string, mixed>|null $initialMassPaymentStructure
+     * @param callable(string, array<string, scalar|null>): bool $checkpoint
+     */
     private function exportInvoice(
         object $item,
         array $candidate,
+        ?array $initialMassPaymentStructure,
         ?object $mapping,
         InvoiceSnapshot $invoice,
         ContactData $contact,
@@ -492,6 +901,15 @@ final class ExportJobHandler
                     errorCode: 'mapping_document_number_changed',
                 );
             }
+            $mappingAuthority = trim((string) ($mapping->document_authority ?? ''));
+            if ($mappingAuthority !== '' && $mappingAuthority !== $target->documentAuthority) {
+                return JobOutcome::ambiguous(
+                    'Die dauerhaft gespeicherte Dokumenthoheit widerspricht dem eingefrorenen Invoice-Ziel.',
+                    (string) ($item->checkpoint ?? 'mapping_persisted'),
+                    $mappingRemoteId,
+                    errorCode: 'mapping_document_authority_changed',
+                );
+            }
         }
 
         $currentCheckpoint = (string) ($item->checkpoint ?? '');
@@ -507,14 +925,25 @@ final class ExportJobHandler
 
         $writeStarted = self::invoiceCreateWriteStarted($currentCheckpoint);
         $contactRecoveryOnly = $writeStarted || $mappingRemoteId !== null;
-        $contactCheckpoint = $contactRecoveryOnly
-            ? static fn (): bool => true
-            : $checkpoint;
+        if ($resolution === null && $contactRecoveryOnly) {
+            $frozenContactId = self::candidateRemoteContactId($candidate);
+            if ($frozenContactId === null) {
+                return JobOutcome::ambiguous(
+                    'Nach einem möglichen Invoice-Write fehlt die eingefrorene sevdesk-Kontakt-ID. '
+                        . 'Der Rechnungsempfänger darf nicht aus dem aktuellen Kundenfeld neu abgeleitet werden.',
+                    $currentCheckpoint !== '' ? $currentCheckpoint : 'invoice_write_requested',
+                    isset($item->sevdesk_id) ? (string) $item->sevdesk_id : null,
+                    errorCode: 'invoice_contact_snapshot_missing_after_write',
+                );
+            }
+            $resolution = new ContactResolution($frozenContactId, 'snapshot');
+        }
         $resolution ??= $this->resolveContact(
             $contact,
-            $contactCheckpoint,
-            $contactRecoveryOnly,
+            $checkpoint,
+            false,
             $item,
+            $this->whmcsInvoiceContractGuard($invoice->invoiceId, $candidate),
         );
         if (!$resolution instanceof ContactResolution) {
             return $resolution;
@@ -586,6 +1015,42 @@ final class ExportJobHandler
             $candidate = array_replace($candidate, $eInvoiceTarget);
         }
 
+        $invoiceAddressContext = null;
+        if ($eInvoiceContext === null) {
+            $frozenAddressHash = strtolower(trim((string) ($candidate['invoiceAddressHash'] ?? '')));
+            $frozenAddressCountryId = trim((string) ($candidate['invoiceAddressCountryId'] ?? ''));
+            $addressSnapshotPresent = preg_match('/^[a-f0-9]{64}$/', $frozenAddressHash) === 1
+                && preg_match('/^[1-9]\d*$/', $frozenAddressCountryId) === 1;
+            if (($writeStarted || $mappingRemoteId !== null) && !$addressSnapshotPresent) {
+                return JobOutcome::ambiguous(
+                    'Nach einem Invoice-Write fehlt der PII-freie Snapshot der WHMCS-Rechnungsadresse. '
+                        . 'Der vorhandene Entwurf darf weder automatisch zugeordnet noch geöffnet werden.',
+                    $currentCheckpoint !== '' ? $currentCheckpoint : 'invoice_write_requested',
+                    isset($item->sevdesk_id) ? (string) $item->sevdesk_id : $mappingRemoteId,
+                    errorCode: 'invoice_address_snapshot_missing_after_write',
+                );
+            }
+            $resolvedAddress = $invoiceExporter->resolveAddressContext($invoice, $contact);
+            if ($resolvedAddress instanceof ExportResult) {
+                return $this->toOutcome($resolvedAddress, $item, 'invoice_address');
+            }
+            $invoiceAddressContext = $resolvedAddress;
+            if (
+                $addressSnapshotPresent
+                && (
+                    !hash_equals($frozenAddressHash, $invoiceAddressContext->expectedAddressHash)
+                    || $frozenAddressCountryId !== $invoiceAddressContext->countryId
+                )
+            ) {
+                return JobOutcome::ambiguous(
+                    'Die aktuelle WHMCS-Rechnungsadresse widerspricht dem eingefrorenen Invoice-Adresssnapshot.',
+                    $currentCheckpoint !== '' ? $currentCheckpoint : 'document_type_selected',
+                    isset($item->sevdesk_id) ? (string) $item->sevdesk_id : $mappingRemoteId,
+                    errorCode: 'invoice_address_snapshot_changed',
+                );
+            }
+        }
+
         $remoteId = $mappingRemoteId;
         $documentResult = null;
         if ($remoteId === null && $writeStarted) {
@@ -597,6 +1062,8 @@ final class ExportJobHandler
                 isset($item->sevdesk_id) ? (string) $item->sevdesk_id : null,
                 $checkpoint,
                 $eInvoiceContext,
+                $invoiceAddressContext,
+                $target->documentAuthority,
             );
             if ($reconciled->status !== ExportResult::SUCCEEDED && $reconciled->status !== ExportResult::SKIPPED) {
                 return $this->toOutcome($reconciled, $item, 'reconciled');
@@ -623,6 +1090,16 @@ final class ExportJobHandler
                 $target,
                 $checkpoint,
                 $eInvoiceContext,
+                self::truthy($candidate['massPaymentExact'] ?? false),
+                $this->invoicePreWriteGuard(
+                    $invoice->invoiceId,
+                    $invoice,
+                    $initialMassPaymentStructure,
+                    $candidate,
+                    $item,
+                    $resolution->contactId,
+                ),
+                $invoiceAddressContext,
             );
             if ($created->status !== ExportResult::SUCCEEDED) {
                 return $this->toOutcome($created, $item, 'exported');
@@ -676,6 +1153,7 @@ final class ExportJobHandler
                 $checkpoint,
                 $invoiceExporter,
                 $eInvoiceContext,
+                $invoiceAddressContext,
             );
             if ($opened !== null) {
                 return $opened;
@@ -688,6 +1166,7 @@ final class ExportJobHandler
                 new DateTimeImmutable(),
                 isEInvoice: $eInvoiceContext !== null,
                 xmlSha256: self::mappingXmlHash($this->mappings->findByInvoice($invoice->invoiceId)),
+                documentAuthority: DocumentTargetResolver::AUTHORITY_WHMCS,
             );
 
             return JobOutcome::succeeded(
@@ -713,6 +1192,7 @@ final class ExportJobHandler
             $checkpoint,
             $invoiceExporter,
             $eInvoiceContext,
+            $invoiceAddressContext,
         );
     }
 
@@ -727,6 +1207,7 @@ final class ExportJobHandler
         callable $checkpoint,
         InvoiceExporter $invoiceExporter,
         ?EInvoiceContext $eInvoiceContext = null,
+        ?InvoiceAddressContext $invoiceAddressContext = null,
     ): ?JobOutcome {
         $current = (string) ($item->checkpoint ?? '');
         if (in_array($current, ['whmcs_email_write_requested', 'whmcs_email_handed_off'], true)) {
@@ -745,6 +1226,7 @@ final class ExportJobHandler
                 $deliveryCountryCode,
                 $checkpoint,
                 $eInvoiceContext,
+                $invoiceAddressContext,
             )
             : $invoiceExporter->openForWhmcsAuthority(
                 $invoice,
@@ -754,6 +1236,7 @@ final class ExportJobHandler
                 $deliveryCountryCode,
                 $checkpoint,
                 $eInvoiceContext,
+                $invoiceAddressContext,
             );
         if ($result->status !== ExportResult::SUCCEEDED) {
             return $this->toOutcome($result, $item, 'exported');
@@ -774,6 +1257,7 @@ final class ExportJobHandler
         callable $checkpoint,
         InvoiceExporter $invoiceExporter,
         ?EInvoiceContext $eInvoiceContext = null,
+        ?InvoiceAddressContext $invoiceAddressContext = null,
     ): JobOutcome {
         $deliveryRequested = self::truthy($candidate['delivery_requested'] ?? false);
         $channel = (string) ($candidate['targetDeliveryChannel']
@@ -798,6 +1282,14 @@ final class ExportJobHandler
 
         $template = '';
         if ($channel === 'whmcs_template' && $deliveryRequested) {
+            if (!$this->whmcs->supportsEmailPreSendAttachments()) {
+                return JobOutcome::permanentFailure(
+                    'WHMCS 8.13 kann Binäranhänge aus EmailPreSend nicht übernehmen. '
+                        . 'Bitte den sevdesk-Versandkanal verwenden.',
+                    errorCode: 'whmcs_email_attachment_unsupported',
+                    checkpoint: $current !== '' ? $current : 'mapping_persisted',
+                );
+            }
             if (!function_exists('sevdesk_email_pre_send')) {
                 return JobOutcome::permanentFailure(
                     'Der WHMCS-Mail-Hook für den geprüften sevdesk-PDF-Anhang ist nicht geladen.',
@@ -828,6 +1320,7 @@ final class ExportJobHandler
                     $contact->countryCode,
                     $checkpoint,
                     $eInvoiceContext,
+                    $invoiceAddressContext,
                 );
             } elseif ($current === 'invoice_delivered' && $eInvoiceContext === null) {
                 $delivered = ExportResult::succeeded($invoice->invoiceId, $remoteId);
@@ -843,6 +1336,7 @@ final class ExportJobHandler
                     $this->deliveryText('sevdesk_email_body', $invoice, $contact),
                     $checkpoint,
                     $eInvoiceContext,
+                    $invoiceAddressContext,
                 );
             }
             if ($delivered->status !== ExportResult::SUCCEEDED) {
@@ -863,6 +1357,7 @@ final class ExportJobHandler
                 $pdf['sha256'],
                 $eInvoiceContext !== null,
                 self::mappingXmlHash($this->mappings->findByInvoice($invoice->invoiceId)),
+                DocumentTargetResolver::AUTHORITY_SEVDESK,
             );
 
             return JobOutcome::succeeded(
@@ -887,6 +1382,7 @@ final class ExportJobHandler
             $checkpoint,
             $invoiceExporter,
             $eInvoiceContext,
+            $invoiceAddressContext,
         );
         if ($opened !== null) {
             return $opened;
@@ -905,6 +1401,7 @@ final class ExportJobHandler
             $pdf['sha256'],
             $eInvoiceContext !== null,
             self::mappingXmlHash($this->mappings->findByInvoice($invoice->invoiceId)),
+            DocumentTargetResolver::AUTHORITY_SEVDESK,
         );
 
         if (!$deliveryRequested) {
@@ -993,6 +1490,7 @@ final class ExportJobHandler
             $pdf['sha256'],
             $eInvoiceContext !== null,
             self::mappingXmlHash($this->mappings->findByInvoice($invoice->invoiceId)),
+            DocumentTargetResolver::AUTHORITY_SEVDESK,
         );
 
         return JobOutcome::succeeded(
@@ -1046,6 +1544,7 @@ final class ExportJobHandler
             $selectedNumber,
             $now,
             $now,
+            documentAuthority: DocumentTargetResolver::AUTHORITY_SEVDESK,
         );
 
         return JobOutcome::succeeded(
@@ -1127,8 +1626,14 @@ final class ExportJobHandler
         callable $checkpoint,
         bool $recoveryOnly,
         object $item,
+        ?Closure $preWriteGuard = null,
     ): ContactResolution|JobOutcome {
-        $contactResult = $this->contacts->resolve($contact, $checkpoint, $recoveryOnly);
+        $contactResult = $this->contacts->resolve(
+            $contact,
+            $checkpoint,
+            $recoveryOnly,
+            $preWriteGuard,
+        );
         if ($contactResult->isFailure()) {
             $code = $contactResult->errorCode() ?? 'contact_failed';
             $message = $contactResult->errorMessage() ?? 'Der sevdesk-Kontakt konnte nicht aufgelöst werden.';
@@ -1161,7 +1666,7 @@ final class ExportJobHandler
             $contact->countryCode,
             $contact->taxExempt,
             $contact->vatNumber,
-            $this->config->bool('smallBusinessOwner'),
+            $this->config->smallBusinessAppliesOn($invoice->invoiceDate),
             $this->whmcs->isAddFundsInvoice($invoiceId),
             $invoice->lineItems,
             $contact->isOrganisation(),
@@ -1193,11 +1698,25 @@ final class ExportJobHandler
                 DocumentTargetResolver::MODE_INVOICE_ONLY,
             ], true)
         ) {
+            $smallBusinessInvoiceCanary = $this->config->bool(
+                'small_business_invoice_canary_confirmed',
+            );
+            $ruleElevenTenantScopeSupported = false;
+            if (
+                $mode === DocumentTargetResolver::MODE_INVOICE_ONLY
+                && $arguments[3]
+                && $smallBusinessInvoiceCanary
+            ) {
+                $ruleElevenTenantScopeSupported = ($this->taxPolicy)()
+                    ->invoiceRuleElevenTenantScopeSupported();
+            }
             $invoicePolicy = new TaxPolicy(
                 $this->config->taxProfiles(),
                 $euB2cMode,
                 null,
                 $ossProfile,
+                $smallBusinessInvoiceCanary,
+                $ruleElevenTenantScopeSupported,
             );
             $invoiceTax = $invoicePolicy->decideInvoice(...$arguments);
             if (
@@ -1332,6 +1851,52 @@ final class ExportJobHandler
                     }
                 }
             }
+            if ($target->documentType === DocumentTargetDecision::DOCUMENT_VOUCHER) {
+                $expectedAccountDatevId = trim((string) ($tax->accountDatevId ?? ''));
+                $frozenAccountDatevId = trim((string) ($candidate['targetAccountDatevId'] ?? ''));
+                if (preg_match('/^[1-9]\d*$/', $expectedAccountDatevId) !== 1) {
+                    return JobOutcome::ambiguous(
+                        'Die aktuelle Voucher-Steuerentscheidung enthält kein gültiges Erlöskonto.',
+                        (string) ($item->checkpoint ?? 'document_type_selected'),
+                        isset($item->sevdesk_id) ? (string) $item->sevdesk_id : null,
+                        errorCode: 'voucher_account_snapshot_invalid',
+                    );
+                }
+                if ($frozenAccountDatevId !== '' && $frozenAccountDatevId !== $expectedAccountDatevId) {
+                    return JobOutcome::ambiguous(
+                        'Das aktuelle Erlöskonto unterscheidet sich vom eingefrorenen Voucher-Vertrag.',
+                        (string) ($item->checkpoint ?? 'document_type_selected'),
+                        isset($item->sevdesk_id) ? (string) $item->sevdesk_id : null,
+                        errorCode: 'frozen_voucher_account_changed',
+                    );
+                }
+                if ($frozenAccountDatevId === '') {
+                    $currentCheckpoint = (string) ($item->checkpoint ?? '');
+                    if (JobRepository::isRiskyCheckpoint($currentCheckpoint)) {
+                        return JobOutcome::ambiguous(
+                            'Nach einem möglichen Voucher-Write fehlt das eingefrorene Erlöskonto. '
+                                . 'Recovery mit aktuellen Einstellungen wäre nicht beweiskräftig.',
+                            $currentCheckpoint !== '' ? $currentCheckpoint : 'voucher_write_requested',
+                            isset($item->sevdesk_id) ? (string) $item->sevdesk_id : null,
+                            errorCode: 'voucher_verification_snapshot_missing',
+                        );
+                    }
+                    if (
+                        !$checkpoint(
+                            $currentCheckpoint !== '' ? $currentCheckpoint : 'document_type_selected',
+                            ['targetAccountDatevId' => $expectedAccountDatevId],
+                        )
+                    ) {
+                        return JobOutcome::permanentFailure(
+                            'Das Erlöskonto konnte vor dem ersten Voucher-Write nicht sicher eingefroren werden.',
+                            errorCode: 'voucher_account_snapshot_failed',
+                            checkpoint: $currentCheckpoint !== ''
+                                ? $currentCheckpoint
+                                : 'document_type_selected',
+                        );
+                    }
+                }
+            }
 
             return $target;
         }
@@ -1430,6 +1995,9 @@ final class ExportJobHandler
                     : (string) $this->config->get('eu_b2c_mode', TaxPolicy::EU_B2C_BLOCKED),
             ),
             'targetTaxRuleId' => $snapshot['taxRuleId'],
+            'targetAccountDatevId' => $target->documentType === DocumentTargetDecision::DOCUMENT_VOUCHER
+                ? $tax->accountDatevId
+                : null,
             'targetCode' => $snapshot['code'],
             'targetMessage' => $snapshot['message'],
             'selectedInvoiceNumber' => $target->documentType === DocumentTargetDecision::DOCUMENT_INVOICE
@@ -1450,6 +2018,13 @@ final class ExportJobHandler
                     ? EInvoiceEligibilityService::MODE_OFF
                     : (string) ($candidate['requestedEInvoiceMode'] ?? EInvoiceEligibilityService::MODE_OFF))
                 : EInvoiceEligibilityService::MODE_OFF,
+            'massPaymentFingerprint' => isset($candidate['massPaymentFingerprint'])
+                ? (string) $candidate['massPaymentFingerprint']
+                : null,
+            'massPaymentParentInvoiceId' => isset($candidate['massPaymentParentInvoiceId'])
+                ? (int) $candidate['massPaymentParentInvoiceId']
+                : null,
+            'massPaymentExact' => self::truthy($candidate['massPaymentExact'] ?? false),
             ])
         ) {
             return JobOutcome::permanentFailure(
@@ -1565,6 +2140,18 @@ final class ExportJobHandler
         }
 
         $channel = $deliveryChannel ?? '';
+        if (
+            $channel === 'whmcs_template'
+            && self::truthy($candidate['delivery_requested'] ?? false)
+            && !$this->whmcs->supportsEmailPreSendAttachments()
+        ) {
+            return $this->runtimePreflightFailure(
+                $item,
+                'WHMCS 8.13 kann den geprüften sevdesk-PDF-Anhang nicht aus EmailPreSend übernehmen. '
+                    . 'Der Worker stoppt vor dem ersten Invoice-Write.',
+                'whmcs_email_attachment_unsupported',
+            );
+        }
         $authorityReady = $this->whmcs->proformaInvoicingEnabled()
             && $this->whmcs->themeAdapterManifestInstalled()
             && $this->config->bool('theme_adapter_confirmed')
@@ -1988,6 +2575,35 @@ final class ExportJobHandler
                 ], true));
     }
 
+    /**
+     * @param array<string,mixed> $candidate
+     * @return array{taxRuleId:string,accountDatevId:string}|JobOutcome
+     */
+    private static function voucherRecoveryContract(object $item, array $candidate): array|JobOutcome
+    {
+        $taxRuleId = trim((string) ($candidate['targetTaxRuleId'] ?? ''));
+        $accountDatevId = trim((string) ($candidate['targetAccountDatevId'] ?? ''));
+        if (
+            preg_match('/^[1-9]\d*$/', $taxRuleId) === 1
+            && preg_match('/^[1-9]\d*$/', $accountDatevId) === 1
+        ) {
+            return [
+                'taxRuleId' => $taxRuleId,
+                'accountDatevId' => $accountDatevId,
+            ];
+        }
+
+        $checkpoint = (string) ($item->checkpoint ?? 'voucher_write_requested');
+
+        return JobOutcome::ambiguous(
+            'Der begonnene Voucher-Job enthält keinen vollständigen eingefrorenen Steuer-/Kontovertrag. '
+                . 'Der Remote-Beleg darf nicht mit aktuellen Einstellungen neu interpretiert werden.',
+            $checkpoint !== '' ? $checkpoint : 'voucher_write_requested',
+            isset($item->sevdesk_id) ? (string) $item->sevdesk_id : null,
+            errorCode: 'voucher_verification_snapshot_missing',
+        );
+    }
+
     /** @param array<string,mixed> $candidate */
     private function allowsIncompleteMappingRecovery(object $item, array $candidate): bool
     {
@@ -2082,9 +2698,744 @@ final class ExportJobHandler
     }
 
     /** @param array<string,mixed> $candidate */
-    private function creditTreatmentConfirmed(array $candidate): bool
+    private function creditTreatmentConfirmed(array $candidate, object $item): bool
     {
-        return ($candidate['credit_treatment'] ?? null) === 'full_gross_voucher';
+        if (($candidate['credit_treatment'] ?? null) !== 'full_gross_voucher') {
+            return false;
+        }
+
+        $action = (string) ($item->action ?? '');
+        if (in_array($action, ['export_voucher', 'reconcile_voucher'], true)) {
+            return true;
+        }
+        if ($action !== 'export_document') {
+            return false;
+        }
+
+        return self::documentContextValue(
+            $candidate,
+            'targetExportMode',
+            'requestedExportMode',
+            (string) $this->config->get('export_mode', DocumentTargetResolver::MODE_VOUCHER_ONLY),
+        ) === DocumentTargetResolver::MODE_VOUCHER_ONLY;
+    }
+
+    /**
+     * @param list<string> $rawItemTypes
+     * @param array<string,mixed> $paymentStructure
+     */
+    private static function ordinaryVoucherCreditStructure(
+        array $rawItemTypes,
+        array $paymentStructure,
+        string $reasonCode,
+    ): bool {
+        $context = is_array($paymentStructure['context'] ?? null)
+            ? $paymentStructure['context']
+            : [];
+
+        return !in_array('invoice', $rawItemTypes, true)
+            && ($paymentStructure['code'] ?? null) === WhmcsPaymentStructureService::CREDIT_REQUIRES_REVIEW
+            && $reasonCode === 'mass_payment_parent_missing'
+            && array_key_exists('parentInvoiceId', $paymentStructure)
+            && $paymentStructure['parentInvoiceId'] === null
+            && ($context['referencingParentCount'] ?? null) === 0
+            && is_int($context['invoiceCreditMinor'] ?? null)
+            && $context['invoiceCreditMinor'] > 0;
+    }
+
+    /**
+     * Persist only a SHA-256 digest of the WHMCS invoice/contact contract. A
+     * resumed job after a possible write may never invent this snapshot.
+     *
+     * @param array<string,mixed> $candidate
+     * @param callable(string,array<string,scalar|null>):bool $checkpoint
+     */
+    private function freezeWhmcsInvoiceContract(
+        string $currentFingerprint,
+        array $candidate,
+        object $item,
+        callable $checkpoint,
+    ): ?JobOutcome {
+        $currentFingerprint = strtolower(trim($currentFingerprint));
+        $storedFingerprint = strtolower(trim((string) (
+            $candidate['whmcsInvoiceContractFingerprint']
+            ?? ''
+        )));
+        $checkpointName = (string) ($item->checkpoint ?? '');
+        $risky = JobRepository::isRiskyCheckpoint($checkpointName);
+        if (preg_match('/^[a-f0-9]{64}$/', $currentFingerprint) !== 1) {
+            return $this->whmcsInvoiceContractChangedOutcome($item);
+        }
+
+        if ($storedFingerprint === '') {
+            if ($risky) {
+                return JobOutcome::ambiguous(
+                    'Nach einem möglichen Remote-Write fehlt der eingefrorene WHMCS-Rechnungsvertrag. '
+                        . 'Der Job darf nicht mit aktuellen Rechnungs- oder Kundendaten fortgesetzt werden.',
+                    $checkpointName,
+                    isset($item->sevdesk_id) ? (string) $item->sevdesk_id : null,
+                    errorCode: 'whmcs_invoice_contract_snapshot_missing_after_write',
+                );
+            }
+            if (
+                !$checkpoint(
+                    $checkpointName !== '' ? $checkpointName : 'queued',
+                    ['whmcsInvoiceContractFingerprint' => $currentFingerprint],
+                )
+            ) {
+                return JobOutcome::permanentFailure(
+                    'Der unveränderliche WHMCS-Rechnungsvertrag konnte vor dem ersten Remote-Write '
+                        . 'nicht gespeichert werden.',
+                    errorCode: 'whmcs_invoice_contract_snapshot_persist_failed',
+                );
+            }
+
+            return null;
+        }
+
+        if (
+            preg_match('/^[a-f0-9]{64}$/', $storedFingerprint) !== 1
+            || !hash_equals($storedFingerprint, $currentFingerprint)
+        ) {
+            return $this->whmcsInvoiceContractChangedOutcome($item);
+        }
+
+        return null;
+    }
+
+    private function whmcsInvoiceContractChangedOutcome(object $item): JobOutcome
+    {
+        $checkpoint = (string) ($item->checkpoint ?? '');
+        if (JobRepository::isRiskyCheckpoint($checkpoint)) {
+            return JobOutcome::ambiguous(
+                'Der eingefrorene WHMCS-Rechnungs- oder Kundenvertrag änderte sich nach einem '
+                    . 'möglichen Remote-Write. Der Remote-Zustand muss read-only abgeglichen werden.',
+                $checkpoint,
+                isset($item->sevdesk_id) ? (string) $item->sevdesk_id : null,
+                errorCode: 'whmcs_invoice_contract_changed_after_write',
+            );
+        }
+
+        return JobOutcome::permanentFailure(
+            'Rechnungs-, Positions- oder steuerrelevante Kundendaten änderten sich während des Exports. '
+                . 'Es wurde kein Buchhaltungsbeleg geschrieben.',
+            errorCode: 'whmcs_invoice_contract_changed',
+        );
+    }
+
+    /**
+     * Freeze the explicit WHMCS-to-sevdesk contact link separately from the
+     * PII-light invoice fingerprint. An empty link may advance only to the
+     * exact ID resolved and checkpointed by this workflow.
+     *
+     * @param array<string,mixed> $candidate
+     * @param callable(string,array<string,scalar|null>):bool $checkpoint
+     */
+    private function freezeWhmcsContactLink(
+        ?string $currentContactId,
+        array &$candidate,
+        object $item,
+        callable $checkpoint,
+    ): ?JobOutcome {
+        $currentContactId = self::normaliseContactId($currentContactId);
+        if ($currentContactId === false) {
+            return $this->whmcsContactLinkChangedOutcome($item);
+        }
+
+        $checkpointName = (string) ($item->checkpoint ?? '');
+        $risky = JobRepository::isRiskyCheckpoint($checkpointName);
+        $hasSnapshot = array_key_exists('whmcsContactLinkId', $candidate);
+        $resolvedContactId = self::candidateRemoteContactId($candidate);
+
+        if (!$hasSnapshot) {
+            // A legacy contact_linked job already froze its recipient in
+            // remoteContactId. Never replace that recipient with today's
+            // custom-field value, even though contact_linked itself is a safe
+            // continuation checkpoint.
+            if ($resolvedContactId !== null) {
+                if (
+                    $currentContactId === null
+                    && ($risky || $checkpointName === 'contact_linked')
+                ) {
+                    // Read-only document recovery keeps using remoteContactId.
+                    // A contact_linked continuation first searches and restores
+                    // the explicit local link before any document write.
+                    return null;
+                }
+                if (
+                    $currentContactId !== null
+                    && hash_equals($resolvedContactId, $currentContactId)
+                ) {
+                    if (!$risky) {
+                        if (
+                            !$checkpoint(
+                                $checkpointName !== '' ? $checkpointName : 'queued',
+                                ['whmcsContactLinkId' => $resolvedContactId],
+                            )
+                        ) {
+                            return JobOutcome::permanentFailure(
+                                'Der WHMCS-Kontaktlink konnte vor dem ersten Beleg-Write nicht gespeichert werden.',
+                                errorCode: 'whmcs_contact_link_snapshot_persist_failed',
+                            );
+                        }
+                        $candidate['whmcsContactLinkId'] = $resolvedContactId;
+                    }
+
+                    return null;
+                }
+
+                return $this->whmcsContactLinkChangedOutcome($item);
+            }
+
+            if ($risky) {
+                // Preserve the more specific document-recovery outcome. A
+                // later contact-dependent continuation still requires
+                // remoteContactId and cannot reinterpret the recipient.
+                if ($checkpointName !== 'contact_write_requested') {
+                    return null;
+                }
+                if ($currentContactId !== null) {
+                    return JobOutcome::ambiguous(
+                        'Nach einem möglicherweise ausgeführten Kontakt-Write fehlt die eingefrorene '
+                            . 'Empfänger-ID, während das WHMCS-Kundenfeld bereits belegt ist.',
+                        $checkpointName,
+                        isset($item->sevdesk_id) ? (string) $item->sevdesk_id : null,
+                        errorCode: 'whmcs_contact_link_snapshot_missing_after_write',
+                    );
+                }
+            }
+
+            if (
+                !$checkpoint(
+                    $checkpointName !== '' ? $checkpointName : 'queued',
+                    ['whmcsContactLinkId' => $currentContactId],
+                )
+            ) {
+                return JobOutcome::permanentFailure(
+                    'Der WHMCS-Kontaktlink konnte vor dem ersten Remote-Write nicht gespeichert werden.',
+                    errorCode: 'whmcs_contact_link_snapshot_persist_failed',
+                );
+            }
+            $candidate['whmcsContactLinkId'] = $currentContactId;
+
+            return null;
+        }
+
+        $storedContactId = self::normaliseContactId($candidate['whmcsContactLinkId']);
+        if ($storedContactId === false) {
+            return $this->whmcsContactLinkChangedOutcome($item);
+        }
+        if ($storedContactId === $currentContactId) {
+            return null;
+        }
+        if (
+            $storedContactId === null
+            && $resolvedContactId !== null
+            && $currentContactId !== null
+            && hash_equals($resolvedContactId, $currentContactId)
+        ) {
+            return null;
+        }
+
+        return $this->whmcsContactLinkChangedOutcome($item);
+    }
+
+    private function whmcsContactLinkChangedOutcome(object $item): JobOutcome
+    {
+        $checkpoint = (string) ($item->checkpoint ?? '');
+        if (JobRepository::isRiskyCheckpoint($checkpoint)) {
+            return JobOutcome::ambiguous(
+                'Die im WHMCS-Kundenfeld hinterlegte sevdesk-Kontakt-ID änderte sich nach einem '
+                    . 'möglichen Remote-Write. Die vorhandene Empfängerzuordnung muss read-only geprüft werden.',
+                $checkpoint,
+                isset($item->sevdesk_id) ? (string) $item->sevdesk_id : null,
+                errorCode: 'whmcs_contact_link_changed_after_write',
+            );
+        }
+
+        return JobOutcome::permanentFailure(
+            'Die im WHMCS-Kundenfeld hinterlegte sevdesk-Kontakt-ID änderte sich während des Exports. '
+                . 'Es wurde kein Buchhaltungsbeleg geschrieben.',
+            errorCode: 'whmcs_contact_link_changed',
+        );
+    }
+
+    /** @param array<string,mixed> $candidate */
+    private function whmcsInvoiceContractGuard(int $invoiceId, array $candidate): Closure
+    {
+        $frozenContract = trim((string) ($candidate['whmcsInvoiceContractFingerprint'] ?? ''));
+
+        return function (?string $resolvedContactId = null) use (
+            $invoiceId,
+            $frozenContract,
+            $candidate,
+        ): bool {
+            if (preg_match('/^[a-f0-9]{64}$/', $frozenContract) !== 1) {
+                return false;
+            }
+            try {
+                $freshContract = $this->whmcs->invoiceExportContract($invoiceId);
+            } catch (Throwable) {
+                return false;
+            }
+            $freshFingerprint = trim((string) ($freshContract['fingerprint'] ?? ''));
+
+            return preg_match('/^[a-f0-9]{64}$/', $freshFingerprint) === 1
+                && hash_equals($frozenContract, $freshFingerprint)
+                && self::contactLinkMatchesSnapshot(
+                    $freshContract['configuredContactId'] ?? null,
+                    $candidate,
+                    $resolvedContactId,
+                );
+        };
+    }
+
+    /** @param array<string,mixed> $candidate */
+    private static function contactLinkMatchesSnapshot(
+        mixed $currentContactId,
+        array $candidate,
+        ?string $resolvedContactId,
+    ): bool {
+        $currentContactId = self::normaliseContactId($currentContactId);
+        $resolvedContactId = self::normaliseContactId($resolvedContactId);
+        if ($currentContactId === false || $resolvedContactId === false) {
+            return false;
+        }
+
+        $hasSnapshot = array_key_exists('whmcsContactLinkId', $candidate);
+        $storedContactId = $hasSnapshot
+            ? self::normaliseContactId($candidate['whmcsContactLinkId'])
+            : null;
+        if ($storedContactId === false) {
+            return false;
+        }
+        $checkpointedContactId = self::candidateRemoteContactId($candidate);
+
+        if ($resolvedContactId !== null) {
+            if ($currentContactId === null || !hash_equals($resolvedContactId, $currentContactId)) {
+                return false;
+            }
+
+            return ($hasSnapshot && $storedContactId === null)
+                || ($storedContactId !== null && hash_equals($storedContactId, $currentContactId))
+                || (!$hasSnapshot
+                    && $checkpointedContactId !== null
+                    && hash_equals($checkpointedContactId, $currentContactId));
+        }
+
+        if ($hasSnapshot && $storedContactId === $currentContactId) {
+            return true;
+        }
+
+        return $storedContactId === null
+            && $checkpointedContactId !== null
+            && $currentContactId !== null
+            && hash_equals($checkpointedContactId, $currentContactId);
+    }
+
+    private static function normaliseContactId(mixed $contactId): string|null|false
+    {
+        $contactId = trim((string) $contactId);
+        if ($contactId === '') {
+            return null;
+        }
+
+        return preg_match('/^[1-9]\d*$/', $contactId) === 1 ? $contactId : false;
+    }
+
+    /** @param array<string,mixed> $candidate */
+    private static function candidateRemoteContactId(array $candidate): ?string
+    {
+        $contactId = self::normaliseContactId($candidate['remoteContactId'] ?? null);
+
+        return is_string($contactId) ? $contactId : null;
+    }
+
+    /**
+     * Contact resolution, PDF handling and E-Invoice checks may take long
+     * enough for either the WHMCS invoice contract or a proven Pay All graph to
+     * change. Every Create path therefore rereads both immediately before its
+     * write-requested checkpoint.
+     *
+     * @param array<string, mixed>|null $initial
+     * @param array<string, mixed> $candidate
+     * @return Closure(): bool
+     */
+    private function invoicePreWriteGuard(
+        int $invoiceId,
+        InvoiceSnapshot $invoice,
+        ?array $initial,
+        array $candidate,
+        object $item,
+        string $resolvedContactId,
+    ): Closure {
+        $contractGuard = $this->whmcsInvoiceContractGuard($invoiceId, $candidate);
+
+        return function () use (
+            $invoiceId,
+            $invoice,
+            $initial,
+            $candidate,
+            $item,
+            $contractGuard,
+            $resolvedContactId,
+        ): bool {
+            if (!$contractGuard($resolvedContactId)) {
+                return false;
+            }
+
+            return $initial === null
+                || $this->revalidateExactMassPaymentTarget(
+                    $invoiceId,
+                    $invoice,
+                    $initial,
+                    $candidate,
+                    $item,
+                ) === null;
+        };
+    }
+
+    /**
+     * The first classification protects the job snapshot. This second,
+     * uncached read closes the gap between loading the WHMCS invoice and
+     * freezing or resuming its document target.
+     *
+     * @param array<string,mixed> $initial
+     * @param array<string,mixed> $candidate
+     */
+    private function revalidateExactMassPaymentTarget(
+        int $invoiceId,
+        InvoiceSnapshot $invoice,
+        array $initial,
+        array $candidate,
+        object $item,
+    ): ?JobOutcome {
+        if ($this->paymentStructure === null) {
+            return $this->massPaymentStructureChangedOutcome($item);
+        }
+
+        // Always classify from the current WHMCS tables. Hook-local
+        // memoization must never satisfy this worker-side pre-write check.
+        $fresh = $this->paymentStructure->classify($invoiceId);
+        if (
+            !self::exactMassPaymentStructureMatchesSnapshot(
+                $invoiceId,
+                $invoice,
+                $initial,
+                $fresh,
+                $candidate,
+            )
+        ) {
+            return $this->massPaymentStructureChangedOutcome($item);
+        }
+
+        return null;
+    }
+
+    /**
+     * @param array<string,mixed> $initial
+     * @param array<string,mixed> $fresh
+     * @param array<string,mixed> $candidate
+     */
+    private static function exactMassPaymentStructureMatchesSnapshot(
+        int $invoiceId,
+        InvoiceSnapshot $invoice,
+        array $initial,
+        array $fresh,
+        array $candidate,
+    ): bool {
+        $initialFingerprint = (string) ($initial['fingerprint'] ?? '');
+        $freshFingerprint = (string) ($fresh['fingerprint'] ?? '');
+        $candidateFingerprint = trim((string) ($candidate['massPaymentFingerprint'] ?? ''));
+        $initialParentId = (int) ($initial['parentInvoiceId'] ?? 0);
+        $freshParentId = (int) ($fresh['parentInvoiceId'] ?? 0);
+        $candidateParentId = (int) ($candidate['massPaymentParentInvoiceId'] ?? 0);
+        if (
+            ($initial['code'] ?? null) !== WhmcsPaymentStructureService::EXACT_MASS_PAYMENT_TARGET
+            || ($fresh['code'] ?? null) !== WhmcsPaymentStructureService::EXACT_MASS_PAYMENT_TARGET
+            || ($initial['invoiceId'] ?? null) !== $invoiceId
+            || ($fresh['invoiceId'] ?? null) !== $invoiceId
+            || $invoice->invoiceId !== $invoiceId
+            || ($initial['revenueDocument'] ?? null) !== true
+            || ($fresh['revenueDocument'] ?? null) !== true
+            || ($initial['requiresReview'] ?? null) !== false
+            || ($fresh['requiresReview'] ?? null) !== false
+            || preg_match('/^[a-f0-9]{64}$/', $initialFingerprint) !== 1
+            || preg_match('/^[a-f0-9]{64}$/', $freshFingerprint) !== 1
+            || preg_match('/^[a-f0-9]{64}$/', $candidateFingerprint) !== 1
+            || !hash_equals($initialFingerprint, $freshFingerprint)
+            || !hash_equals($initialFingerprint, $candidateFingerprint)
+            || $initialParentId < 1
+            || $freshParentId !== $initialParentId
+            || $candidateParentId !== $initialParentId
+            || !self::truthy($candidate['massPaymentExact'] ?? false)
+        ) {
+            return false;
+        }
+
+        $context = is_array($fresh['context'] ?? null) ? $fresh['context'] : [];
+        foreach (
+            [
+                'invoiceId',
+                'parentInvoiceId',
+                'invoiceTotalMinor',
+                'invoiceCreditMinor',
+                'invoiceDocumentGrossMinor',
+                'invoiceItemMinor',
+                'targetDocumentGrossMinor',
+                'targetDirectCashMinor',
+                'targetPaidMinor',
+                'linkAmountMinor',
+                'parentTotalMinor',
+                'parentPaidMinor',
+                'linkedInvoiceCount',
+                'referencingParentCount',
+            ] as $field
+        ) {
+            if (!is_int($context[$field] ?? null)) {
+                return false;
+            }
+        }
+
+        $snapshotItemMinor = 0;
+        foreach ($invoice->lineItems as $lineItem) {
+            $snapshotItemMinor += Decimal::toMinorUnits($lineItem->amount);
+        }
+        foreach ($invoice->discounts as $discount) {
+            $snapshotItemMinor -= $discount->amountMinorUnits();
+        }
+
+        $invoiceTotalMinor = $context['invoiceTotalMinor'];
+        $invoiceCreditMinor = $context['invoiceCreditMinor'];
+        $invoiceDocumentGrossMinor = $context['invoiceDocumentGrossMinor'];
+        $snapshotDirectCashMinor = $invoice->directCashMinorUnits();
+
+        return $context['invoiceId'] === $invoiceId
+            && $context['parentInvoiceId'] === $initialParentId
+            && $invoiceCreditMinor === $invoice->appliedCreditMinorUnits()
+            && $invoiceCreditMinor > 0
+            && $context['linkAmountMinor'] === $invoiceCreditMinor
+            && $context['targetDocumentGrossMinor'] === $invoice->totalMinorUnits()
+            && $invoiceDocumentGrossMinor === $invoice->totalMinorUnits()
+            && $invoiceTotalMinor === $snapshotDirectCashMinor
+            && $context['targetDirectCashMinor'] === $invoiceTotalMinor
+            && $context['targetDirectCashMinor'] >= 0
+            && $context['targetPaidMinor'] === $context['targetDirectCashMinor']
+            && $context['invoiceItemMinor'] === $snapshotItemMinor
+            && $invoice->calculatedDocumentGrossMinorUnits() === $invoice->totalMinorUnits()
+            && $context['parentTotalMinor'] > 0
+            && $context['parentPaidMinor'] === $context['parentTotalMinor']
+            && $context['linkedInvoiceCount'] > 0
+            && $context['referencingParentCount'] > 0
+            && ($context['targetHasRefund'] ?? null) === false;
+    }
+
+    private function massPaymentStructureChangedOutcome(object $item): JobOutcome
+    {
+        $checkpoint = (string) ($item->checkpoint ?? '');
+        if (JobRepository::isRiskyCheckpoint($checkpoint)) {
+            return JobOutcome::ambiguous(
+                'Die bestätigte WHMCS-Sammelzahlung hat sich nach einem möglichen Write verändert. '
+                    . 'Der bestehende Remote-Zustand darf nur noch read-only abgeglichen werden.',
+                $checkpoint,
+                isset($item->sevdesk_id) ? (string) $item->sevdesk_id : null,
+                errorCode: 'mass_payment_structure_changed_after_write',
+            );
+        }
+
+        return JobOutcome::permanentFailure(
+            'Die WHMCS-Sammelzahlung änderte sich zwischen Vorprüfung und Dokumententscheidung. '
+                . 'Es wurde kein Remote-Write gestartet.',
+            errorCode: 'mass_payment_structure_changed',
+        );
+    }
+
+    /** @param array<string,mixed> $candidate */
+    private function invoiceDiscountTargetPreflight(
+        InvoiceSnapshot $invoice,
+        TaxDecision $tax,
+        DocumentTargetDecision $target,
+        array $candidate,
+        object $item,
+    ): ?JobOutcome {
+        if ($invoice->discounts === []) {
+            return null;
+        }
+        if (
+            $target->documentType !== DocumentTargetDecision::DOCUMENT_INVOICE
+            || count($invoice->discounts) !== 1
+        ) {
+            return $this->discountPreflightFailure(
+                $item,
+                'Der bestätigte Rabattpfad unterstützt genau einen strukturellen PromoHosting-Rabatt '
+                    . 'auf einer sevdesk-Invoice.',
+                'invoice_discount_structure_not_supported',
+            );
+        }
+        if ($tax->taxRuleId !== '11') {
+            return $this->discountPreflightFailure(
+                $item,
+                'Feste PromoHosting-Rabatte sind ausschließlich für bestätigte '
+                    . 'Kleinunternehmer-Rechnungen mit Rule 11 freigegeben.',
+                'invoice_discount_tax_rule_not_supported',
+            );
+        }
+        foreach ($invoice->lineItems as $lineItem) {
+            if (Decimal::toMinorUnits($lineItem->taxRate) !== 0) {
+                return $this->discountPreflightFailure(
+                    $item,
+                    'Der bestätigte PromoHosting-Rabattpfad setzt durchgehend 0 % Steuer voraus.',
+                    'invoice_discount_tax_rate_not_supported',
+                );
+            }
+        }
+        if (Decimal::toMinorUnits($invoice->discounts[0]->taxRate) !== 0) {
+            return $this->discountPreflightFailure(
+                $item,
+                'Der bestätigte PromoHosting-Rabattpfad setzt durchgehend 0 % Steuer voraus.',
+                'invoice_discount_tax_rate_not_supported',
+            );
+        }
+
+        if (self::truthy($candidate['targetIsEInvoice'] ?? false)) {
+            return $this->discountPreflightFailure(
+                $item,
+                'Eine native E-Rechnung mit WHMCS-Rabatt ist in diesem Release nicht freigegeben.',
+                'e_invoice_discount_not_supported',
+            );
+        }
+        if (
+            array_key_exists('targetIsEInvoice', $candidate)
+            || self::truthy($candidate['historicalBackfill'] ?? false)
+        ) {
+            return null;
+        }
+
+        $requestedMode = trim((string) ($candidate['targetEInvoiceMode']
+            ?? $candidate['requestedEInvoiceMode']
+            ?? EInvoiceEligibilityService::MODE_OFF));
+        if ($requestedMode === EInvoiceEligibilityService::MODE_OFF) {
+            return null;
+        }
+        if ($requestedMode !== EInvoiceEligibilityService::MODE_ZUGFERD_DOMESTIC_B2B) {
+            return $this->discountPreflightFailure(
+                $item,
+                'Das eingefrorene E-Rechnungsprofil ist ungültig.',
+                'e_invoice_context_invalid',
+            );
+        }
+
+        $activeFrom = DateTimeImmutable::createFromFormat(
+            '!Y-m-d',
+            trim((string) ($candidate['requestedEInvoiceActiveFrom'] ?? '')),
+        );
+        $dateErrors = DateTimeImmutable::getLastErrors();
+        if (
+            !$activeFrom instanceof DateTimeImmutable
+            || ($dateErrors !== false && ($dateErrors['warning_count'] > 0 || $dateErrors['error_count'] > 0))
+        ) {
+            return $this->discountPreflightFailure(
+                $item,
+                'Das eingefrorene Aktivierungsdatum für E-Rechnungen ist ungültig.',
+                'e_invoice_context_invalid',
+            );
+        }
+        if (
+            $invoice->invoiceDate >= $activeFrom
+            && $this->whmcs->eInvoiceOptedIn($invoice->clientId)
+        ) {
+            return $this->discountPreflightFailure(
+                $item,
+                'Der Kunde ist für eine native E-Rechnung ausgewählt; Rechnungen mit '
+                    . 'WHMCS-Rabatt werden dafür nicht still auf eine normale PDF-Invoice zurückgestuft.',
+                'e_invoice_discount_not_supported',
+            );
+        }
+
+        return null;
+    }
+
+    /** @param array<string,mixed> $candidate */
+    private function invoiceDiscountSnapshotFailure(
+        InvoiceSnapshot $invoice,
+        array $candidate,
+        object $item,
+    ): ?JobOutcome {
+        $currentFingerprint = $invoice->discountFingerprint();
+        $hasStoredFingerprint = array_key_exists('invoiceDiscountFingerprint', $candidate);
+        $checkpoint = (string) ($item->checkpoint ?? '');
+        $riskyCheckpoint = JobRepository::isRiskyCheckpoint($checkpoint);
+
+        if (!$hasStoredFingerprint) {
+            if ($currentFingerprint === null || !$riskyCheckpoint) {
+                return null;
+            }
+
+            return JobOutcome::ambiguous(
+                'Nach einem möglichen Invoice-Write fehlt der eingefrorene Rabattnachweis. '
+                    . 'Der bestehende sevdesk-Beleg darf nur noch read-only abgeglichen werden.',
+                $checkpoint,
+                isset($item->sevdesk_id) ? (string) $item->sevdesk_id : null,
+                errorCode: 'invoice_discount_snapshot_missing_after_write',
+            );
+        }
+
+        $storedFingerprint = $candidate['invoiceDiscountFingerprint'];
+        $storedCount = $candidate['invoiceDiscountCount'] ?? null;
+        $storedFingerprintValid = $storedFingerprint === null
+            || (
+                is_string($storedFingerprint)
+                && preg_match('/^[a-f0-9]{64}$/', $storedFingerprint) === 1
+            );
+        $matches = $storedFingerprintValid
+            && is_int($storedCount)
+            && $storedCount === count($invoice->discounts)
+            && (
+                ($storedFingerprint === null && $currentFingerprint === null)
+                || (
+                    is_string($storedFingerprint)
+                    && is_string($currentFingerprint)
+                    && hash_equals($storedFingerprint, $currentFingerprint)
+                )
+            );
+        if ($matches) {
+            return null;
+        }
+
+        if ($riskyCheckpoint) {
+            return JobOutcome::ambiguous(
+                'Die WHMCS-Rabattstruktur unterscheidet sich vom eingefrorenen Zustand vor dem '
+                    . 'möglichen Invoice-Write. Ein weiterer Write ist gesperrt.',
+                $checkpoint,
+                isset($item->sevdesk_id) ? (string) $item->sevdesk_id : null,
+                errorCode: 'invoice_discount_changed_after_write',
+            );
+        }
+
+        return JobOutcome::permanentFailure(
+            'Die WHMCS-Rabattstruktur unterscheidet sich vom gespeicherten Exportkontext.',
+            errorCode: 'invoice_discount_changed',
+        );
+    }
+
+    private function discountPreflightFailure(
+        object $item,
+        string $message,
+        string $errorCode,
+    ): JobOutcome {
+        $checkpoint = (string) ($item->checkpoint ?? '');
+        if (JobRepository::isRiskyCheckpoint($checkpoint)) {
+            return JobOutcome::ambiguous(
+                'Die WHMCS-Rabattstruktur hat sich nach einem möglichen sevdesk-Write geändert. '
+                    . 'Der bestehende Remote-Beleg darf nur noch read-only abgeglichen werden.',
+                $checkpoint,
+                isset($item->sevdesk_id) ? (string) $item->sevdesk_id : null,
+                errorCode: 'invoice_discount_changed_after_write',
+                candidate: ['detectedDiscountError' => mb_substr($errorCode, 0, 128)],
+            );
+        }
+
+        return JobOutcome::permanentFailure($message, errorCode: $errorCode);
     }
 
     /** @param array<string,mixed> $candidate */
@@ -2122,6 +3473,31 @@ final class ExportJobHandler
         return preg_match('/^[1-9]\d*$/', $remoteId) === 1 ? $remoteId : null;
     }
 
+    /**
+     * @param array<string,mixed> $invoice
+     * @return list<string>
+     */
+    private static function rawInvoiceItemTypes(array $invoice): array
+    {
+        $items = $invoice['items']['item'] ?? [];
+        if (is_array($items) && (isset($items['id']) || isset($items['type']))) {
+            $items = [$items];
+        }
+
+        $types = [];
+        foreach (is_array($items) ? $items : [] as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+            $type = strtolower(trim((string) ($item['type'] ?? '')));
+            if ($type !== '') {
+                $types[$type] = true;
+            }
+        }
+
+        return array_keys($types);
+    }
+
     /** @return array<string,mixed> */
     private static function candidate(object $item): array
     {
@@ -2134,6 +3510,29 @@ final class ExportJobHandler
         return is_array($candidate) ? $candidate : [];
     }
 
+    private static function unexpectedLocalPreflightFailure(Throwable $error): JobOutcome
+    {
+        $reference = substr(
+            hash('sha256', get_class($error) . '|' . microtime(true)),
+            0,
+            12,
+        );
+        if (function_exists('logActivity')) {
+            try {
+                logActivity(
+                    'sevdesk export preflight failed [' . $reference . ']: ' . get_class($error),
+                );
+            } catch (Throwable) {
+                // A sanitized worker outcome must not depend on logging.
+            }
+        }
+
+        return JobOutcome::permanentFailure(
+            self::messageFor('local_preflight_failed', '') . ' Referenz: ' . $reference,
+            errorCode: 'local_preflight_failed',
+        );
+    }
+
     private static function messageFor(string $code, string $fallback): string
     {
         return [
@@ -2142,6 +3541,8 @@ final class ExportJobHandler
             'oss_requires_invoice_mode' => 'Rule 19 benötigt invoice_for_oss oder invoice_only.',
             'oss_profile_not_confirmed' => 'Rule 19 benötigt die ausdrückliche Bestätigung ausschließlich digitaler Leistungen.',
             'invoice_canary_not_confirmed' => 'Der sevDesk-Testmandanten-Canary ist noch nicht ausdrücklich bestätigt; Invoice-Schreibzugriffe bleiben gesperrt.',
+            'small_business_invoice_canary_not_confirmed' => 'Rule-11-Invoices bleiben gesperrt, bis ihr eigener sevDesk-Mandanten-Canary bestätigt ist.',
+            'invoice_rule11_tenant_scope_unsupported' => 'Der aktuelle sevDesk-Mandant bietet in Receipt Guidance kein REVENUE-Konto für Rule 11 mit 0 % an.',
             'invoice_requires_payment' => 'Invoice-Ziele werden erst nach vollständiger WHMCS-Zahlung exportiert.',
             'invoice_number_not_final' => 'Für den Invoice-Export fehlt eine finale WHMCS-Rechnungsnummer.',
             'contact_creation_not_confirmed' => 'Die Neuanlage eines sevdesk-Kontakts ist nicht freigegeben. Die exakte Kundennummernsuche blieb ohne Treffer.',
@@ -2161,7 +3562,8 @@ final class ExportJobHandler
             'invoice_reconciliation_no_match' => 'Es wurde keine exakt passende sevdesk-Invoice gefunden. Bitte manuell prüfen.',
             'invoice_reconciliation_multiple_matches' => 'Es wurden mehrere exakt passende sevdesk-Invoices gefunden. Bitte manuell prüfen.',
             'invalid_invoice_pdf' => 'WHMCS hat kein gültiges Rechnungs-PDF erzeugt.',
-            'local_preflight_failed' => 'Die lokale Vorprüfung ist fehlgeschlagen: ' . mb_substr($fallback, 0, 500),
+            'local_preflight_failed' => 'Die lokale Vorprüfung ist aufgrund eines internen Fehlers abgebrochen. '
+                . 'Es wurde kein Remote-Write gestartet.',
         ][$code] ?? $fallback;
     }
 

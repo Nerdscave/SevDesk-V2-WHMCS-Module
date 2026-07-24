@@ -1,0 +1,12 @@
+{
+  "module": "sevdesk",
+  "contractVersion": 1,
+  "theme": "twenty-one",
+  "contract": [
+    "authority",
+    "state",
+    "invoiceNumber",
+    "downloadUrl"
+  ],
+  "partial": "sevdesk-invoice-authority.tpl"
+}

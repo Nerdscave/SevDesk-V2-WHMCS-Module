@@ -382,8 +382,15 @@ final class LegacyMappingTypeServiceTest extends TestCase
                 string $remoteId,
                 string $type,
                 string $documentNumber,
+                string $documentAuthority,
             ) use (&$persisted): void {
-                $persisted = compact('invoiceId', 'remoteId', 'type', 'documentNumber');
+                $persisted = compact(
+                    'invoiceId',
+                    'remoteId',
+                    'type',
+                    'documentNumber',
+                    'documentAuthority',
+                );
             },
         );
 
@@ -391,7 +398,7 @@ final class LegacyMappingTypeServiceTest extends TestCase
         self::assertSame('suggested', $initial['status']);
         self::assertSame([], $persisted);
 
-        $result = $service->confirm(42, 'INV-42', '88', 'invoice');
+        $result = $service->confirm(42, 'INV-42', '88', 'invoice', 'whmcs');
 
         self::assertSame('confirmed', $result['status']);
         self::assertSame('legacy_mapping_type_confirmed', $result['code']);
@@ -400,6 +407,7 @@ final class LegacyMappingTypeServiceTest extends TestCase
             'remoteId' => '88',
             'type' => 'invoice',
             'documentNumber' => 'INV-42',
+            'documentAuthority' => 'whmcs',
         ], $persisted);
         self::assertCount(4, $history);
     }
@@ -418,12 +426,13 @@ final class LegacyMappingTypeServiceTest extends TestCase
                 string $remoteId,
                 string $type,
                 string $documentNumber,
+                string $documentAuthority,
             ) use (&$persistedNumber): void {
                 $persistedNumber = $documentNumber;
             },
         );
 
-        $result = $service->confirm(42, '', '88', 'invoice');
+        $result = $service->confirm(42, '', '88', 'invoice', 'whmcs');
 
         self::assertSame('confirmed', $result['status']);
         self::assertSame('42', $result['documentNumber']);
@@ -446,8 +455,15 @@ final class LegacyMappingTypeServiceTest extends TestCase
                 string $remoteId,
                 string $type,
                 string $documentNumber,
+                string $documentAuthority,
             ) use (&$persisted): void {
-                $persisted = compact('invoiceId', 'remoteId', 'type', 'documentNumber');
+                $persisted = compact(
+                    'invoiceId',
+                    'remoteId',
+                    'type',
+                    'documentNumber',
+                    'documentAuthority',
+                );
             },
         );
 
@@ -456,7 +472,7 @@ final class LegacyMappingTypeServiceTest extends TestCase
         self::assertFalse($inspection['context']['markerEvidence']);
         self::assertSame([], $persisted);
 
-        $result = $service->confirm(42, 'INV-42', '88', 'voucher');
+        $result = $service->confirm(42, 'INV-42', '88', 'voucher', 'whmcs');
 
         self::assertSame('confirmed', $result['status']);
         self::assertSame([
@@ -464,6 +480,7 @@ final class LegacyMappingTypeServiceTest extends TestCase
             'remoteId' => '88',
             'type' => 'voucher',
             'documentNumber' => 'INV-42',
+            'documentAuthority' => 'whmcs',
         ], $persisted);
         self::assertCount(4, $history);
     }
@@ -479,12 +496,72 @@ final class LegacyMappingTypeServiceTest extends TestCase
             },
         );
 
-        $result = $service->confirm(42, 'INV-42', '88', 'voucher');
+        $result = $service->confirm(42, 'INV-42', '88', 'voucher', 'whmcs');
 
         self::assertSame('blocked', $result['status']);
         self::assertSame('legacy_mapping_confirmation_changed', $result['code']);
         self::assertSame(0, $persistCalls);
         self::assertCount(2, $history);
+    }
+
+    public function testFinalInvoiceCanReceiveExplicitSevdeskAuthority(): void
+    {
+        foreach ([200, 750, 1000] as $remoteStatus) {
+            $persistedAuthority = null;
+            $service = new LegacyMappingTypeService(
+                $this->client([
+                    $this->notFound(),
+                    $this->invoiceResponse(status: $remoteStatus),
+                ], new ArrayObject()),
+                static function (
+                    int $invoiceId,
+                    string $remoteId,
+                    string $type,
+                    string $documentNumber,
+                    string $documentAuthority,
+                ) use (&$persistedAuthority): void {
+                    $persistedAuthority = $documentAuthority;
+                },
+            );
+
+            $result = $service->confirm(42, 'INV-42', '88', 'invoice', 'sevdesk');
+
+            self::assertSame('confirmed', $result['status']);
+            self::assertSame('sevdesk', $result['context']['documentAuthority']);
+            self::assertSame('sevdesk', $persistedAuthority);
+        }
+    }
+
+    public function testDraftInvoiceCannotReceiveSevdeskAuthority(): void
+    {
+        $persistCalls = 0;
+        $service = new LegacyMappingTypeService(
+            $this->client([
+                $this->notFound(),
+                $this->invoiceResponse(status: 100),
+            ], new ArrayObject()),
+            static function () use (&$persistCalls): void {
+                ++$persistCalls;
+            },
+        );
+
+        $result = $service->confirm(42, 'INV-42', '88', 'invoice', 'sevdesk');
+
+        self::assertSame('blocked', $result['status']);
+        self::assertSame('legacy_mapping_delivery_not_ready', $result['code']);
+        self::assertSame(0, $persistCalls);
+    }
+
+    public function testVoucherCannotReceiveSevdeskAuthority(): void
+    {
+        $result = (new LegacyMappingTypeService(
+            $this->client([], new ArrayObject()),
+            static function (): void {
+            },
+        ))->confirm(42, 'INV-42', '88', 'voucher', 'sevdesk');
+
+        self::assertSame('blocked', $result['status']);
+        self::assertSame('legacy_mapping_authority_invalid', $result['code']);
     }
 
     /**
@@ -525,6 +602,7 @@ final class LegacyMappingTypeServiceTest extends TestCase
     private function invoiceResponse(
         string $invoiceNumber = 'INV-42',
         string $marker = '[WHMCS-INVOICE:42]',
+        int $status = 100,
     ): Response {
         return new Response(200, [], json_encode([
             'objects' => [[
@@ -533,6 +611,7 @@ final class LegacyMappingTypeServiceTest extends TestCase
                 'invoiceType' => 'RE',
                 'invoiceNumber' => $invoiceNumber,
                 'customerInternalNote' => $marker,
+                'status' => $status,
             ]],
         ], JSON_THROW_ON_ERROR));
     }

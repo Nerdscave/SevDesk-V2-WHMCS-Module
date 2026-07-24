@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace WHMCS\Module\Addon\SevDesk;
 
+use DateTimeImmutable;
+use RuntimeException;
 use WHMCS\Database\Capsule;
 
 final class Config
@@ -32,6 +34,8 @@ final class Config
         'document_authority' => 'whmcs',
         'oss_profile' => 'blocked',
         'invoice_canary_confirmed' => '',
+        'small_business_invoice_canary_confirmed' => '',
+        'invoice_discount_canary_confirmed' => '',
         'invoice_sev_user_id' => '',
         'invoice_unity_id' => '',
         'e_invoice_mode' => 'off',
@@ -58,6 +62,7 @@ final class Config
         'third_country_confirmed' => '',
         'add_funds_confirmed' => '',
         'small_business_confirmed' => '',
+        'small_business_until' => '',
         'debug_logging' => '',
     ];
 
@@ -87,6 +92,44 @@ final class Config
         $value = $this->get($key);
 
         return is_numeric($value) ? (int) $value : $default;
+    }
+
+    /**
+     * Apply the operator-confirmed small-business profile to the invoice date.
+     *
+     * A blank cutoff intentionally preserves the legacy global setting. An
+     * invalid persisted cutoff must not silently select a different tax rule.
+     */
+    public function smallBusinessAppliesOn(DateTimeImmutable $invoiceDate): bool
+    {
+        if (!$this->bool('smallBusinessOwner')) {
+            return false;
+        }
+
+        $until = self::parseSmallBusinessUntil((string) $this->get('small_business_until', ''));
+
+        return $until === null || $invoiceDate->format('Y-m-d') <= $until->format('Y-m-d');
+    }
+
+    public static function parseSmallBusinessUntil(string $storedValue): ?DateTimeImmutable
+    {
+        $storedValue = trim($storedValue);
+        if ($storedValue === '') {
+            return null;
+        }
+
+        $date = DateTimeImmutable::createFromFormat('!d-m-Y', $storedValue);
+        if (
+            !$date instanceof DateTimeImmutable
+            || $date->format('d-m-Y') !== $storedValue
+            || DateTimeImmutable::getLastErrors() !== false
+        ) {
+            throw new RuntimeException(
+                'Der gespeicherte Kleinunternehmer-Stichtag ist ungültig. Bitte die Einrichtung prüfen.',
+            );
+        }
+
+        return $date;
     }
 
     public function set(string $key, string|int|bool|null $value): void

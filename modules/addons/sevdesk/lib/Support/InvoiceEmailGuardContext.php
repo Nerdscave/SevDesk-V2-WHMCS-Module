@@ -15,6 +15,9 @@ final class InvoiceEmailGuardContext
     /** @var array<int, true> */
     private static array $invoiceIds = [];
 
+    /** @var array<int, true> */
+    private static array $confirmedWhmcsAuthority = [];
+
     /** Returns false when the same invoice was already registered. */
     public static function register(int $invoiceId): bool
     {
@@ -26,6 +29,7 @@ final class InvoiceEmailGuardContext
             return false;
         }
 
+        unset(self::$confirmedWhmcsAuthority[$invoiceId]);
         self::$invoiceIds[$invoiceId] = true;
 
         return true;
@@ -36,8 +40,24 @@ final class InvoiceEmailGuardContext
         return $invoiceId > 0 && isset(self::$invoiceIds[$invoiceId]);
     }
 
+    public static function confirmWhmcsAuthority(int $invoiceId): void
+    {
+        if ($invoiceId < 1) {
+            throw new \InvalidArgumentException('A valid WHMCS Invoice ID is required.');
+        }
+
+        unset(self::$invoiceIds[$invoiceId]);
+        self::$confirmedWhmcsAuthority[$invoiceId] = true;
+    }
+
+    public static function hasConfirmedWhmcsAuthority(int $invoiceId): bool
+    {
+        return $invoiceId > 0 && isset(self::$confirmedWhmcsAuthority[$invoiceId]);
+    }
+
     public static function discard(int $invoiceId): void
     {
         unset(self::$invoiceIds[$invoiceId]);
+        unset(self::$confirmedWhmcsAuthority[$invoiceId]);
     }
 }

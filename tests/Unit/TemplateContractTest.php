@@ -24,6 +24,7 @@ final class TemplateContractTest extends TestCase
         'e_invoice_active_from',
         'e_invoice_canary_confirmed',
         'e_invoice_profile_acknowledged',
+        'small_business_invoice_canary_confirmed',
         'import_after',
         'import_only_paid',
         'sync_enabled',
@@ -31,6 +32,7 @@ final class TemplateContractTest extends TestCase
         'eu_b2c_mode',
         'eu_b2c_acknowledged',
         'smallBusinessOwner',
+        'small_business_until',
         'accountingTypeGeneral',
         'taxRuleGeneral',
         'accountingTypeInterCommunityBusiness',
@@ -59,6 +61,7 @@ final class TemplateContractTest extends TestCase
         'transition_inventory_confirmed',
         'e_invoice_canary_confirmed',
         'e_invoice_profile_acknowledged',
+        'small_business_invoice_canary_confirmed',
     ];
 
     private const TAX_PROFILES = [
@@ -110,6 +113,15 @@ final class TemplateContractTest extends TestCase
             '~<(?:link|script)\b[^>]*(?:admin\.css|admin\.js)[^>]*>~i',
             $markup
         );
+    }
+
+    public function testZugferdSetupShowsTheAppliedCreditBoundary(): void
+    {
+        $setup = $this->template('setup.tpl');
+
+        self::assertStringContainsString('Rechnungen mit angewendetem WHMCS-Guthaben', $setup);
+        self::assertStringContainsString('eindeutig erkannte Sammelzahlungen', $setup);
+        self::assertStringContainsString('statt eine normale PDF-Invoice', $setup);
     }
 
     public function testModuleNavigationUsesAccessiblePageTabs(): void
@@ -174,6 +186,14 @@ final class TemplateContractTest extends TestCase
         self::assertStringContainsString('Das Speichern startet keinen Export.', $setup);
         self::assertStringContainsString('Das Modul legt kein Feld an.', $setup);
         self::assertStringContainsString('es gibt keinen stillen Rückfall auf eine normale PDF-Invoice', $setup);
+        self::assertStringContainsString(
+            'WHMCS 8.13 führt <code>EmailPreSend</code> aus, übernimmt daraus aber keine Binäranhänge',
+            $setup,
+        );
+        self::assertStringContainsString(
+            'das Modul fällt nicht still auf einen anderen Kanal zurück',
+            $setup,
+        );
     }
 
     public function testSetupNeverRendersAPartialStoredApiToken(): void

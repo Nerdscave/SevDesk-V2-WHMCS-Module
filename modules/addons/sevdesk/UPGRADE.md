@@ -1,6 +1,6 @@
 # Sicherer Ersatz eines bestehenden WHMCS-sevDesk-Moduls
 
-Diese Anleitung gehört zu `2.1.0-rc.4`. Der RC ist eine Vorabversion für Testinstallationen. Die technischen Invoice- und ZUGFeRD-Läufe unter WHMCS 8.13.4 sind weitgehend abgeschlossen. Beim ersten WHMCS-Postfachabgleich wurde allerdings die Core-PDF statt der sevDesk-PDF zugestellt. rc.4 korrigiert den CLI-Mailpfad; der Wiederholungsanhang muss noch im Postfach geprüft werden. Für echte Buchhaltungsdaten fehlen außerdem Invoice-`bookAmount`, die produktiven Voucher-Steuerfälle und die fachliche Abnahme.
+Diese Anleitung gehört zu `2.1.0-rc.5`. Der RC ist eine Vorabversion für Testinstallationen. Die technischen Invoice- und ZUGFeRD-Läufe unter WHMCS 8.13.4 sind weitgehend abgeschlossen. Zwei Postfachtests haben bestätigt, dass WHMCS 8.13 Binäranhänge aus `EmailPreSend` nicht übernimmt. Der Versandweg `whmcs_template` ist deshalb gesperrt; bei sevDesk-Dokumenthoheit steht der direkte sevDesk-Versand zur Verfügung. Für echte Buchhaltungsdaten fehlen außerdem Invoice-`bookAmount`, der rabattfreie Rule-11-Invoice-Canary, der anschließende Rabatt-Canary, die produktiven Voucher-Steuerfälle und die fachliche Abnahme.
 
 Diese Version verwendet weiterhin den Addon-Namen und Ordner `sevdesk` sowie
 die Mappingtabelle `mod_sevdesk`. Der Austausch erhält vorhandene Zuordnungen
@@ -76,12 +76,15 @@ und Remote-fähige Adminaktionen bleiben bis zur bestätigten Setup-Prüfung ges
    erfolgreicher read-only Mandantenprüfung wird `runtime_review_required`
    gelöscht. Erst danach einen kleinen Voucher-Canary ausführen und optional
    `sync_enabled` aktivieren. Invoice-Modi benötigen zusätzlich den
-   dokumentierten echten sevDesk-Testmandanten-Canary.
+   dokumentierten echten sevDesk-Testmandanten-Canary. Rule-11-Invoices benötigen
+   darüber hinaus einen eigenen Canary und einen aktuellen passenden
+   `REVENUE`-Scope aus `ReceiptGuidance`. Ein fester `PromoHosting`-Rabatt wird
+   erst danach über seinen zusätzlichen Rabatt-Canary freigegeben.
 
 ## Bestehende Zuordnungen
 
 - Bestehende Remote-IDs werden nicht geändert oder neu exportiert.
-- Voucher bleiben Voucher. Bereits erzeugte Invoices behalten ihre eingefrorene Dokumenthoheit. Ein späterer Modus- oder Hoheitswechsel gilt nur für danach entschiedene, noch ungemappte Rechnungen.
+- Voucher bleiben Voucher. Bereits erzeugte Invoices behalten ihre dauerhaft gespeicherte Dokumenthoheit. Alte Zeilen bleiben zunächst ohne Hoheitsannahme; bei der Legacy-Bestätigung ist WHMCS vorausgewählt, solange kein früherer RC bereits eine andere Entscheidung im Job eingefroren hat. Diese Entscheidung darf nicht überschrieben werden. sevDesk-Hoheit setzt außerdem eine bezahlte WHMCS-Rechnung und einen finalisierten Remote-Status 200, 750 oder 1000 voraus. Ein späterer Modus- oder Hoheitswechsel gilt nur für danach entschiedene, noch ungemappte Rechnungen.
 - `NULL`, leere oder nur aus Leerzeichen bestehende Remote-IDs sind
   unvollständige Recovery-Fälle.
 - Vollständige Altzuordnungen bleiben zunächst ohne Dokumenttyp. Voucher und
@@ -118,7 +121,7 @@ Alte fehlgeschlagene Voucher-Jobs werden nach einem Moduswechsel nicht normal wi
 
 ## sevDesk-Hoheit und ZUGFeRD später aktivieren
 
-sevDesk-Hoheit gilt nur mit `invoice_only`, WHMCS-Proforma, installiertem Theme-Adapter und bestätigtem Versandweg. Sie wird erst aktiviert, nachdem Paid-Mail, Pending-/Ready-Zustand und Kundendownload in WHMCS 8.13.4 geprüft wurden. Frühere Invoices wechseln dadurch nicht rückwirkend die Hoheit.
+sevDesk-Hoheit gilt nur mit `invoice_only`, WHMCS-Proforma, installiertem Theme-Adapter und dem direkten sevDesk-Versand. `whmcs_template` bleibt auf WHMCS 8.13.4 gesperrt. Die Hoheit wird erst aktiviert, nachdem Paid-Mail, Pending-/Ready-Zustand und Kundendownload geprüft wurden. Frühere Invoices wechseln dadurch nicht rückwirkend die Hoheit.
 
 ZUGFeRD braucht einen eigenen Testmandanten-Canary und bleibt bis dahin aus. Das Setup verlangt ein vorhandenes, nur für Administratoren sichtbares WHMCS-Kunden-Tickbox-Feld, eine sevDesk-PaymentMethod, Aktivierungsdatum, PHP XMLReader und die gesonderte Canary-Bestätigung. Ausgewählt werden nur neue deutsche Organisationskunden mit Rule 1 und gesetztem Kunden-Opt-in.
 

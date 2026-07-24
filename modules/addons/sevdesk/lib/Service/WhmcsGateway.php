@@ -7,12 +7,16 @@ namespace WHMCS\Module\Addon\SevDesk\Service;
 use Closure;
 use DateTimeImmutable;
 use RuntimeException;
+use Throwable;
 use WHMCS\Database\Capsule;
 use WHMCS\Module\Addon\SevDesk\Config;
 use WHMCS\Module\Addon\SevDesk\Database\Migrator;
 use WHMCS\Module\Addon\SevDesk\Domain\ContactData;
+use WHMCS\Module\Addon\SevDesk\Domain\Decimal;
+use WHMCS\Module\Addon\SevDesk\Domain\InvoiceItemNormalizationException;
 use WHMCS\Module\Addon\SevDesk\Domain\InvoiceSnapshot;
 use WHMCS\Module\Addon\SevDesk\Domain\LineItem;
+use WHMCS\Module\Addon\SevDesk\Domain\WhmcsInvoiceItem;
 
 /**
  * Narrow adapter around WHMCS' internal API and invoice tables.
@@ -26,9 +30,18 @@ final class WhmcsGateway
     /** @var Closure(string, array<string, mixed>): array<string, mixed> */
     private readonly Closure $localApi;
 
-    /** @param null|callable(string, array<string, mixed>): array<string, mixed> $localApi */
-    public function __construct(private readonly Config $config, ?callable $localApi = null)
-    {
+    /** @var Closure(): string */
+    private readonly Closure $whmcsVersion;
+
+    /**
+     * @param null|callable(string, array<string, mixed>): array<string, mixed> $localApi
+     * @param null|callable(): string $whmcsVersion
+     */
+    public function __construct(
+        private readonly Config $config,
+        ?callable $localApi = null,
+        ?callable $whmcsVersion = null,
+    ) {
         $this->localApi = $localApi === null
             ? static function (string $command, array $parameters): array {
                 if (!function_exists('localAPI')) {
@@ -40,6 +53,9 @@ final class WhmcsGateway
                 return is_array($response) ? $response : [];
             }
             : Closure::fromCallable($localApi);
+        $this->whmcsVersion = Closure::fromCallable(
+            $whmcsVersion ?? fn (): string => $this->detectWhmcsVersion(),
+        );
     }
 
     /**
@@ -94,13 +110,129 @@ final class WhmcsGateway
         return is_array($client) ? $client : [];
     }
 
-    public function invoiceSnapshot(int $invoiceId): InvoiceSnapshot
+    /**
+     * WHMCS uses the immutable invoice row ID as its invoice reference when no
+     * separate invoicenum was assigned. This normalisation is read-only; it
+     * must never backfill or otherwise change tblinvoices.
+     */
+    public static function effectiveInvoiceNumber(int $invoiceId, ?string $invoiceNumber): string
+    {
+        if ($invoiceId < 1) {
+            throw new \InvalidArgumentException('Invalid WHMCS invoice ID.');
+        }
+
+        $invoiceNumber = trim((string) $invoiceNumber);
+
+        return $invoiceNumber !== '' ? $invoiceNumber : (string) $invoiceId;
+    }
+
+    /**
+     * WHMCS 8.13 stores the direct cash amount in `total`. Applied credit must
+     * be added for the revenue document, and both header views must agree
+     * exactly before a snapshot is allowed to reach an exporter.
+     */
+    public static function documentGrossTotal(
+        string $invoiceSubtotal,
+        string $invoiceTax,
+        string $invoiceTax2,
+        string $invoiceTotal,
+        string $invoiceCredit,
+    ): string {
+        $subtotalMinor = Decimal::toMinorUnits($invoiceSubtotal);
+        $taxMinor = Decimal::toMinorUnits($invoiceTax);
+        $tax2Minor = Decimal::toMinorUnits($invoiceTax2);
+        $directCashMinor = Decimal::toMinorUnits($invoiceTotal);
+        $creditMinor = Decimal::toMinorUnits($invoiceCredit);
+        if (
+            $subtotalMinor < 0
+            || $taxMinor < 0
+            || $tax2Minor < 0
+            || $directCashMinor < 0
+            || $creditMinor < 0
+        ) {
+            throw new \InvalidArgumentException('WHMCS invoice header amounts cannot be negative.');
+        }
+
+        $headerGrossMinor = self::addMinorUnits(
+            self::addMinorUnits($subtotalMinor, $taxMinor),
+            $tax2Minor,
+        );
+        $paymentGrossMinor = self::addMinorUnits($directCashMinor, $creditMinor);
+        if ($headerGrossMinor !== $paymentGrossMinor) {
+            throw new \InvalidArgumentException(
+                'WHMCS invoice totals must satisfy subtotal + tax + tax2 = total + credit.',
+            );
+        }
+
+        return Decimal::fromMinorUnits($paymentGrossMinor);
+    }
+
+    /**
+     * Capture the complete local contract that controls the accounting
+     * payload. Only its SHA-256 fingerprint may be persisted in a job; the
+     * canonical data below deliberately remains process-local.
+     *
+     * @return array{
+     *     snapshot:InvoiceSnapshot,
+     *     fingerprint:string,
+     *     status:string,
+     *     itemTypes:list<string>,
+     *     creditMinor:int,
+     *     configuredContactId:?string
+     * }
+     */
+    public function invoiceExportContract(int $invoiceId): array
     {
         $invoice = $this->invoice($invoiceId);
         $clientId = (int) ($invoice['userid'] ?? 0);
         $client = $this->client($clientId);
+        $snapshot = $this->invoiceSnapshotFromRows($invoiceId, $invoice, $client);
+        $itemTypes = [];
+        foreach (self::normaliseRows($invoice['items']['item'] ?? []) as $item) {
+            $itemTypes[] = strtolower(trim((string) ($item['type'] ?? '')));
+        }
+        $itemTypes = array_values(array_unique(array_filter(
+            $itemTypes,
+            static fn (string $type): bool => $type !== '',
+        )));
+        sort($itemTypes);
+
+        return [
+            'snapshot' => $snapshot,
+            'fingerprint' => self::invoiceContractFingerprint(
+                $invoiceId,
+                $invoice,
+                $client,
+                $snapshot,
+                $this->config,
+            ),
+            'status' => trim((string) ($invoice['status'] ?? '')),
+            'itemTypes' => $itemTypes,
+            'creditMinor' => Decimal::toMinorUnits((string) ($invoice['credit'] ?? '0')),
+            'configuredContactId' => self::configuredContactIdFromClient($client, $this->config),
+        ];
+    }
+
+    public function invoiceSnapshot(int $invoiceId): InvoiceSnapshot
+    {
+        return $this->invoiceExportContract($invoiceId)['snapshot'];
+    }
+
+    /**
+     * @param array<string,mixed> $invoice
+     * @param array<string,mixed> $client
+     */
+    private function invoiceSnapshotFromRows(
+        int $invoiceId,
+        array $invoice,
+        array $client,
+    ): InvoiceSnapshot {
+        $clientId = (int) ($invoice['userid'] ?? 0);
         $taxType = strtolower((string) ($GLOBALS['CONFIG']['TaxType'] ?? 'Exclusive'));
-        $net = $taxType !== 'inclusive';
+        if (!in_array($taxType, ['exclusive', 'inclusive'], true)) {
+            throw new RuntimeException('The configured WHMCS TaxType is unsupported.');
+        }
+        $net = $taxType === 'exclusive';
         $primaryTaxRate = (float) ($invoice['taxrate'] ?? 0);
         $secondaryTaxRate = (float) ($invoice['taxrate2'] ?? 0);
         if ($primaryTaxRate > 0 && $secondaryTaxRate > 0) {
@@ -112,18 +244,50 @@ final class WhmcsGateway
             $rawItems = [$rawItems];
         }
 
-        $lineItems = [];
+        $sourceItems = [];
+        $hasPromoOrNegativeItem = false;
         foreach (is_array($rawItems) ? $rawItems : [] as $item) {
             if (!is_array($item)) {
                 continue;
             }
 
-            $lineItems[] = new LineItem(
-                (string) ($item['description'] ?? 'WHMCS invoice item'),
-                (string) ($item['amount'] ?? '0'),
-                self::truthy($item['taxed'] ?? false) ? self::decimal($taxRate) : '0',
-                $net,
-            );
+            $amount = (string) ($item['amount'] ?? '0');
+            $type = trim((string) ($item['type'] ?? ''));
+            if (strcasecmp($type, 'PromoHosting') === 0 || Decimal::toMinorUnits($amount) < 0) {
+                $hasPromoOrNegativeItem = true;
+            }
+            $sourceItems[] = $item;
+        }
+
+        $lineItems = [];
+        $discounts = [];
+        if ($hasPromoOrNegativeItem) {
+            $structuredItems = [];
+            foreach ($sourceItems as $item) {
+                $structuredItems[] = WhmcsInvoiceItem::fromWhmcs(
+                    $item,
+                    self::decimal($taxRate),
+                    $net ? 'Exclusive' : 'Inclusive',
+                );
+            }
+            $normalization = (new InvoiceItemNormalizer())->normalize($structuredItems);
+            if (!$normalization->allowed) {
+                throw new InvoiceItemNormalizationException(
+                    $normalization->code,
+                    $normalization->message,
+                );
+            }
+            $lineItems = $normalization->lines;
+            $discounts = $normalization->discounts;
+        } else {
+            foreach ($sourceItems as $item) {
+                $lineItems[] = new LineItem(
+                    (string) ($item['description'] ?? 'WHMCS invoice item'),
+                    (string) ($item['amount'] ?? '0'),
+                    self::truthy($item['taxed'] ?? false) ? self::decimal($taxRate) : '0',
+                    $net,
+                );
+            }
         }
 
         $date = DateTimeImmutable::createFromFormat('!Y-m-d', (string) ($invoice['date'] ?? ''));
@@ -131,21 +295,180 @@ final class WhmcsGateway
             throw new RuntimeException('The WHMCS invoice date is invalid.');
         }
 
-        $invoiceNumber = trim((string) ($invoice['invoicenum'] ?? ''));
-        if ($invoiceNumber === '') {
-            $invoiceNumber = (string) $invoiceId;
-        }
-
         return new InvoiceSnapshot(
             $invoiceId,
             $clientId,
-            $invoiceNumber,
+            self::effectiveInvoiceNumber($invoiceId, (string) ($invoice['invoicenum'] ?? '')),
             $date,
             (string) ($invoice['currencycode'] ?? $client['currency_code'] ?? ''),
-            (string) ($invoice['total'] ?? '0'),
+            self::documentGrossTotal(
+                (string) ($invoice['subtotal'] ?? '0'),
+                (string) ($invoice['tax'] ?? '0'),
+                (string) ($invoice['tax2'] ?? '0'),
+                (string) ($invoice['total'] ?? '0'),
+                (string) ($invoice['credit'] ?? '0'),
+            ),
             (string) ($invoice['credit'] ?? '0'),
             $lineItems,
+            $discounts,
         );
+    }
+
+    /**
+     * @param array<string,mixed> $invoice
+     * @param array<string,mixed> $client
+     */
+    private static function invoiceContractFingerprint(
+        int $invoiceId,
+        array $invoice,
+        array $client,
+        InvoiceSnapshot $snapshot,
+        Config $config,
+    ): string {
+        $items = [];
+        foreach (self::normaliseRows($invoice['items']['item'] ?? []) as $item) {
+            $items[] = [
+                'id' => self::canonicalIdentifier($item['id'] ?? null),
+                'type' => strtolower(trim((string) ($item['type'] ?? ''))),
+                'relid' => self::canonicalIdentifier($item['relid'] ?? null),
+                'amount' => self::canonicalDecimal($item['amount'] ?? '0', 'Invoice item amount'),
+                'taxed' => self::truthy($item['taxed'] ?? false),
+                'descriptionHash' => self::payloadDescriptionHash(
+                    $item['description'] ?? 'WHMCS invoice item',
+                ),
+            ];
+        }
+
+        $vatNumber = trim((string) (
+            $client['tax_id']
+            ?? $client['tax_id_number']
+            ?? $client['taxid']
+            ?? ''
+        ));
+        $customFields = self::normaliseRows(
+            $client['customfields']['customfield'] ?? $client['customfields'] ?? [],
+        );
+        try {
+            $eInvoiceFieldId = $config->int('e_invoice_client_field_id');
+        } catch (Throwable) {
+            // Standalone contract tests do not boot WHMCS' database facade.
+            $eInvoiceFieldId = 0;
+        }
+        $customFieldEvidence = [];
+        foreach ($customFields as $field) {
+            $fieldId = (int) ($field['id'] ?? 0);
+            if ($fieldId < 1 || $fieldId !== $eInvoiceFieldId) {
+                continue;
+            }
+            $customFieldEvidence[] = [
+                'id' => $fieldId,
+                'valueHash' => hash('sha256', trim((string) ($field['value'] ?? ''))),
+            ];
+        }
+        usort(
+            $customFieldEvidence,
+            static fn (array $left, array $right): int => $left['id'] <=> $right['id'],
+        );
+
+        $contactHash = hash('sha256', json_encode([
+            'version' => 'whmcs_contact_contract_v1',
+            'clientId' => (int) ($client['id'] ?? $snapshot->clientId),
+            'companyName' => trim((string) ($client['companyname'] ?? '')),
+            'firstName' => trim((string) ($client['firstname'] ?? '')),
+            'lastName' => trim((string) ($client['lastname'] ?? '')),
+            'email' => trim((string) ($client['email'] ?? '')),
+            'street' => trim((string) ($client['address1'] ?? '')),
+            'addressLine2' => trim((string) ($client['address2'] ?? '')),
+            'postcode' => trim((string) ($client['postcode'] ?? '')),
+            'city' => trim((string) ($client['city'] ?? '')),
+            'countryCode' => strtoupper(trim((string) (
+                $client['countrycode']
+                ?? $client['country']
+                ?? ''
+            ))),
+            'vatNumber' => $vatNumber !== '' ? $vatNumber : null,
+            'taxExempt' => self::truthy($client['taxexempt'] ?? false),
+            'customFields' => $customFieldEvidence,
+        ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES));
+
+        return hash('sha256', json_encode([
+            'version' => 'whmcs_invoice_export_contract_v1',
+            'invoiceId' => $invoiceId,
+            'clientId' => $snapshot->clientId,
+            'status' => trim((string) ($invoice['status'] ?? '')),
+            'invoiceNumber' => $snapshot->invoiceNumber,
+            'invoiceDate' => $snapshot->invoiceDate->format('Y-m-d'),
+            'currency' => $snapshot->currency,
+            'taxType' => strtolower(trim((string) ($GLOBALS['CONFIG']['TaxType'] ?? 'exclusive'))),
+            'subtotal' => self::canonicalDecimal($invoice['subtotal'] ?? '0', 'Invoice subtotal'),
+            'credit' => self::canonicalDecimal($invoice['credit'] ?? '0', 'Invoice credit'),
+            'tax' => self::canonicalDecimal($invoice['tax'] ?? '0', 'Invoice tax'),
+            'tax2' => self::canonicalDecimal($invoice['tax2'] ?? '0', 'Invoice secondary tax'),
+            'total' => self::canonicalDecimal($invoice['total'] ?? '0', 'Invoice direct cash total'),
+            'taxRate' => self::canonicalDecimal($invoice['taxrate'] ?? '0', 'Invoice tax rate'),
+            'taxRate2' => self::canonicalDecimal($invoice['taxrate2'] ?? '0', 'Invoice secondary tax rate'),
+            'items' => $items,
+            'contactHash' => $contactHash,
+        ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES));
+    }
+
+    private static function payloadDescriptionHash(mixed $description): string
+    {
+        $description = trim((string) preg_replace(
+            '/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]+/',
+            ' ',
+            (string) $description,
+        ));
+        if ($description === '') {
+            $description = 'WHMCS invoice item';
+        }
+
+        return hash('sha256', mb_substr($description, 0, 1000));
+    }
+
+    private static function canonicalIdentifier(mixed $value): string
+    {
+        if (!is_int($value) && !is_string($value)) {
+            return '';
+        }
+
+        $value = trim((string) $value);
+        if ($value === '' || preg_match('/^\d+$/', $value) !== 1) {
+            return $value;
+        }
+
+        return ltrim($value, '0') ?: '0';
+    }
+
+    private static function canonicalDecimal(mixed $value, string $field): string
+    {
+        if (!is_int($value) && !is_float($value) && !is_string($value)) {
+            throw new \InvalidArgumentException($field . ' must be a decimal number.');
+        }
+        $value = Decimal::assert((string) $value, $field);
+        $negative = str_starts_with($value, '-');
+        $unsigned = ltrim($value, '-');
+        [$whole, $fraction] = array_pad(explode('.', $unsigned, 2), 2, '');
+        $whole = ltrim($whole, '0') ?: '0';
+        $fraction = rtrim($fraction, '0');
+        $normalised = $whole . ($fraction !== '' ? '.' . $fraction : '');
+        if ($normalised === '0') {
+            return '0';
+        }
+
+        return ($negative ? '-' : '') . $normalised;
+    }
+
+    private static function addMinorUnits(int $left, int $right): int
+    {
+        if (
+            ($right > 0 && $left > PHP_INT_MAX - $right)
+            || ($right < 0 && $left < PHP_INT_MIN - $right)
+        ) {
+            throw new \InvalidArgumentException('WHMCS invoice amount sum is outside the supported range.');
+        }
+
+        return $left + $right;
     }
 
     public function contactData(int $clientId): ContactData
@@ -262,6 +585,26 @@ final class WhmcsGateway
         }
 
         return null;
+    }
+
+    /** @param array<string,mixed> $client */
+    private static function configuredContactIdFromClient(array $client, Config $config): ?string
+    {
+        try {
+            $customFieldId = $config->int('custom_field_id');
+        } catch (Throwable) {
+            $customFieldId = 0;
+        }
+        if ($customFieldId < 1) {
+            return null;
+        }
+
+        $contactId = self::contactIdFromClient($client, $customFieldId);
+        if ($contactId !== null && preg_match('/^\d+$/', $contactId) !== 1) {
+            throw new RuntimeException('The configured sevdesk contact ID must be numeric.');
+        }
+
+        return $contactId;
     }
 
     /**
@@ -408,7 +751,13 @@ final class WhmcsGateway
             ->where('payment.amountout', '<=', 0)
             ->where('payment.refundid', 0)
             ->whereNotNull('payment.transid')
-            ->where('payment.transid', '<>', '');
+            ->where('payment.transid', '<>', '')
+            ->whereNotExists(static function ($subquery): void {
+                $subquery->selectRaw('1')
+                    ->from('tblinvoiceitems as mass_payment_item')
+                    ->whereColumn('mass_payment_item.invoiceid', 'invoice.id')
+                    ->whereRaw('LOWER(TRIM(mass_payment_item.type)) = ?', ['invoice']);
+            });
 
         $total = (int) (clone $query)->count();
         $pages = max(1, (int) ceil($total / $perPage));
@@ -502,6 +851,30 @@ final class WhmcsGateway
         $this->call('SendEmail', $parameters);
     }
 
+    /**
+     * Binary attachments returned by EmailPreSend were introduced in WHMCS 9.
+     * WHMCS 8.13 still executes the hook but ignores its attachment result.
+     */
+    public function supportsEmailPreSendAttachments(): bool
+    {
+        return self::versionSupportsEmailPreSendAttachments(($this->whmcsVersion)());
+    }
+
+    public static function versionSupportsEmailPreSendAttachments(string $version): bool
+    {
+        if (
+            preg_match(
+                '/^(\d+\.\d+\.\d+)(?:-release(?:\.\d+)?)?$/i',
+                trim($version),
+                $matches,
+            ) !== 1
+        ) {
+            return false;
+        }
+
+        return version_compare($matches[1], '9.0.0', '>=');
+    }
+
     /** @return list<string> */
     public function activeCustomInvoiceTemplates(): array
     {
@@ -528,6 +901,26 @@ final class WhmcsGateway
         return in_array(trim($templateName), $this->activeCustomInvoiceTemplates(), true);
     }
 
+    private function detectWhmcsVersion(): string
+    {
+        $configured = trim((string) ($GLOBALS['CONFIG']['Version'] ?? ''));
+        if ($configured !== '') {
+            return $configured;
+        }
+        try {
+            $stored = trim((string) Capsule::table('tblconfiguration')
+                ->where('setting', 'Version')
+                ->value('value'));
+            if ($stored !== '') {
+                return $stored;
+            }
+        } catch (\Throwable) {
+            // The capability remains fail-closed when the local version cannot be read.
+        }
+
+        return defined('WHMCS_VERSION') ? (string) WHMCS_VERSION : '';
+    }
+
     /**
      * WHMCS stores this option in tblconfiguration and also exposes it through
      * the bootstrapped CONFIG array. Checking both keeps CLI/Cron and web
@@ -552,6 +945,13 @@ final class WhmcsGateway
         return (int) Capsule::table('tblinvoices')
             ->where('id', $this->positiveId($invoiceId, 'invoice'))
             ->value('userid');
+    }
+
+    public function invoiceStatusForDelivery(int $invoiceId): string
+    {
+        return trim((string) Capsule::table('tblinvoices')
+            ->where('id', $this->positiveId($invoiceId, 'invoice'))
+            ->value('status'));
     }
 
     /**

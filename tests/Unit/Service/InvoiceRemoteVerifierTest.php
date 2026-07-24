@@ -6,8 +6,12 @@ namespace Tests\Unit\Service;
 
 use DateTimeImmutable;
 use PHPUnit\Framework\TestCase;
+use WHMCS\Module\Addon\SevDesk\Domain\ContactData;
+use WHMCS\Module\Addon\SevDesk\Domain\InvoiceAddressContext;
+use WHMCS\Module\Addon\SevDesk\Domain\InvoiceDiscount;
 use WHMCS\Module\Addon\SevDesk\Domain\InvoiceSnapshot;
 use WHMCS\Module\Addon\SevDesk\Domain\LineItem;
+use WHMCS\Module\Addon\SevDesk\Service\InvoiceExporter;
 use WHMCS\Module\Addon\SevDesk\Service\InvoiceRemoteVerifier;
 
 final class InvoiceRemoteVerifierTest extends TestCase
@@ -81,6 +85,124 @@ final class InvoiceRemoteVerifierTest extends TestCase
                 'DE',
             ),
         );
+    }
+
+    public function testFrozenInvoiceAddressRejectsCountryAndAddressHashMismatches(): void
+    {
+        $context = InvoiceAddressContext::fromContact(new ContactData(
+            20,
+            '42',
+            'Synthetic Company',
+            'Synthetic',
+            'Customer',
+            'synthetic@example.invalid',
+            'Example Street 1',
+            '',
+            '12345',
+            'Example City',
+            'DE',
+            null,
+            false,
+        ), '1');
+        $remote = array_merge($this->remoteInvoice(), [
+            'addressName' => 'Synthetic Company',
+            'addressStreet' => 'Example Street 1',
+            'addressZip' => '12345',
+            'addressCity' => 'Example City',
+            'addressCountry' => ['id' => '1', 'code' => 'DE'],
+        ]);
+        self::assertNull($this->verifier()->invoiceMismatch(
+            $remote,
+            $this->invoice(),
+            '42',
+            '1',
+            100,
+            '99',
+            'DE',
+            invoiceAddressContext: $context,
+        ));
+
+        $wrongCountry = $remote;
+        $wrongCountry['addressCountry'] = ['id' => '2', 'code' => 'DE'];
+        self::assertSame(
+            'invoice_address_country_mismatch',
+            $this->verifier()->invoiceMismatch(
+                $wrongCountry,
+                $this->invoice(),
+                '42',
+                '1',
+                100,
+                '99',
+                'DE',
+                invoiceAddressContext: $context,
+            ),
+        );
+
+        $wrongStreet = $remote;
+        $wrongStreet['addressStreet'] = 'Changed Street 9';
+        self::assertSame(
+            'invoice_address_hash_mismatch',
+            $this->verifier()->invoiceMismatch(
+                $wrongStreet,
+                $this->invoice(),
+                '42',
+                '1',
+                100,
+                '99',
+                'DE',
+                invoiceAddressContext: $context,
+            ),
+        );
+    }
+
+    public function testFixedDiscountTotalMustBeReportedExactly(): void
+    {
+        $invoice = new InvoiceSnapshot(
+            10,
+            20,
+            'RE-10',
+            new DateTimeImmutable('2025-07-01'),
+            'EUR',
+            '80.00',
+            '0',
+            [new LineItem('Hosting', '100.00', '0', false)],
+            [new InvoiceDiscount('Promotion', '20.00', '0', false, 42)],
+        );
+        $remote = $this->remoteInvoice();
+        $remote['invoiceDate'] = '01.07.2025';
+        $remote['taxRule']['id'] = '11';
+        $remote['showNet'] = false;
+        $remote['sumGross'] = '80.00';
+        $remote['sumDiscounts'] = '20.00';
+        $remote['customerInternalNote'] = InvoiceExporter::documentMarker($invoice);
+
+        self::assertNull($this->verifier()->invoiceMismatch(
+            $remote,
+            $invoice,
+            '42',
+            '11',
+            100,
+        ));
+
+        $remote['customerInternalNote'] = InvoiceExporter::marker(10)
+            . ' [WHMCS-DISCOUNT:' . str_repeat('0', 64) . ']';
+        self::assertSame('discount_marker_mismatch', $this->verifier()->invoiceMismatch(
+            $remote,
+            $invoice,
+            '42',
+            '11',
+            100,
+        ));
+        $remote['customerInternalNote'] = InvoiceExporter::documentMarker($invoice);
+
+        $remote['sumDiscounts'] = '19.99';
+        self::assertSame('discount_total_mismatch', $this->verifier()->invoiceMismatch(
+            $remote,
+            $invoice,
+            '42',
+            '11',
+            100,
+        ));
     }
 
     public function testOssInvoiceRequiresReadableCountryConfirmation(): void

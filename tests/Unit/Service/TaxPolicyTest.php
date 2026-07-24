@@ -174,6 +174,173 @@ final class TaxPolicyTest extends TestCase
         self::assertTrue($decision->guidanceValidated);
     }
 
+    public function testVoucherRuleElevenCannotSelfAuthoriseAPositiveGuidanceRate(): void
+    {
+        $guidance = $this->guidance();
+        $guidance[3]['allowedTaxRules'][0]['taxRates'] = ['NINETEEN'];
+
+        $decision = (new TaxPolicy(
+            $this->profiles(),
+            TaxPolicy::EU_B2C_BLOCKED,
+            $guidance,
+        ))->decide('DE', false, null, true, false, [
+            new LineItem('Service', '119', '19', false),
+        ]);
+
+        self::assertFalse($decision->allowed);
+        self::assertSame('unsupported_tax_rate', $decision->code);
+    }
+
+    #[DataProvider('smallBusinessCustomerProvider')]
+    public function testSmallBusinessPeriodPrecedesDestinationAndCustomerClassification(
+        string $countryCode,
+        bool $taxExempt,
+        ?string $vatNumber,
+        bool $isOrganisation,
+    ): void {
+        $lines = [new LineItem('Service', '100', '0', false)];
+
+        $voucher = $this->policy()->decide(
+            $countryCode,
+            $taxExempt,
+            $vatNumber,
+            true,
+            false,
+            $lines,
+            $isOrganisation,
+        );
+        $invoice = $this->policy()->decideInvoice(
+            $countryCode,
+            $taxExempt,
+            $vatNumber,
+            true,
+            false,
+            $lines,
+            $isOrganisation,
+        );
+
+        self::assertTrue($voucher->allowed);
+        self::assertSame('small_business', $voucher->profile);
+        self::assertSame('11', $voucher->taxRuleId);
+        self::assertTrue($invoice->allowed);
+        self::assertSame('small_business', $invoice->profile);
+        self::assertSame('11', $invoice->taxRuleId);
+    }
+
+    /** @return iterable<string, array{string,bool,string|null,bool}> */
+    public static function smallBusinessCustomerProvider(): iterable
+    {
+        yield 'German private customer' => ['DE', false, null, false];
+        yield 'EU private customer' => ['NL', false, null, false];
+        yield 'EU organisation with VAT evidence' => ['NL', true, 'NL123456789B01', true];
+        yield 'third-country private customer' => ['CH', false, null, false];
+        yield 'third-country organisation' => ['US', true, 'US-TAX-ID', true];
+    }
+
+    public function testSmallBusinessPeriodPrecedesTheConfirmedAddFundsProfile(): void
+    {
+        $lines = [new LineItem('Account credit', '100', '0', false)];
+
+        $voucher = $this->policy()->decide('DE', false, null, true, true, $lines);
+        $invoice = $this->policy()->decideInvoice('DE', false, null, true, true, $lines);
+
+        self::assertTrue($voucher->allowed);
+        self::assertSame('small_business', $voucher->profile);
+        self::assertSame('11', $voucher->taxRuleId);
+        self::assertTrue($invoice->allowed);
+        self::assertSame('small_business', $invoice->profile);
+        self::assertSame('11', $invoice->taxRuleId);
+
+        $voucherAfterCutoff = $this->policy()->decide('DE', false, null, false, true, $lines);
+        $invoiceAfterCutoff = $this->policy()->decideInvoice('DE', false, null, false, true, $lines);
+
+        self::assertTrue($voucherAfterCutoff->allowed);
+        self::assertSame('add_funds', $voucherAfterCutoff->profile);
+        self::assertSame('1', $voucherAfterCutoff->taxRuleId);
+        self::assertTrue($invoiceAfterCutoff->allowed);
+        self::assertSame('add_funds', $invoiceAfterCutoff->profile);
+        self::assertSame('1', $invoiceAfterCutoff->taxRuleId);
+    }
+
+    public function testAddFundsCannotBypassTheRuleElevenInvoiceCanary(): void
+    {
+        $policy = new TaxPolicy(
+            $this->profiles(),
+            TaxPolicy::EU_B2C_BLOCKED,
+            $this->guidance(),
+        );
+
+        $decision = $policy->decideInvoice(
+            'DE',
+            false,
+            null,
+            true,
+            true,
+            [new LineItem('Account credit', '100', '0', false)],
+        );
+
+        self::assertFalse($decision->allowed);
+        self::assertSame('small_business', $decision->profile);
+        self::assertSame('small_business_invoice_canary_not_confirmed', $decision->code);
+    }
+
+    public function testRuleElevenInvoiceNeedsItsOwnCanaryWithoutChangingTheVoucherDecision(): void
+    {
+        $policy = new TaxPolicy(
+            $this->profiles(),
+            TaxPolicy::EU_B2C_BLOCKED,
+            $this->guidance(),
+        );
+        $lines = [new LineItem('Service', '100', '0', false)];
+
+        $voucher = $policy->decide('DE', false, null, true, false, $lines);
+        $invoice = $policy->decideInvoice('DE', false, null, true, false, $lines);
+
+        self::assertTrue($voucher->allowed);
+        self::assertSame('11', $voucher->taxRuleId);
+        self::assertFalse($invoice->allowed);
+        self::assertSame('small_business_invoice_canary_not_confirmed', $invoice->code);
+    }
+
+    public function testRuleElevenInvoiceNeedsCurrentRevenueGuidanceEvenWithTheCanary(): void
+    {
+        $guidance = $this->guidance();
+        $guidance[3]['allowedReceiptTypes'] = ['REGULAR'];
+        $policy = new TaxPolicy(
+            $this->profiles(),
+            TaxPolicy::EU_B2C_BLOCKED,
+            $guidance,
+            TaxPolicy::OSS_BLOCKED,
+            true,
+        );
+
+        $decision = $policy->decideInvoice(
+            'DE',
+            false,
+            null,
+            true,
+            false,
+            [new LineItem('Service', '100', '0', false)],
+        );
+
+        self::assertFalse($decision->allowed);
+        self::assertSame('invoice_rule11_tenant_scope_unsupported', $decision->code);
+        self::assertFalse($policy->invoiceRuleElevenTenantScopeSupported());
+    }
+
+    public function testRuleElevenGuidanceCapabilityRequiresRevenueRuleAndZeroRate(): void
+    {
+        $guidance = $this->guidance();
+        self::assertTrue(TaxPolicy::guidanceSupportsInvoiceRuleEleven($guidance));
+
+        $guidance[3]['allowedTaxRules'][0]['taxRates'] = ['NINETEEN'];
+        self::assertFalse(TaxPolicy::guidanceSupportsInvoiceRuleEleven($guidance));
+
+        self::assertTrue(TaxPolicy::guidanceSupportsInvoiceRuleEleven([
+            'objects' => $this->guidance(),
+        ]));
+    }
+
     public function testConfirmedThirdCountryExportProfileUsesItsExplicitRule(): void
     {
         $decision = $this->policy()->decide('CH', false, null, false, false, [
@@ -459,12 +626,23 @@ final class TaxPolicyTest extends TestCase
                 'allowedReceiptTypes' => ['REVENUE'],
                 'allowedTaxRules' => [['id' => 2, 'taxRates' => ['ZERO']]],
             ],
+            [
+                'accountDatevId' => 600,
+                'allowedReceiptTypes' => ['REVENUE'],
+                'allowedTaxRules' => [['id' => 1, 'taxRates' => ['ZERO']]],
+            ],
         ];
     }
 
     private function policy(): TaxPolicy
     {
-        return new TaxPolicy($this->profiles(), TaxPolicy::EU_B2C_BLOCKED, $this->guidance());
+        return new TaxPolicy(
+            $this->profiles(),
+            TaxPolicy::EU_B2C_BLOCKED,
+            $this->guidance(),
+            TaxPolicy::OSS_BLOCKED,
+            true,
+        );
     }
 
     private function policyWithConfirmedEuGoods(): TaxPolicy
@@ -472,7 +650,13 @@ final class TaxPolicyTest extends TestCase
         $profiles = $this->profiles();
         $profiles['eu_b2b']['confirmed'] = true;
 
-        return new TaxPolicy($profiles, TaxPolicy::EU_B2C_BLOCKED, $this->guidance());
+        return new TaxPolicy(
+            $profiles,
+            TaxPolicy::EU_B2C_BLOCKED,
+            $this->guidance(),
+            TaxPolicy::OSS_BLOCKED,
+            true,
+        );
     }
 
     private function invoiceDecisionForRule(string $rule, string $rate): TaxDecision
@@ -490,7 +674,13 @@ final class TaxPolicyTest extends TestCase
             $profiles['eu_b2b']['taxRule'] = '3';
             $profiles['eu_b2b']['confirmed'] = true;
 
-            return (new TaxPolicy($profiles))->decideInvoice(
+            return (new TaxPolicy(
+                $profiles,
+                TaxPolicy::EU_B2C_BLOCKED,
+                $this->guidance(),
+                TaxPolicy::OSS_BLOCKED,
+                true,
+            ))->decideInvoice(
                 'NL',
                 true,
                 'NL123456789B01',
@@ -503,7 +693,13 @@ final class TaxPolicyTest extends TestCase
             $profiles['small_business']['taxRule'] = '11';
             $profiles['small_business']['confirmed'] = true;
 
-            return (new TaxPolicy($profiles))->decideInvoice(
+            return (new TaxPolicy(
+                $profiles,
+                TaxPolicy::EU_B2C_BLOCKED,
+                $this->guidance(),
+                TaxPolicy::OSS_BLOCKED,
+                true,
+            ))->decideInvoice(
                 'DE',
                 false,
                 null,

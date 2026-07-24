@@ -37,7 +37,7 @@ final class SevdeskClient
         #[\SensitiveParameter]
         string $apiToken,
         string $baseUrl = 'https://my.sevdesk.de/api/v1',
-        string $userAgent = 'WHMCS-sevdesk/2.1.0-rc.4',
+        string $userAgent = 'WHMCS-sevdesk/2.1.0-rc.5',
     ) {
         $apiToken = trim($apiToken);
         if ($apiToken === '') {
@@ -547,6 +547,17 @@ final class SevdeskClient
             return null;
         }
 
-        return str_contains($value, $this->apiToken) ? 'redacted' : $value;
+        if (str_contains($value, $this->apiToken)) {
+            return 'redacted';
+        }
+
+        // Error identifiers are bounded to 120 characters before they reach
+        // this method. A longer echoed token would otherwise lose its tail and
+        // evade the full-token comparison while still exposing its prefix.
+        $tokenPrefix = substr($this->apiToken, 0, 12);
+
+        return strlen($this->apiToken) >= 12 && str_contains($value, $tokenPrefix)
+            ? 'redacted'
+            : $value;
     }
 }

@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace WHMCS\Module\Addon\SevDesk\Tests\Unit;
 
 use Illuminate\Database\Capsule\Manager as IlluminateCapsule;
+use Illuminate\Database\QueryException;
+use PDOException;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\PreserveGlobalState;
 use PHPUnit\Framework\Attributes\RunClassInSeparateProcess;
@@ -53,6 +55,7 @@ final class AdminHardeningBehaviorTest extends TestCase
         Capsule::schema()->create('tblinvoices', static function ($table): void {
             $table->increments('id');
             $table->string('invoicenum', 191)->nullable();
+            $table->string('status', 32)->default('Unpaid');
         });
         Capsule::schema()->dropIfExists('mod_sevdesk');
         Capsule::schema()->create('mod_sevdesk', static function ($table): void {
@@ -60,6 +63,7 @@ final class AdminHardeningBehaviorTest extends TestCase
             $table->unsignedInteger('invoice_id');
             $table->string('sevdesk_id', 255)->nullable();
             $table->string('document_type', 16)->nullable();
+            $table->string('document_authority', 16)->nullable();
         });
     }
 
@@ -106,6 +110,46 @@ final class AdminHardeningBehaviorTest extends TestCase
 
         $safetyGuard->invoke($controller);
         self::addToAssertionCount(1);
+    }
+
+    public function testSetupDatabaseFailureDoesNotExposeSqlOrBoundApiToken(): void
+    {
+        $secret = 'synthetic-secret-api-token';
+        $error = new QueryException(
+            'synthetic',
+            'UPDATE tbladdonmodules SET value = ? WHERE setting = ?',
+            [$secret, 'sevdesk_api_key'],
+            new PDOException('Synthetic database failure'),
+        );
+        self::assertStringContainsString($secret, $error->getMessage());
+
+        unset($_SESSION['sevdesk_flash']);
+        (new ReflectionMethod(AdminController::class, 'flashSetupFailure'))->invoke(
+            $this->controller(new Application()),
+            $error,
+        );
+
+        $flash = $_SESSION['sevdesk_flash'] ?? null;
+        self::assertIsArray($flash);
+        self::assertSame('danger', $flash['type'] ?? null);
+        self::assertStringNotContainsString($secret, (string) ($flash['message'] ?? ''));
+        self::assertStringNotContainsString('tbladdonmodules', (string) ($flash['message'] ?? ''));
+        self::assertStringNotContainsString('SQL', (string) ($flash['message'] ?? ''));
+        self::assertStringContainsString('Referenz:', (string) ($flash['message'] ?? ''));
+    }
+
+    public function testSetupKeepsLocallyAuthoredValidationMessage(): void
+    {
+        unset($_SESSION['sevdesk_flash']);
+        (new ReflectionMethod(AdminController::class, 'flashSetupFailure'))->invoke(
+            $this->controller(new Application()),
+            new RuntimeException('Bitte einen gültigen Exportstichtag wählen.'),
+        );
+
+        self::assertSame(
+            'Bitte einen gültigen Exportstichtag wählen.',
+            $_SESSION['sevdesk_flash']['message'] ?? null,
+        );
     }
 
     public function testRuntimeQuarantineAttemptsEverySafetyWriteIndependently(): void
@@ -404,6 +448,52 @@ SQL);
         self::assertSame(42, (int) $mapping->invoice_id);
         self::assertSame('', (string) $mapping->invoicenum);
         self::assertSame('88', (string) $mapping->sevdesk_id);
+        self::assertSame('Unpaid', (string) $mapping->invoice_status);
+    }
+
+    public function testLegacySevdeskAuthorityRequiresAPaidWhmcsInvoice(): void
+    {
+        $guard = new ReflectionMethod(AdminController::class, 'assertLegacyAuthorityStatus');
+        $mapping = (object) ['invoice_status' => 'Unpaid'];
+
+        try {
+            $guard->invoke(null, $mapping, 'sevdesk');
+            self::fail('An unpaid legacy invoice must not become the customer-facing sevdesk document.');
+        } catch (\ReflectionException $error) {
+            throw $error;
+        } catch (\Throwable $error) {
+            $runtime = $error->getPrevious() ?? $error;
+            self::assertInstanceOf(RuntimeException::class, $runtime);
+            self::assertStringContainsString('vollständiger Zahlung', $runtime->getMessage());
+        }
+
+        $guard->invoke(null, $mapping, 'whmcs');
+        $mapping->invoice_status = 'Paid';
+        $guard->invoke(null, $mapping, 'sevdesk');
+        self::addToAssertionCount(2);
+    }
+
+    public function testLegacyConfirmationCannotContradictAFrozenDocumentDecision(): void
+    {
+        $guard = new ReflectionMethod(AdminController::class, 'assertLegacyFrozenDocument');
+        $mapping = (object) [
+            'frozen_document_type' => 'invoice',
+            'frozen_document_authority' => 'sevdesk',
+        ];
+
+        $guard->invoke(null, $mapping, 'invoice', 'sevdesk');
+        self::addToAssertionCount(1);
+
+        foreach ([['invoice', 'whmcs'], ['voucher', 'whmcs']] as [$type, $authority]) {
+            try {
+                $guard->invoke(null, $mapping, $type, $authority);
+                self::fail('A frozen legacy document decision must not be contradicted.');
+            } catch (\ReflectionException $error) {
+                throw $error;
+            } catch (\Throwable $error) {
+                self::assertInstanceOf(RuntimeException::class, $error->getPrevious() ?? $error);
+            }
+        }
     }
 
     public function testCorrectionPositionTotalsAreRejectedBeforeAJobIsCreated(): void

@@ -2,9 +2,9 @@
 
 ## Freigabestatus
 
-Dieses Runbook gilt für `2.1.0-rc.4`. Der RC ist für Testinstallationen gedacht, nicht für Produktivdaten. Die automatisierten Prüfungen unter PHP 8.3 mit XMLReader und MariaDB sowie die technischen Live-Läufe für normale Invoices, Rule 19 und ZUGFeRD wurden mit synthetischen Daten ausgeführt. Der direkte sevDesk-Versand, echte Kundensitzungen und die Rechteprüfung waren erfolgreich. Beim ersten Postfachabgleich des WHMCS-Kanals kam allerdings die WHMCS-Core-PDF an. rc.4 korrigiert den fehlenden Hook im CLI-Worker und prüft den Verbrauch des Anhangskontexts. Vor der Freigabe stehen noch die Kontrolle des Wiederholungsanhangs, Invoice-`bookAmount`, die Voucher-Canaries der produktiv verwendeten Steuerfälle und die fachliche Abnahme aus.
+Dieses Runbook gilt für den Arbeitsstand nach `2.1.0-rc.5`. Der RC ist für Testinstallationen gedacht, nicht für Produktivdaten. Die automatisierten Prüfungen unter PHP 8.3 mit XMLReader und MariaDB sowie die technischen Live-Läufe für normale Invoices, Rule 19 und ZUGFeRD wurden mit synthetischen Daten ausgeführt. Der direkte sevDesk-Versand, echte Kundensitzungen und die Rechteprüfung waren erfolgreich. Zwei WHMCS-Postfachläufe enthielten dagegen die WHMCS-Core-PDF. WHMCS 8.13 führt den Hook zwar aus, kann dessen Binäranhang aber nicht übernehmen. Der Kanal `whmcs_template` ist auf der Zielplattform daher gesperrt. Vor der Freigabe stehen noch Invoice-`bookAmount`, der rabattfreie Rule-11-Invoice-Canary, der darauf aufbauende Rabatt-Canary, die Voucher-Canaries der produktiv verwendeten Steuerfälle und die fachliche Abnahme aus.
 
-Bis dahin bleiben `invoice_canary_confirmed`, `e_invoice_canary_confirmed` und bei neuen Rollouts auch `sync_enabled` deaktiviert. Ein 2.0-Bestand behält beim Upgrade den Modus `voucher_only` und erhält `runtime_review_required=on`. Diese Quarantäne stoppt automatische und manuelle Verarbeitung. Sie endet erst nach einer erfolgreichen read-only Prüfung und der Bestätigung im Setup.
+Bis dahin bleiben `invoice_canary_confirmed`, `small_business_invoice_canary_confirmed`, `e_invoice_canary_confirmed`, `invoice_discount_canary_confirmed` und bei neuen Rollouts auch `sync_enabled` deaktiviert. Ein 2.0-Bestand behält beim Upgrade den Modus `voucher_only` und erhält `runtime_review_required=on`. Diese Quarantäne stoppt automatische und manuelle Verarbeitung. Sie endet erst nach einer erfolgreichen read-only Prüfung und der Bestätigung im Setup.
 
 ## Unterstützte Umgebung
 
@@ -127,21 +127,22 @@ export_mode=voucher_only
 document_authority=whmcs
 oss_profile=blocked
 invoice_canary_confirmed=off
+small_business_invoice_canary_confirmed=off
 e_invoice_mode=off
 e_invoice_canary_confirmed=off
 customer_number_contact_creation_confirmed=off
 runtime_review_required=off (erst nach bestätigter Bestandsprüfung)
 ```
 
-Die Migration ergänzt Mappingfelder nur additiv. Vollständige Altzuordnungen behalten `document_type=NULL`; das Modul nimmt weder Voucher noch Invoice automatisch an.
+Die Migration ergänzt Mappingfelder nur additiv. Vollständige Altzuordnungen behalten `document_type=NULL` und `document_authority=NULL`; das Modul nimmt weder Belegtyp noch Hoheit automatisch an.
 
 Die read-only Prüfung fragt die gespeicherte ID am Voucher- und am Invoice-Endpoint ab. Nur genau ein Treffer mit passender Objektart, ID und exakter WHMCS-Dokumentnummer darf einen Typ vorschlagen. Bei neuen Modulbelegen liefert der Rewrite-Marker einen zusätzlichen Nachweis. Bei Belegen des Originalmoduls kann er fehlen; die Oberfläche weist dann auf den schwächeren Legacy-Nachweis hin.
 
-Ein widersprüchlicher Marker oder eine ID, die an beiden Endpoints existiert, blockiert die Zuordnung. Nur eine eindeutige 400- oder 404-Antwort gilt beim jeweiligen Voucher-/Invoice-by-ID-Endpoint als Abwesenheit. Erst eine Adminbestätigung nach einer erneuten Prüfung beider Endpoints ergänzt den Typ. Dabei entstehen weder ein neues Remote-Dokument noch eine andere Remote-ID.
+Ein widersprüchlicher Marker oder eine ID, die an beiden Endpoints existiert, blockiert die Zuordnung. Nur eine eindeutige 400- oder 404-Antwort gilt beim jeweiligen Voucher-/Invoice-by-ID-Endpoint als Abwesenheit. Erst eine Adminbestätigung nach einer erneuten Prüfung beider Endpoints ergänzt Typ und Hoheit. WHMCS ist die sichere Vorauswahl, sofern kein früherer RC bereits eine andere Entscheidung im Job eingefroren hat; einem solchen Nachweis darf die Bestätigung nicht widersprechen. sevDesk kann nur für eine lokal bezahlte WHMCS-Rechnung, eine finalisierte Remote-Invoice mit Status 200, 750 oder 1000 und bei vollständigen Proforma-, Theme- und Versandvoraussetzungen gewählt werden. Der Paid-Status wird beim Speichern unter Datenbanksperre erneut geprüft; anschließend speichert das Modul den Hash der finalen PDF. Es entstehen weder ein neues Remote-Dokument noch eine andere Remote-ID.
 
 ### Übergangsinventur und Moduswechsel
 
-Vor einer Änderung an Exportmodus, Dokumenthoheit, OSS-Profil oder E-Rechnungsprofil zeigt das Setup eine rein lokale Bestandsaufnahme. Sie zählt:
+Vor einer Änderung an Exportmodus, Dokumenthoheit, OSS-, E-Rechnungs-, Rule-11-Invoice-, Rabatt-Canary- oder Kleinunternehmerprofil zeigt das Setup eine rein lokale Bestandsaufnahme. Sie zählt:
 
 - typisierte Voucher und Invoices;
 - vollständige Mappings ohne Dokumenttyp;
@@ -152,7 +153,7 @@ Vor einer Änderung an Exportmodus, Dokumenthoheit, OSS-Profil oder E-Rechnungsp
 
 Die Bestätigung ist an den aktuellen Fingerprint dieser Inventur gebunden. Ändert sich der Bestand zwischen Seitenaufruf und Speichern, muss die Seite neu geladen und erneut geprüft werden. Das Speichern einer neuen Einstellung erzeugt keinen Exportjob.
 
-Vorhandene Zuordnungen sind unveränderlich. Ein Voucher bleibt Voucher. Eine bereits erzeugte Invoice behält die Dokumenthoheit, die in ihrem Jobkontext eingefroren wurde. Weder ein Modus- noch ein Hoheitswechsel konvertiert, versendet oder exportiert bestehende Belege erneut.
+Vorhandene Zuordnungen sind unveränderlich. Ein Voucher bleibt Voucher. Eine Invoice behält die im Mapping gespeicherte Dokumenthoheit; bei älteren RC-Zeilen dient der eingefrorene Jobkontext nur so lange als Übergangsnachweis, bis die Hoheit bestätigt wurde. Weder ein Modus- noch ein Hoheitswechsel konvertiert, versendet oder exportiert bestehende Belege erneut.
 
 Alte fehlgeschlagene `export_voucher`-Items behalten ihren ursprünglichen Pfad. Weicht ihre eingefrorene Konfiguration vom aktuellen Setup ab, erscheint `stale_export_context_requeue_required`. Ein normaler Retry ist dann gesperrt. Nur ein eindeutig sicherer Zustand vor dem ersten Dokument-Write kann nach sichtbarer Bestätigung als neuer `export_document`-Job eingereiht werden. Dieser Job ist mailfrei, verwendet den aktuellen Modus, erzeugt keine E-Rechnung und verweist auf das alte Item. Das alte Item bleibt als Nachweis erhalten. Ab `voucher_write_requested` oder einem späteren riskanten Checkpoint gibt es diesen Übergang nicht; dort gilt ausschließlich die Recovery des ursprünglichen Dokumenttyps. Solange so ein riskanter Altzustand ungeklärt ist, sperrt er außerdem jeden neuen Exportjob für dieselbe WHMCS-Rechnung, auch Kurzexport und Einzelimport.
 
@@ -215,7 +216,7 @@ Erst danach darf `customer_number_contact_creation_confirmed` im Setup aktiviert
 - im aktuellen Mandanten existierender `SevUser` und eine Standard-`Unity`;
 - Hinweis für `invoice_only` akzeptieren: Invoice-Positionen übernehmen kein frei konfiguriertes `accountDatev`.
 
-Invoice-Ziele werden nur für vollständig bezahlte WHMCS-Rechnungen mit finaler Rechnungsnummer verarbeitet. Rules 18/20, gemischte oder unklare Leistungsarten bleiben blockiert.
+Invoice-Ziele werden nur für vollständig bezahlte WHMCS-Rechnungen mit auswertbarer effektiver Rechnungsnummer verarbeitet. Ist `invoicenum` in einem Altbestand leer, verwendet das Modul die unveränderliche interne Invoice-ID. Rules 18/20, gemischte oder unklare Leistungsarten bleiben blockiert.
 
 ### Native ZUGFeRD-Invoices
 
@@ -235,7 +236,7 @@ Das Modul übergibt `propertyIsEInvoice=true`, die strukturierte Empfängeradres
 
 Das Mapping bleibt `document_type=invoice` und erhält additiv `is_e_invoice` sowie `xml_sha256`. `pdf_sha256` gehört weiterhin zur ausgelieferten sevDesk-PDF. Namen und Adressen werden nicht im Job gespeichert; dort liegen nur die notwendigen IDs und ein PII-freier Adresshash. PDF und XML werden weder dauerhaft in WHMCS gespeichert noch geloggt.
 
-Der Kundenbereich und der WHMCS-Mailkanal liefern die geprüfte ZUGFeRD-PDF. Beim sevDesk-Versand setzt das Modul `sendXml=false`, weil der strukturierte Bestandteil bereits in der PDF steckt. Rule 19 bleibt immer eine normale Invoice. Rules 18/20, B2G, XRechnung und historische E-Rechnungs-Backfills sind nicht freigegeben.
+Der Kundenbereich liefert die geprüfte ZUGFeRD-PDF. Beim sevDesk-Versand setzt das Modul `sendXml=false`, weil der strukturierte Bestandteil bereits in der PDF steckt. Der WHMCS-Vorlagenkanal bleibt auf WHMCS 8.13.4 gesperrt, da diese Version den Binäranhang aus `EmailPreSend` nicht übernimmt. Rule 19 bleibt immer eine normale Invoice. Rules 18/20, B2G, XRechnung und historische E-Rechnungs-Backfills sind nicht freigegeben.
 
 ### sevDesk-Dokumenthoheit und Versand
 
@@ -245,11 +246,11 @@ Zusätzlich erforderlich:
 - `export_mode=invoice_only`;
 - installiertes Adapter-Manifest; für Twenty-One liegt eine Referenzintegration bei;
 - ausdrückliche Bestätigung des Theme-Eingriffs;
-- Versandkanal `sevdesk` oder `whmcs_template`.
+- Versandkanal `sevdesk`. Der gespeicherte Wert `whmcs_template` bleibt migrationsverträglich erhalten, ist unter WHMCS 8.13 aber nicht ausführbar.
 
-Für `sevdesk` werden Betreff und Text ausschließlich mit `{invoice_number}` und `{company_name}` als erlaubten Platzhaltern gepflegt. Für `whmcs_template` muss eine aktive benutzerdefinierte Invoice-Mailvorlage gewählt sein. Das Modul legt keine Vorlage an und verändert keine vorhandene.
+Für `sevdesk` werden Betreff und Text ausschließlich mit `{invoice_number}` und `{company_name}` als erlaubten Platzhaltern gepflegt. Eine bestehende Auswahl `whmcs_template` wird nicht automatisch geändert: Der Health Check meldet den Konflikt, und das Setup muss bewusst auf `sevdesk` gespeichert werden. Das Modul legt keine Mailvorlage an und verändert keine vorhandene.
 
-Backfills und historische Bulk-Jobs versenden nie automatisch. „Versendet“ beim WHMCS-Kanal heißt nur, dass WHMCS die Nachricht dem konfigurierten Mail-Provider übergeben hat.
+Backfills und historische Bulk-Jobs versenden nie automatisch.
 
 Nach Installation und Upgrade bleibt EU-B2B/Rule 3 standardmäßig gesperrt. Die Freigabe im Setup ist nur möglich, wenn der gesamte betroffene Geschäftsfall fachlich als innergemeinschaftliche Warenlieferung bestätigt wurde.
 
@@ -262,9 +263,9 @@ Numerische Account-Datev-IDs müssen aus dem aktuellen Mandanten stammen und wer
 Der Canary wird in einem getrennten sevDesk-Testmandanten mit synthetischen Daten durchgeführt. Er muss vor dem Setzen von `invoice_canary_confirmed` mindestens folgende Punkte beweisen:
 
 1. Eine normale `RE` lässt sich im Draft-Status 100 mit Rule 19, kleingeschriebenem `deliveryAddressCountry`, exakt passender `StaticCountry`-Referenz, tatsächlichem WHMCS-Steuersatz und ohne `accountDatev` erstellen. Der Readback erfolgt mit `embed=addressCountry`.
-2. Die finale WHMCS-Rechnungsnummer bleibt als `invoiceNumber` unverändert.
+2. Die effektive WHMCS-Rechnungsnummer bleibt als `invoiceNumber` unverändert; bei einem belegten Legacy-Leerwert ist das die interne Invoice-ID.
 3. `[WHMCS-INVOICE:<id>]` bleibt lesbar und erlaubt einen eindeutigen Remote-Abgleich.
-4. `SevUser`, `Unity`, Kontakt, Positionen und Adressen sind in genau der verwendeten Form gültig.
+4. `SevUser`, `Unity`, Kontakt, Positionen und Adressen sind in genau der verwendeten Form gültig. Der normale Invoice-Request enthält die vollständige synthetische WHMCS-Rechnungsadresse und `takeDefaultAddress=false`; der vorhandene Testkontakt darf dafür keine Stammdatenänderung erhalten.
 5. `sendBy`, `sendViaEmail`, `getPdf` und `/Invoice/{id}/bookAmount` verhalten sich wie vom Worker erwartet.
 6. Die finalisierte PDF bleibt byte-stabil beziehungsweise jede zulässige Änderung ist verstanden und mit der Hashprüfung vereinbar.
 7. Voucher- und Invoice-IDs können im lokalen Unique-Mapping nicht kollidieren.
@@ -273,7 +274,26 @@ Das vollständige Protokoll mit Datum, Mandant, synthetischen WHMCS-/Remote-IDs,
 
 Scheitert die ID-Eindeutigkeit, Rule 19 oder der Markerabgleich, bleiben mindestens `invoice_for_oss` und alle davon abhängigen Rolloutschritte gesperrt. Es darf nicht durch manuelles Setzen der Checkbox „freigegeben“ werden; zuerst ist eine neue Architekturentscheidung nötig.
 
-Teilstand vom 20.07.2026: Eine synthetische Rule-19-Invoice wurde erstellt und über den Recovery-Pfad ohne zweiten Create vollständig abgeschlossen. Nummer, Marker, Kontakt, `SevUser`, Rule, Steuersatz, Positionen, fehlendes `accountDatev`, eingebettetes Rechnungsland und PDF stimmten mit dem eingefrorenen Snapshot überein. `sendBy` und `sendViaEmail` wurden technisch ausgeführt. Die geprüften Remote-IDs hatten beim jeweils anderen Dokumenttyp keinen Treffer. Invoice-`bookAmount` wurde nicht ausgeführt; dieser Teil und die Bestätigung des Postfacheingangs bleiben offen.
+Teilstand vom 20.07.2026: Eine synthetische Rule-19-Invoice wurde erstellt und über den Recovery-Pfad ohne zweiten Create vollständig abgeschlossen. Nummer, Marker, Kontakt, `SevUser`, Rule, Steuersatz, Positionen, fehlendes `accountDatev`, eingebettetes Rechnungsland und PDF stimmten mit dem eingefrorenen Snapshot überein. `sendBy` und `sendViaEmail` wurden technisch ausgeführt; der direkte sevDesk-Versand kam an. Die geprüften Remote-IDs hatten beim jeweils anderen Dokumenttyp keinen Treffer. Invoice-`bookAmount` wurde noch nicht ausgeführt.
+
+Teilstand vom 24.07.2026: Ein normaler Draft an einem vorhandenen Kontakt ohne sevDesk-`ContactAddress` wurde mit `takeDefaultAddress=true` zwar erstellt, enthielt remote aber keine Rechnungsadresse; `sendBy/VPDF` lehnte ihn mit HTTP 422 ab. Der korrigierte Vertrag überträgt die WHMCS-Rechnungsadresse deshalb immer direkt mit `takeDefaultAddress=false` und prüft ihren PII-freien Hash vor jedem weiteren Write. Der betroffene Altentwurf wird nicht automatisch verändert oder geöffnet. Der externe Invoice-Canary muss mit einem neuen synthetischen Beleg und unverändertem Kontakt erneut vollständig bestanden werden.
+
+## Rule-11-Invoice-Canary
+
+Dieses Gate ist vom allgemeinen Invoice-Canary und vom Rabatt-Canary getrennt. Es gilt nur für Rule-11-Invoices; Rule-11-Voucher verwenden weiterhin ihr konfiguriertes und durch Guidance geprüftes `accountDatev`.
+
+Der Anlass ist ein reproduzierter Livebefund: sevDesk akzeptierte eine normale Rule-11-Invoice zunächst als Draft. `sendBy` scheiterte danach mit HTTP 422 und Code 7100, weil `KLEINUNTERNEHMER_P19` für das automatisch gewählte Konto beziehungsweise dessen Scope nicht zulässig war. Das Modul kann dieses Konto bei einer Invoice nicht über `InvoicePos.accountDatev` vorgeben.
+
+[sevDesk empfiehlt beim Wechsel der Besteuerungsart](https://hilfe.sevdesk.de/de/articles/9382213-einstellung-zu-buchhaltung-steuer), offene Vorgänge aus dem Kleinunternehmerzeitraum vorher abzuschließen. Sind sie im aktuellen Mandanten nicht mehr mit Rule 11 finalisierbar, bleibt der Nachlauf gesperrt, bis sevDesk oder die Buchhaltung einen belastbaren Weg für diesen Bestand bestätigt hat. Das Modul ersetzt diese Klärung nicht durch Rule 1 oder ein geratenes Konto.
+
+Vor `small_business_invoice_canary_confirmed=on` sind deshalb zwei Nachweise nötig:
+
+1. Die frisch gelesene `ReceiptGuidance` enthält mindestens ein numerisches `REVENUE`-Konto, das Rule 11 mit 0 % erlaubt.
+2. Eine neue synthetische Kleinunternehmer-Invoice ohne Rabatt besteht Create, vollständigen Readback, `sendBy`, `getPdf` und einen Recovery-Lauf ohne zweiten Create.
+
+Das Setup prüft Punkt 1 beim Speichern erneut. Dry-Run, Remote-Health-Check und Worker prüfen dieselbe Fähigkeit vor Create. Fehlt sie trotz gesetztem Wert, lautet der Fehler `invoice_rule11_tenant_scope_unsupported`. Ist der Canary nicht bestätigt, lautet er `small_business_invoice_canary_not_confirmed`. Ein Item nach einem möglichen Write bleibt ohne weiteren Remote-Aufruf `ambiguous`.
+
+Der Rabatt-Canary darf erst danach bestätigt werden. Beide Checkboxen sind Teil der geschützten Übergangsinventur; aktive oder ungeklärte Exportjobs sperren eine Änderung.
 
 ## ZUGFeRD-Canary
 
@@ -284,12 +304,12 @@ Der ZUGFeRD-Canary ist vom normalen Invoice-Canary getrennt. Er verwendet einen 
 3. Die von sevDesk erzeugte ZUGFeRD-PDF lässt sich über `getPdf` stabil laden; PDF- und XML-Hashes bleiben im getesteten Lifecycle nachvollziehbar.
 4. `sendBy` öffnet die Invoice ohne Vertragsabweichung.
 5. `sendViaEmail` akzeptiert `sendXml=false` und versendet keine lose XML-Datei zusätzlich zur PDF.
-6. Der WHMCS-Kanal hängt exakt die geprüfte PDF an, und der authentifizierte Kundendownload liefert dieselben Bytes nur an den Rechnungseigentümer.
+6. Der direkte sevDesk-Versand liefert die finale Rechnung; der authentifizierte Kundendownload gibt dieselben geprüften PDF-Bytes nur an den Rechnungseigentümer aus.
 7. Recovery nach Create, XML-/PDF-Abruf, Öffnung und Versand führt keinen zweiten Remote-Write aus.
 
 Das Protokoll bleibt wie beim Invoice-Canary außerhalb von Git. Im Repository stehen weder Testadressen noch PDFs, XML-Dateien, IDs oder Rohpayloads. Ein gesetzter Setup-Schalter ersetzt den Canary nicht.
 
-Teilstand vom 20.07.2026: Mit synthetischen deutschen B2B-Konten wurden Create, Readback, `getXml`, `getPdf`, `sendBy`, `sendViaEmail(sendXml=false)`, der WHMCS-Mailkanal und ein erneuter idempotenter Worker-Lauf geprüft. [Mustangproject 2.24.0](https://github.com/ZUGFeRD/mustangproject/releases/tag/core-2.24.0) meldete PDF/A und eingebettetes XML als gültig; das extrahierte XML war bytegleich zur `getXml`-Antwort. Eigene Kundensitzungen erhielten die erwarteten Download-Bytes, ein fremder Kunde und ein delegierter Benutzer ohne `invoices`-Recht erhielten keinen Dokumentzugriff. sevDesk ließ `propertyIsEInvoice` beim Readback aus. Außerdem lieferte die kombinierte `CommunicationWay`-Abfrage mit Kontakt, Typ und Hauptkennzeichen keine Zeile, während die kontaktgebundene Liste den korrekten Haupt-Mail-Eintrag enthielt. Beide Fälle sind im Modul jetzt explizit und fail-closed behandelt. Der erste tatsächliche WHMCS-Mailanhang war jedoch die WHMCS-Core-PDF, weil der eigenständige CLI-Worker den Hook nicht geladen hatte. rc.4 enthält den Fix und hat einen technischen Wiederholungsversand mit verbrauchtem Anhangskontext ausgeführt. Für den Anhang aus dem Wiederholungsversand fehlt noch der SHA-256-/XML-Abgleich; `e_invoice_canary_confirmed` bleibt daher aus.
+Teilstand vom 23.07.2026: Mit synthetischen deutschen B2B-Konten wurden Create, Readback, `getXml`, `getPdf`, `sendBy`, `sendViaEmail(sendXml=false)` und ein erneuter idempotenter Worker-Lauf geprüft. [Mustangproject 2.24.0](https://github.com/ZUGFeRD/mustangproject/releases/tag/core-2.24.0) meldete PDF/A und eingebettetes XML als gültig; das extrahierte XML war bytegleich zur `getXml`-Antwort. Eigene Kundensitzungen erhielten die erwarteten Download-Bytes, ein fremder Kunde und ein delegierter Benutzer ohne `invoices`-Recht erhielten keinen Dokumentzugriff. sevDesk ließ `propertyIsEInvoice` beim Readback aus. Außerdem lieferte die kombinierte `CommunicationWay`-Abfrage mit Kontakt, Typ und Hauptkennzeichen keine Zeile, während die kontaktgebundene Liste den korrekten Haupt-Mail-Eintrag enthielt. Beide Fälle sind im Modul jetzt explizit und fail-closed behandelt. Der WHMCS-Wiederholungsversand verbrauchte den vorgesehenen Anhangskontext, lieferte im Postfach aber erneut die WHMCS-Core-PDF. Damit ist bestätigt, dass WHMCS 8.13 den Binäranhang aus `EmailPreSend` ignoriert. Dieser Kanal bleibt gesperrt; `e_invoice_canary_confirmed` bleibt außerdem bis zu den übrigen Gates aus.
 
 ## Twenty-One-Adapter installieren
 
@@ -333,6 +353,8 @@ bleiben fail-closed. Ist die Kleinunternehmerregel global aktiv, gilt ihr Profil
 als erforderlich. Ein Fehler in einem bestätigten oder für den geplanten Export
 benötigten Profil blockiert Remote-Writes weiterhin.
 
+Für zeitlich begrenzte Kleinunternehmerzeiträume wird im Setup ein Enddatum gesetzt. `31.12.2025` schließt Rechnungen mit Datum 31. Dezember 2025 ein und lässt Rechnungen ab 1. Januar 2026 wieder durch die übrige Steuerklassifikation laufen. Bleibt das Feld leer, gilt der aktivierte Schalter wie bisher unbegrenzt; der Health Check weist darauf hin. Ein ungültiger Altwert erscheint als Fehler und muss vor dem Nachlauf korrigiert werden.
+
 Ein fehlerhafter Health Check blockiert Remote-Writes, wenn der Fehler die Datenkonsistenz, Authentifizierung oder Steuerlogik betrifft.
 
 ### Runner-Smoke-Test bei leerer Queue
@@ -374,7 +396,7 @@ spät sehen.
 
 Ein Bulk- oder historischer Job löst nie automatisch Invoice-Versand aus, auch wenn `document_authority=sevdesk` konfiguriert ist. Eine Zustellung braucht einen separat bestätigten Vorgang. Historische Jobs erzeugen außerdem keine E-Rechnung.
 
-Der bestätigte Altbestand wird als eigener Jobtyp `historical_backfill` eingereiht. Vor jedem Invoice-Create sucht der Worker read-only nach der exakten finalen Rechnungsnummer. Danach prüft er mögliche Invoices mit demselben Datum, Kontakt, Währung und Betrag sowie Voucher-Kandidaten über Nummer, Datum, Kontakt, Betrag und `[WHMCS-INVOICE:<id>]`. Jeder mögliche Treffer, eine volle Suchseite oder ein nicht sicher abschließbarer Read blockiert die Neuanlage. Der Dublettenschutz setzt selbst kein Mapping; ein Kandidat muss separat geklärt werden.
+Der bestätigte Altbestand wird als eigener Jobtyp `historical_backfill` eingereiht. Vor jedem Invoice-Create sucht der Worker read-only nach der exakten effektiven Rechnungsnummer. Danach prüft er mögliche Invoices mit demselben Datum, Kontakt, Währung und Betrag sowie Voucher-Kandidaten über Nummer, Datum, Kontakt, Betrag und `[WHMCS-INVOICE:<id>]`. Jeder mögliche Treffer, eine volle Suchseite oder ein nicht sicher abschließbarer Read blockiert die Neuanlage. Der Dublettenschutz setzt selbst kein Mapping; ein Kandidat muss separat geklärt werden.
 
 Ein Cancel verhindert neue Claims, bricht laufende API-Operationen aber nicht gewaltsam ab. Deren Ergebnis wird gespeichert oder per Recovery geklärt. Cancel, Claim und Lease-Recovery sperren dabei stets Job vor Item und vergleichen die aktuelle Lease erneut. Liefert ein bereits laufendes Item anschließend nur einen sicheren Retry zurück, wird es stattdessen `cancelled` und gibt seinen Dedupe-Key frei. Liegt am fortzusetzenden Checkpoint ein möglicher oder bereits bestätigter Remote-Effekt vor, wird das Item `ambiguous` und behält den Dedupe-Key; so bleibt kein nicht mehr claimbares `retry_wait` zurück.
 
@@ -424,11 +446,26 @@ Für den Nachlauf zählt nur der aktuelle Datenbestand. Deshalb beginnt er mit e
 - ZUGFeRD-Mappings mit fehlendem oder abweichendem XML-Hash;
 - ungemappte, exportfähige Paid-Invoices;
 - mit dokumentiertem Grund übersprungene Unpaid-/Datumsfälle;
-- bestätigte Rule-19-Invoice-Kandidaten sowie Rule-18/20-, gemischte, Credit-, Nullsummen-, Fremdwährungs- und sonstige manuelle Fälle.
+- bestätigte Rule-19-Invoice-Kandidaten sowie Rule-18/20-, gemischte, Nullsummen-, Fremdwährungs- und sonstige manuelle Fälle;
+- reine WHMCS-Sammelzahlungsbelege und die exakt mit ihnen verknüpften Originalrechnungen;
+- sonstige Guthabenfälle, unvollständige Sammelzahlungsketten und widersprüchliche Beträge;
+- eindeutig zugeordnete `PromoHosting`-Rabatte sowie alle übrigen negativen Positionen.
 
-Rechnungen mit angewendetem Kundenguthaben bleiben aus Bulk-Jobs ausgeschlossen. Beim Einzelexport zeigt das Modul Brutto, Guthaben und Zahlbetrag an. Anschließend lässt es nur die Bestätigung „voller Rechnungsbrutto-Voucher; Guthaben separat klären“ zu.
+Ein vollständig stimmiger Sammelzahlungsbeleg ist kein eigener Umsatz und wird übersprungen. Bei den Originalrechnungen gilt centgenau `subtotal + tax + tax2 = total + credit`. Der Dokumentbrutto beträgt `total + credit`; `total` ist der direkt gezahlte Anteil und muss der Summe positiver `tblaccounts`-Zahlungen entsprechen. Bei Vollguthaben steht `total = 0`. Nach PDF- und Kontaktverarbeitung prüft der Worker den vollständigen Zahlungsgraphen ein letztes Mal, bevor er den Dokument-Write vormerkt. Die gemeinsame Banktransaktion wird nicht automatisch auf mehrere sevDesk-Belege verteilt und bleibt eine manuelle Zahlungszuordnung.
 
-Ohne diese Bestätigung gibt es keinen Write. Eine proportionale Umsatzkürzung ist nicht vorgesehen.
+Zusätzlich friert der Worker den vollständigen lokalen Rechnungsvertrag als SHA-256 ein. Eine Änderung an Datum, Nummer, Steuerwerten, Positionen oder steuerlich relevanten Kundendaten endet vor dem ersten möglichen Remote-Write mit `whmcs_invoice_contract_changed`. Nach einem bereits möglichen Write wird daraus `whmcs_invoice_contract_changed_after_write`; fehlt dort der ursprüngliche Hash, lautet der Fehler `whmcs_invoice_contract_snapshot_missing_after_write`. Diese Fälle dürfen nicht normal wiederholt werden.
+
+Die sevDesk-Kontakt-ID wird separat gespeichert. `whmcs_contact_link_changed` stoppt einen Beleg, wenn das WHMCS-Kundenfeld während des sicheren Vorlaufs von A zu B wechselt. Nach einem möglichen Dokument-Write lautet der Code `whmcs_contact_link_changed_after_write`; die Recovery verwendet dann ausschließlich die zuvor gespeicherte ID. `contact_pre_write_guard_failed` bedeutet, dass schon die Kontaktneuanlage vor ihrem ersten POST gestoppt wurde.
+
+Der Paid-Hook verwendet dafür dieselbe vollständige lokale Prüfung wie der Worker. Nur `Invoice`-Positionen zu finden genügt nicht. Ein alter Elternbeleg wird nur ignoriert, wenn sein Status ausdrücklich `Unpaid` oder `Cancelled` ist und er weder Zahlung, Guthaben, Mapping noch Rückerstattung trägt. `Refunded`, `Collections`, `Draft` und unbekannte Zustände bleiben auch ohne verbliebene Transaktionszeile Prüffälle. Teilt ein Parent auch nur eines seiner Ziele mit einem zweiten aktiven Parent, bleibt der gesamte betroffene Graph gesperrt.
+
+Die Parent-ID aus dieser Hook-Prüfung ist Teil des Zieljobs. Ein späterer Wechsel zu einem anderen Sammelbeleg oder zu einer gewöhnlichen Rechnung wird nicht übernommen. Wartet bereits ein Hybridjob aus `InvoiceCreated`, ergänzt der Paid-Hook die Parent-ID unter Lock. Eine widersprüchliche zweite ID wird nur als Konflikt markiert und nie über die erste geschrieben. Rückerstattungen sperren die Kette auch dann, wenn WHMCS die Refund-Zeile unter einer anderen `invoiceid` führt und nur `refundid` auf die ursprüngliche Zahlung verweist.
+
+Andere Guthabenfälle bleiben aus Bulk-Jobs ausgeschlossen. Beim Voucher-Einzelexport zeigt das Modul Brutto, Guthaben und Zahlbetrag an und verlangt weiterhin die Bestätigung „voller Rechnungsbrutto-Voucher; Guthaben separat klären“. Ohne diese Bestätigung gibt es keinen Write. Eine proportionale Umsatzkürzung ist nicht vorgesehen.
+
+Ein `PromoHosting`-Rabatt ist nur in `invoice_only` mit Rule 11, 0 %, EUR und eigenem Rabatt-Canary zulässig. Der Canary muss Create, den Marker `[WHMCS-DISCOUNT:<sha256>]`, `sumDiscounts`, Positionen, Gesamtsumme, PDF und eine rein lesende Recovery prüfen. Backfills bleiben auch für diesen Fall mailfrei. Andere negative Positionen werden nicht automatisch übertragen.
+
+Ist das ZUGFeRD-Kundenprofil gesetzt und enthält die Rechnung angewendetes Guthaben, bleibt sie blockiert. Das gilt auch bei einer exakt erkannten Sammelzahlung. Es gibt keinen stillen Rückfall auf eine normale PDF-Invoice.
 
 Ungemappte Invoices dürfen nicht pauschal in einen Job übernommen werden. Maßgeblich ist die aktuelle Live-Inventur. Die Übergangsinventur im Setup liefert dafür Zähler und Sperrhinweise; die fachliche Auswahl erfolgt anschließend in der gemeinsamen Vorschau.
 
@@ -443,6 +480,8 @@ Der Dry-Run lädt die WHMCS-Daten, prüft Eligibility, klassifiziert Steuerfall 
 ### 4. Canary
 
 Zunächst nur wenige repräsentative WHMCS-Rechnungen pro freigegebener Steuerklasse exportieren. Für Voucher prüft die Buchhaltung WHMCS-PDF, Konto, Rule, Rate und Summen. Für Invoice prüft sie zusätzlich unveränderte Nummer, `RE`, SevUser, Unity, Landsteuersatz, fehlendes benutzerdefiniertes `accountDatev`, Öffnung/Versand und die finale sevDesk-PDF. Der allgemeine Invoice-API-Canary muss bereits vorher bestanden sein.
+
+Enthält der Bestand den freigegebenen `PromoHosting`-Fall, folgt vor dem Bulk ein eigener synthetischer Rabatt-Canary. Solange dessen Setup-Gate aus ist, dürfen betroffene Rechnungen nur als blockierte Vorschaufälle erscheinen.
 
 ### 5. Abschnittsweise exportieren
 
@@ -478,6 +517,20 @@ Kontakt-POST bleibt ungeklärt, das Item `ambiguous` und der Dedupe-Key reservie
 
 Ein beschädigter Booking-/Korrektur-Snapshot oder ein früher fachlicher Preflight-Fehler wird nach `booking_write_requested` beziehungsweise einem Korrektur-Write-Checkpoint ebenfalls nicht zu einem frischen permanenten Fehler zurückgestuft. Er bleibt mit demselben Checkpoint und derselben Remote-ID `ambiguous`. Änderungen am `import_after`-Stichtag wirken nur vor dem ersten Dokument-Write; eine laufende Voucher-/Invoice-Recovery wird dadurch nicht übersprungen.
 
+## Voucher-Recovery
+
+Ab `voucher_write_requested` gelten ausschließlich die im Job eingefrorenen Werte
+für Kontakt, `taxRule` und `accountDatev`. Fehlt einer dieser Nachweise, endet die
+Recovery mit `voucher_verification_snapshot_missing` beziehungsweise
+`voucher_reconciliation_context_missing`; aktuelle Setupwerte sind kein Ersatz.
+
+Ohne bekannte Remote-ID sucht das Modul den exakten WHMCS-Marker seitenweise.
+Anschließend liest es immer den konkreten Voucher und alle `VoucherPos` erneut.
+Erst ein vollständig passender Header samt Positionen darf das typisierte Mapping
+wiederherstellen. Mehrere Treffer, abweichende Rule-/Kontowerte oder eine volle
+1.000-Kandidaten-Grenze bleiben `ambiguous`. In keinem dieser Fälle wird ein
+zweiter Voucher erstellt.
+
 ## Invoice-Recovery
 
 Der Checkpoint bestimmt die einzig zulässige Aktion:
@@ -487,10 +540,12 @@ Der Checkpoint bestimmt die einzig zulässige Aktion:
 - nach `invoice_created` vor `mapping_persisted`: bekannte Invoice-ID lesen, exakt prüfen und erst dann Typ/ID mappen; bei ZUGFeRD zusätzlich `getXml` prüfen und den ersten XML-Hash einfrieren;
 - nach `invoice_xml_verified`: bekannte Invoice-ID, PaymentMethod, Kontakt, Adresshash und gespeicherten XML-Hash erneut lesen. Ein vorhandenes E-Rechnungsflag muss wahr sein; ein fehlendes Flag ist nur zusammen mit gültigem, unverändertem XML zulässig. Fehlendes oder abweichendes XML bleibt `ambiguous`;
 - nach `mapping_persisted` ohne auffindbares lokales Mapping: nur den exakten Draft lesend suchen und typisiert wiederherstellen; niemals neu erstellen;
-- nach `invoice_open_write_requested`: Status, `sendType`, Kontakt, Länderfelder und Positionen lesen; `sendBy` nicht automatisch wiederholen. Bei Rule 19 ist ein vorhandenes `deliveryAddressCountry` maßgeblich und darf von der Rechnungsadresse abweichen. Nur wenn es fehlt, muss das eingebettete `addressCountry` zum eingefrorenen Zielland passen;
+- nach `invoice_open_write_requested`: Status, `sendType`, Kontakt, vollständige Rechnungsadresse, Länderfelder und Positionen lesen; `sendBy` nicht automatisch wiederholen. Bei Rule 19 ist ein vorhandenes `deliveryAddressCountry` maßgeblich und darf von der Rechnungsadresse abweichen. Nur wenn es fehlt, muss das eingebettete `addressCountry` zum eingefrorenen Zielland passen. Fehlt der normale `invoiceAddressHash`/`invoiceAddressCountryId`-Snapshot oder weicht die Remote-Adresse ab, bleibt der Altjob `ambiguous`; weder Kontakt noch Draft werden automatisch geändert;
 - nach `invoice_delivery_write_requested`: Status, `sendType`, `sendDate`, Kontakt, Länderfelder und Positionen lesen; `sendViaEmail` nicht automatisch wiederholen. Für Rule 19 gilt derselbe strenge Länderabgleich wie nach dem Öffnen;
 - nach `whmcs_email_write_requested`: der Providerübergang kann unbekannt sein. Item bleibt `ambiguous`; manueller Resend nur nach Bestätigung des Doppelversandrisikos;
 - nach `whmcs_email_handed_off`: ausschließlich lokale Ready-/Delivery-Metadaten vervollständigen; weder `SendEmail` noch PDF-/sevDesk-Endpunkte erneut aufrufen; als an WHMCS-Mailprovider übergeben markieren, nicht als im Empfängerpostfach zugestellt.
+
+Die aktuelle SevUser- oder Unity-Liste wird in diesen Recovery-Zuständen nicht als neue Entscheidungsgrundlage gelesen. Maßgeblich bleiben die vor dem ersten Create eingefrorenen IDs; nur ein noch nicht begonnener Create prüft ihre aktuelle Existenz erneut.
 
 Fehlt das Mapping erst nach einem Open-, Delivery- oder Mail-Checkpoint, bleibt der Job mit unverändertem Checkpoint `ambiguous`. Dieser Zustand wird nicht automatisch auf Create-Recovery zurückgestuft; Remote-Dokument und lokale Zuordnung müssen einzeln geprüft werden.
 
@@ -587,13 +642,15 @@ Wenn bereits das Anlegen eines Jobs timeoutet, zuerst in der Jobliste prüfen, o
 
 Nach `invoice_delivery_write_requested` oder `whmcs_email_write_requested` keinen automatischen Resend auslösen. Remote-Status beziehungsweise WHMCS-Mailprovider nur lesend prüfen. Kann der Ausgang nicht bewiesen werden, bleibt `ambiguous`. Ein manueller Resend erfordert eine sichtbare Bestätigung, dass der Kunde die Rechnung möglicherweise doppelt erhält.
 
-Beim Kanal `whmcs_template` muss der eigenständige CLI-Worker die Modul-Hooks vor dem Runner laden. Fehlt `sevdesk_email_pre_send`, stoppt das Item vor `SendEmail` mit `invoice_email_hook_unavailable`. Bleibt der In-Memory-Kontext trotz erfolgreicher Local-API-Antwort erhalten, ist der Versand möglicherweise mit einem falschen oder fehlenden Anhang erfolgt. Das Item bleibt dann unter `whmcs_email_attachment_not_consumed` am Write-Checkpoint stehen und darf nicht automatisch wiederholt werden.
+Ein gespeicherter Kanal `whmcs_template` wird unter WHMCS 8.13 mit `whmcs_email_attachment_unsupported` gestoppt. Das geschieht bei neuen Vorgängen vor dem ersten Invoice-Write. Der Wert wird weder gelöscht noch still auf sevDesk umgestellt. Bereits versendete Testnachrichten mit `whmcs_email_handed_off` müssen anhand des Postfachanhangs manuell geklärt werden; der verbrauchte In-Memory-Kontext beweist unter WHMCS 8.13 nicht, dass der Mailer die PDF übernommen hat.
 
 Bei sevDesk-Dokumenthoheit muss `sync_enabled` im regulären Setup aktiv bleiben. Setzt ein Authentifizierungsalarm oder eine Bestandsprüfung die Synchronisation vorübergehend aus, schützt der lokale `InvoicePaidPreEmail`-Guard die konfigurierte Hoheit weiterhin: Es wird keine WHMCS-Endrechnungs-Mail als Fallback versendet. Bei einem neuen Paid-Ereignis unter bereits aktivem Authentifizierungsalarm speichert der Hook unter gültiger Signatur, Review aus und bestätigtem Canary genau das normale deduplizierte Pending-Item, obwohl Sync alarmbedingt aus ist. Der Runner claimt wegen des Alarms nichts; der Clientbereich bleibt dauerhaft Pending, bis die Mandantenprüfung erfolgreich war. Ohne Alarm erzeugt ein ausgeschalteter Sync weiterhin keinen Job.
 
+Der Schutz gilt auch bei einem späteren manuellen Versand. Bei neuen Invoices ist die Hoheit im Mapping maßgeblich. Nur ältere RC-Zeilen ohne diesen Wert dürfen vorübergehend auf einen eindeutig eingefrorenen Jobkontext zurückgreifen. Belegt keine der beiden Quellen ausdrücklich die WHMCS-Hoheit, wird die Mail blockiert. Voucher und untypisierte Altzuordnungen werden dadurch nicht nachträglich der sevDesk-Hoheit zugeschlagen.
+
 Schlägt bei einer später manuell ausgelösten Invoice-Mail die lokale Template-,
 Mapping- oder Kontextabfrage fehl, ist ohne request-lokalen Payment-Guard die
-eingefrorene Dokumenthoheit nicht beweisbar. Der Hook darf weder die aktuelle
+gespeicherte beziehungsweise eingefrorene Dokumenthoheit nicht beweisbar. Der Hook darf weder die aktuelle
 globale Hoheit als historischen Ersatz verwenden noch blind alle WHMCS-Mails
 unterdrücken. Bis Datenbank und WHMCS-Mailzustand wieder gesund sind, deshalb
 keine manuelle Invoice- oder Serienmail auslösen; ein möglicherweise bereits

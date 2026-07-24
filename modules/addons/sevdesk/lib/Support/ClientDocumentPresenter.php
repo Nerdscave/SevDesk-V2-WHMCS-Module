@@ -33,7 +33,7 @@ final class ClientDocumentPresenter
             $invoiceNumber = trim($fallbackNumber);
         }
 
-        $ready = self::isReadyInvoiceMapping($mapping);
+        $ready = self::isDeliverableInvoiceMapping($invoiceStatus, $mapping);
         $state = $ready ? 'ready' : 'proforma';
         if (!$ready && strcasecmp(trim($invoiceStatus), 'Paid') === 0) {
             $state = match (true) {
@@ -60,5 +60,11 @@ final class ClientDocumentPresenter
             && preg_match('/^[1-9]\d*$/', trim((string) ($mapping->sevdesk_id ?? ''))) === 1
             && trim((string) ($mapping->document_ready_at ?? '')) !== ''
             && preg_match('/^[a-f0-9]{64}$/', strtolower(trim((string) ($mapping->pdf_sha256 ?? '')))) === 1;
+    }
+
+    public static function isDeliverableInvoiceMapping(string $invoiceStatus, ?object $mapping): bool
+    {
+        return in_array(strtolower(trim($invoiceStatus)), ['paid', 'refunded'], true)
+            && self::isReadyInvoiceMapping($mapping);
     }
 }

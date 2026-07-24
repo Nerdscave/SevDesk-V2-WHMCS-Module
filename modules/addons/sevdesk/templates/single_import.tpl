@@ -37,6 +37,7 @@
                 <dt>Dokumentziel</dt><dd>{$preflight.document_type|default:'—'|escape:'html':'UTF-8'} · Hoheit {$preflight.document_authority|default:'—'|escape:'html':'UTF-8'}</dd>
                 <dt>TaxRule / Konto</dt><dd>{$preflight.tax_rule|default:'—'|escape:'html':'UTF-8'} / {if $preflight.document_type === 'invoice'}nicht an Invoice übertragen{else}{$preflight.account_datev|default:'—'|escape:'html':'UTF-8'}{/if}</dd>
                 <dt>Zustellung</dt><dd>{$preflight.delivery_state|default:'—'|escape:'html':'UTF-8'}</dd>
+                {if $preflight.payment_booking_note}<dt>Sammelzahlung</dt><dd>{$preflight.payment_booking_note|escape:'html':'UTF-8'}</dd>{/if}
             </dl>
             {if $preflight.exportable}
                 <form method="post" action="{$moduleLink|escape:'html':'UTF-8'}&amp;a=singleImport" data-loading-form>

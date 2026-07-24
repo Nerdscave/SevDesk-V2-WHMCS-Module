@@ -79,7 +79,9 @@ final class ClientDeliveryContractTest extends TestCase
         self::assertStringContainsString('findByInvoice($invoiceId)', $method);
         self::assertStringContainsString('latestDocumentContextForInvoice(', $method);
         self::assertStringContainsString('DocumentDeliveryContext::usesSevdeskInvoiceAuthority(', $method);
-        self::assertStringContainsString('ClientDocumentPresenter::isReadyInvoiceMapping(', $method);
+        self::assertStringContainsString('invoiceStatusForDelivery($invoiceId)', $method);
+        self::assertGreaterThanOrEqual(2, substr_count($method, 'invoiceStatusForDelivery($invoiceId)'));
+        self::assertStringContainsString('ClientDocumentPresenter::isDeliverableInvoiceMapping(', $method);
         self::assertStringContainsString('invoicePdf()->fetch((string) $mapping->sevdesk_id)', $method);
         self::assertStringContainsString("hash_equals(\$expectedHash, \$pdf['sha256'])", $method);
         self::assertStringContainsString('tripAuthenticationSafetyGates()', $method);

@@ -30,10 +30,61 @@ final class HookBehaviorTest extends TestCase
         self::assertSame(0, $result['remoteCalls']);
     }
 
+    public function testMassPaymentHookQueuesOriginalInvoicesAndKeepsContainerMail(): void
+    {
+        $result = $this->runScenario('mass_payment_container');
+
+        self::assertFalse($result['guard']);
+        self::assertSame([43, 44], $result['invoiceIds']);
+        self::assertSame([true, true], $result['deliveryRequested']);
+        self::assertSame([42, 42], $result['containerReferences']);
+        self::assertSame(0, $result['remoteCalls']);
+    }
+
+    public function testTargetFirstMassPaymentHookFreezesItsConfirmedParent(): void
+    {
+        $result = $this->runScenario('mass_payment_target_first');
+
+        self::assertTrue($result['guard']);
+        self::assertSame([43], $result['invoiceIds']);
+        self::assertSame([42], $result['containerReferences']);
+        self::assertSame(0, $result['remoteCalls']);
+    }
+
+    public function testContainerFirstThenTargetHooksKeepTheSameConfirmedParent(): void
+    {
+        $result = $this->runScenario('mass_payment_container_then_target');
+
+        self::assertTrue($result['targetGuard']);
+        self::assertSame([43, 44, 43], $result['invoiceIds']);
+        self::assertSame([42, 42, 42], $result['containerReferences']);
+        self::assertSame(0, $result['remoteCalls']);
+    }
+
+    public function testUnprovenMassPaymentShapeCannotBypassGuardOrQueueTargets(): void
+    {
+        $result = $this->runScenario('invalid_mass_payment_container');
+
+        self::assertTrue($result['guard']);
+        self::assertSame([42], $result['invoiceIds']);
+        self::assertSame([null], $result['containerReferences']);
+        self::assertSame(0, $result['remoteCalls']);
+    }
+
     public function testPaidInvoiceGuardFailsClosedOnALocalReadError(): void
     {
         $result = $this->runScenario('local_read_failure');
 
+        self::assertSame(['abortsend' => true], $result['mailResult']);
+        self::assertTrue($result['logged']);
+        self::assertSame(0, $result['remoteCalls']);
+    }
+
+    public function testMassPaymentClassificationReadFailureKeepsPaidMailBlocked(): void
+    {
+        $result = $this->runScenario('mass_payment_read_failure');
+
+        self::assertTrue($result['guard']);
         self::assertSame(['abortsend' => true], $result['mailResult']);
         self::assertTrue($result['logged']);
         self::assertSame(0, $result['remoteCalls']);
@@ -171,6 +222,92 @@ final class HookBehaviorTest extends TestCase
         self::assertSame(0, $result['remoteCalls']);
     }
 
+    public function testVoucherMappingSurvivesAContextReadFailureDuringPaidPreEmail(): void
+    {
+        $result = $this->runScenario('voucher_mapping_pre_email_context_read_failure');
+
+        self::assertFalse($result['guard']);
+        self::assertSame([], $result['mailResult']);
+        self::assertFalse($result['logged']);
+        self::assertSame(1, $result['documentContextReads']);
+        self::assertSame(0, $result['remoteCalls']);
+    }
+
+    public function testFrozenWhmcsAuthoritySurvivesALaterContextReadFailure(): void
+    {
+        $result = $this->runScenario('mapped_whmcs_invoice_later_context_read_failure');
+
+        self::assertFalse($result['guard']);
+        self::assertSame([], $result['mailResult']);
+        self::assertTrue($result['logged']);
+        self::assertSame(2, $result['documentContextReads']);
+        self::assertSame(0, $result['remoteCalls']);
+    }
+
+    public function testTypedInvoiceWithoutFrozenAuthorityKeepsPaidMailGuarded(): void
+    {
+        $result = $this->runScenario('typed_invoice_without_frozen_authority');
+
+        self::assertTrue($result['guard']);
+        self::assertSame(['abortsend' => true], $result['mailResult']);
+        self::assertSame(2, $result['documentContextReads']);
+        self::assertSame(0, $result['remoteCalls']);
+    }
+
+    public function testManualInvoiceMailForTypedInvoiceWithoutFrozenAuthorityIsBlocked(): void
+    {
+        $result = $this->runScenario('manual_typed_invoice_without_frozen_authority');
+
+        self::assertFalse($result['guardBeforeSend']);
+        self::assertSame(['abortsend' => true], $result['mailResult']);
+        self::assertSame(1, $result['documentContextReads']);
+        self::assertSame(0, $result['remoteCalls']);
+    }
+
+    #[DataProvider('durableAuthorityMailProvider')]
+    public function testDurableLegacyAuthorityControlsPaidAndManualInvoiceMail(
+        string $scenario,
+        bool $expectedGuard,
+        array $expectedMailResult,
+    ): void {
+        $result = $this->runScenario($scenario);
+
+        self::assertSame($expectedGuard, $result['guard']);
+        self::assertSame($expectedMailResult, $result['mailResult']);
+        self::assertSame(0, $result['remoteCalls']);
+    }
+
+    /** @return iterable<string,array{string,bool,array<string,bool>}> */
+    public static function durableAuthorityMailProvider(): iterable
+    {
+        yield 'WHMCS paid mail' => ['durable_whmcs_paid_email', false, []];
+        yield 'WHMCS manual mail' => ['durable_whmcs_manual_email', false, []];
+        yield 'sevdesk paid mail' => ['durable_sevdesk_paid_email', true, ['abortsend' => true]];
+        yield 'sevdesk manual mail' => ['durable_sevdesk_manual_email', false, ['abortsend' => true]];
+    }
+
+    public function testManualInvoiceMailForTypedInvoiceSurvivesAContextReadFailure(): void
+    {
+        $result = $this->runScenario('manual_typed_invoice_context_read_failure');
+
+        self::assertFalse($result['guardBeforeSend']);
+        self::assertSame(['abortsend' => true], $result['mailResult']);
+        self::assertTrue($result['logged']);
+        self::assertSame(1, $result['documentContextReads']);
+        self::assertSame(0, $result['remoteCalls']);
+    }
+
+    public function testFrozenSevdeskAuthorityRemainsGuardedOnALaterContextReadFailure(): void
+    {
+        $result = $this->runScenario('mapped_sevdesk_invoice_later_context_read_failure');
+
+        self::assertTrue($result['guard']);
+        self::assertSame(['abortsend' => true], $result['mailResult']);
+        self::assertTrue($result['logged']);
+        self::assertSame(2, $result['documentContextReads']);
+        self::assertSame(0, $result['remoteCalls']);
+    }
+
     public function testMappedSevdeskInvoiceKeepsPaidMailGuardAcrossALaterReadFailure(): void
     {
         $result = $this->runScenario('mapped_sevdesk_invoice_later_read_failure');
@@ -242,6 +379,14 @@ final class HookBehaviorTest extends TestCase
             'invoiceNumber' => 'RE-42',
             'downloadUrl' => '/whmcs/index.php?m=sevdesk&a=download&id=42',
         ], $result['result']['sevdeskDocument']);
+    }
+
+    public function testWhmcsAuthorityDoesNotExposeTheSevdeskClientAdapter(): void
+    {
+        $result = $this->runScenario('client_invoice_whmcs_authority');
+
+        self::assertSame([], $result['result']);
+        self::assertSame(0, $result['remoteCalls']);
     }
 
     /** @return array<string, mixed> */

@@ -6,6 +6,8 @@ use WHMCS\Database\Capsule;
 use WHMCS\Module\Addon\SevDesk\Application;
 use WHMCS\Module\Addon\SevDesk\Config;
 use WHMCS\Module\Addon\SevDesk\Database\Migrator;
+use WHMCS\Module\Addon\SevDesk\Repository\MappingRepository;
+use WHMCS\Module\Addon\SevDesk\Service\WhmcsGateway;
 use WHMCS\Module\Addon\SevDesk\Support\AdminAssets;
 use WHMCS\Module\Addon\SevDesk\Support\AdminInvoiceControls;
 use WHMCS\Module\Addon\SevDesk\Support\ClientDocumentPresenter;
@@ -49,6 +51,65 @@ function sevdesk_automatic_enqueue_enabled(Application $application): bool
     }
 
     return true;
+}
+
+/** @return array{containerInvoiceId:int|null,targetInvoiceIds:list<int>} */
+function sevdesk_mass_payment_hook_context(Application $application, int $invoiceId): array
+{
+    if ($invoiceId < 1) {
+        return ['containerInvoiceId' => null, 'targetInvoiceIds' => []];
+    }
+
+    $context = $application->paymentStructure()->massPaymentContextForHook($invoiceId);
+    $targets = $context['targetInvoiceIds'] ?? null;
+    $containerInvoiceId = $context['containerInvoiceId'] ?? null;
+    if (!is_array($targets)) {
+        throw new RuntimeException('The confirmed WHMCS mass-payment hook context is invalid.');
+    }
+    $ids = [];
+    foreach ($targets as $targetId) {
+        if (
+            (!is_int($targetId) && !is_string($targetId))
+            || preg_match('/^[1-9]\d*$/', (string) $targetId) !== 1
+            || (int) $targetId === $invoiceId
+            || isset($ids[(int) $targetId])
+        ) {
+            throw new RuntimeException(
+                'The confirmed WHMCS mass-payment target snapshot is invalid.',
+            );
+        }
+        $ids[(int) $targetId] = true;
+    }
+    $targetIds = array_keys($ids);
+    sort($targetIds, SORT_NUMERIC);
+
+    if (
+        $containerInvoiceId !== null
+        && (
+            (!is_int($containerInvoiceId) && !is_string($containerInvoiceId))
+            || preg_match('/^[1-9]\d*$/', (string) $containerInvoiceId) !== 1
+        )
+    ) {
+        throw new RuntimeException('The confirmed WHMCS mass-payment parent is invalid.');
+    }
+    $containerInvoiceId = $containerInvoiceId !== null ? (int) $containerInvoiceId : null;
+    if (
+        ($targetIds !== [] && $containerInvoiceId !== $invoiceId)
+        || ($targetIds === [] && $containerInvoiceId === $invoiceId)
+    ) {
+        throw new RuntimeException('The confirmed WHMCS mass-payment graph is inconsistent.');
+    }
+
+    return [
+        'containerInvoiceId' => $containerInvoiceId,
+        'targetInvoiceIds' => $targetIds,
+    ];
+}
+
+/** @return list<int> */
+function sevdesk_mass_payment_target_ids(Application $application, int $invoiceId): array
+{
+    return sevdesk_mass_payment_hook_context($application, $invoiceId)['targetInvoiceIds'];
 }
 
 /** @param array<string, mixed> $vars */
@@ -105,15 +166,25 @@ function sevdesk_enqueue_invoice(array $vars, string $event): void
         }
 
         $invoiceId = (int) ($vars['invoiceid'] ?? 0);
-        if ($invoiceId < 1 || $application->mappings->findCompleteByInvoice($invoiceId) !== null) {
+        if ($invoiceId < 1) {
             return;
         }
 
-        $application->jobs->create('automatic_export', [[
-            'invoice_id' => $invoiceId,
-            'action' => 'export_document',
-            'dedupe_key' => 'export_voucher:' . $invoiceId,
-            'candidate' => [
+        $massPaymentContext = $event === 'InvoicePaid'
+            ? sevdesk_mass_payment_hook_context($application, $invoiceId)
+            : ['containerInvoiceId' => null, 'targetInvoiceIds' => []];
+        $massPaymentTargets = $massPaymentContext['targetInvoiceIds'];
+        $massPaymentContainerInvoiceId = $massPaymentContext['containerInvoiceId'];
+        // A pure Mass Pay invoice is only a payment container. Queue its
+        // original revenue invoices directly and leave the container entirely
+        // on the WHMCS presentation and mail path.
+        $invoiceIds = $massPaymentTargets !== [] ? $massPaymentTargets : [$invoiceId];
+        $items = [];
+        foreach ($invoiceIds as $queuedInvoiceId) {
+            if ($application->mappings->findCompleteByInvoice($queuedInvoiceId) !== null) {
+                continue;
+            }
+            $candidate = [
                 'trigger' => $event,
                 'requestedExportMode' => $mode,
                 'requestedDocumentAuthority' => $documentAuthority,
@@ -142,8 +213,28 @@ function sevdesk_enqueue_invoice(array $vars, string $event): void
                 )),
                 'delivery_requested' => $event === 'InvoicePaid'
                     && $documentAuthority === 'sevdesk',
-            ],
-        ]], ['trigger' => $event]);
+            ];
+            if (
+                $massPaymentContainerInvoiceId !== null
+                && $queuedInvoiceId !== $massPaymentContainerInvoiceId
+            ) {
+                $candidate['massPaymentContainerInvoiceId'] = $massPaymentContainerInvoiceId;
+            }
+            $items[] = [
+                'invoice_id' => $queuedInvoiceId,
+                'action' => 'export_document',
+                'dedupe_key' => 'export_voucher:' . $queuedInvoiceId,
+                'candidate' => $candidate,
+            ];
+        }
+        if ($items === []) {
+            return;
+        }
+
+        $application->jobs->create('automatic_export', $items, [
+            'trigger' => $event,
+            'mass_payment_container' => $massPaymentTargets !== [] ? $invoiceId : null,
+        ]);
     } catch (Throwable $error) {
         if (function_exists('logActivity')) {
             logActivity('sevdesk could not enqueue ' . $event . ': ' . get_class($error));
@@ -177,28 +268,44 @@ function sevdesk_prepare_paid_invoice_email_guard(array $vars): void
         $currentModeOwnsNewInvoice =
             (string) $application->config->get('export_mode', 'voucher_only') === 'invoice_only'
             && (string) $application->config->get('document_authority', 'whmcs') === 'sevdesk';
+        $pureMassPaymentContainer = false;
         // Request-local and idempotent: no job, remote call or PDF operation is
         // allowed before WHMCS has completed the payment-email phase. The
         // authority guard deliberately survives review, authentication and
         // sync pauses; those states must not silently restore a WHMCS final PDF.
         if ($currentModeOwnsNewInvoice) {
             InvoiceEmailGuardContext::register($invoiceId);
+            $pureMassPaymentContainer = sevdesk_mass_payment_target_ids(
+                $application,
+                $invoiceId,
+            ) !== [];
         }
         $mapping = $application->mappings->findByInvoice($invoiceId);
         if ($mapping !== null) {
             // Existing mappings keep their frozen/legacy document authority;
-            // a later global mode change must not reclassify their email. A
-            // proven sevdesk-owned Invoice keeps the fail-closed guard so a
-            // later local read failure cannot leak WHMCS' final document.
+            // a later global mode change must not reclassify their email.
+            // Voucher and untyped legacy mappings are WHMCS-owned regardless
+            // of any job context, so a failed context read must not retain the
+            // global guard. A typed Invoice stays protected until its frozen
+            // context positively proves WHMCS authority.
+            if (($mapping->document_type ?? null) === MappingRepository::DOCUMENT_TYPE_INVOICE) {
+                InvoiceEmailGuardContext::register($invoiceId);
+            } else {
+                InvoiceEmailGuardContext::discard($invoiceId);
+
+                return;
+            }
             $documentContext = $application->jobs->latestDocumentContextForInvoice(
                 $invoiceId,
                 true,
             );
             if (DocumentDeliveryContext::usesSevdeskInvoiceAuthority($documentContext, $mapping)) {
                 InvoiceEmailGuardContext::register($invoiceId);
-            } else {
-                InvoiceEmailGuardContext::discard($invoiceId);
+            } elseif (DocumentDeliveryContext::usesWhmcsInvoiceAuthority($documentContext, $mapping)) {
+                InvoiceEmailGuardContext::confirmWhmcsAuthority($invoiceId);
             }
+        } elseif ($pureMassPaymentContainer) {
+            InvoiceEmailGuardContext::discard($invoiceId);
         }
     } catch (Throwable $error) {
         if (function_exists('logActivity')) {
@@ -317,10 +424,10 @@ function sevdesk_client_invoice_variables(array $vars): array
             return [];
         }
 
-        $invoiceNumber = trim((string) ($invoice->invoicenum ?? ''));
-        if ($invoiceNumber === '') {
-            $invoiceNumber = (string) $invoiceId;
-        }
+        $invoiceNumber = WhmcsGateway::effectiveInvoiceNumber(
+            $invoiceId,
+            (string) ($invoice->invoicenum ?? ''),
+        );
         $webRoot = rtrim((string) ($vars['WEB_ROOT'] ?? ''), '/');
         $downloadUrl = ($webRoot === '' ? '' : $webRoot . '/')
             . 'index.php?m=sevdesk&a=download&id=' . rawurlencode((string) $invoiceId);
@@ -362,6 +469,7 @@ function sevdesk_email_pre_send(array $vars): array
         }
         $hasActiveAttachmentContext = EmailAttachmentContext::hasActiveContext($invoiceId, $template);
         $hasPaidInvoiceGuard = InvoiceEmailGuardContext::appliesTo($invoiceId);
+        $hasConfirmedWhmcsAuthority = InvoiceEmailGuardContext::hasConfirmedWhmcsAuthority($invoiceId);
         if ($hasActiveAttachmentContext || $hasPaidInvoiceGuard) {
             $guardApplies = true;
         }
@@ -383,11 +491,29 @@ function sevdesk_email_pre_send(array $vars): array
             return $hasActiveAttachmentContext ? ['abortsend' => true] : [];
         }
         $mapping = $application->mappings->findByInvoice($invoiceId);
+        $typedInvoiceMapping = $mapping !== null
+            && ($mapping->document_type ?? null) === MappingRepository::DOCUMENT_TYPE_INVOICE;
+        if ($typedInvoiceMapping && !$hasConfirmedWhmcsAuthority) {
+            // Set this before the context query. If that local read fails, an
+            // Invoice with unknown authority must remain blocked.
+            $guardApplies = true;
+        }
         $documentContext = $application->jobs->latestDocumentContextForInvoice(
             $invoiceId,
             $mapping !== null,
         );
-        if (!DocumentDeliveryContext::usesSevdeskInvoiceAuthority($documentContext, $mapping)) {
+        if (DocumentDeliveryContext::usesWhmcsInvoiceAuthority($documentContext, $mapping)) {
+            InvoiceEmailGuardContext::confirmWhmcsAuthority($invoiceId);
+
+            return $hasActiveAttachmentContext ? ['abortsend' => true] : [];
+        }
+        if ($typedInvoiceMapping) {
+            $guardApplies = true;
+        }
+        if (
+            !$typedInvoiceMapping
+            && !DocumentDeliveryContext::usesSevdeskInvoiceAuthority($documentContext, $mapping)
+        ) {
             return $guardApplies ? ['abortsend' => true] : [];
         }
 

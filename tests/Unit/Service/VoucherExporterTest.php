@@ -25,7 +25,9 @@ final class VoucherExporterTest extends TestCase
         $history = [];
         $client = $this->client([
             new Response(201, [], '{"objects":{"filename":"temporary.pdf"}}'),
-            new Response(201, [], '{"objects":{"voucher":{"id":99,"sumGross":"119.00"}}}'),
+            new Response(201, [], '{"objects":{"voucher":{"id":99}}}'),
+            $this->voucherResponse('119.00'),
+            $this->voucherPositionsResponse(),
         ], $history);
         $mappings = [];
         $exporter = new VoucherExporter(
@@ -55,7 +57,7 @@ final class VoucherExporterTest extends TestCase
 
         self::assertSame(ExportResult::SUCCEEDED, $result->status);
         self::assertSame([10 => '99'], $mappings);
-        self::assertCount(2, $history);
+        self::assertCount(4, $history);
     }
 
     public function testSuccessfulExportWritesMappingAfterRemoteTotalValidation(): void
@@ -63,10 +65,13 @@ final class VoucherExporterTest extends TestCase
         $history = [];
         $client = $this->client([
             new Response(201, [], '{"objects":{"filename":"temporary.pdf"}}'),
-            new Response(201, [], '{"objects":{"voucher":{"id":99,"sumGross":"119.00"}}}'),
+            new Response(201, [], '{"objects":{"voucher":{"id":99}}}'),
+            $this->voucherResponse(),
+            $this->voucherPositionsResponse(),
         ], $history);
         $mappings = [];
         $checkpoints = [];
+        $checkpointContexts = [];
         $exporter = new VoucherExporter(
             $client,
             static fn (int $invoiceId): mixed => $mappings[$invoiceId] ?? null,
@@ -80,8 +85,9 @@ final class VoucherExporterTest extends TestCase
             '42',
             $this->taxDecision(),
             "%PDF-1.7\nfake document",
-            static function (string $name) use (&$checkpoints): void {
+            static function (string $name, array $context) use (&$checkpoints, &$checkpointContexts): void {
                 $checkpoints[] = $name;
+                $checkpointContexts[$name] = $context;
             },
         );
 
@@ -95,6 +101,8 @@ final class VoucherExporterTest extends TestCase
             'voucher_created',
             'mapping_persisted',
         ], $checkpoints);
+        self::assertSame('1', $checkpointContexts['voucher_write_requested']['targetTaxRuleId'] ?? null);
+        self::assertSame('100', $checkpointContexts['voucher_write_requested']['targetAccountDatevId'] ?? null);
 
         $payload = json_decode((string) $history[1]['request']->getBody(), true, 512, JSON_THROW_ON_ERROR);
         self::assertSame('[WHMCS-INVOICE:10]', substr($payload['voucher']['description'], -18));
@@ -138,7 +146,8 @@ final class VoucherExporterTest extends TestCase
         $history = [];
         $client = $this->client([
             new Response(201, [], '{"objects":{"filename":"temporary.pdf"}}'),
-            new Response(201, [], '{"objects":{"voucher":{"id":99,"sumGross":"118.00"}}}'),
+            new Response(201, [], '{"objects":{"voucher":{"id":99}}}'),
+            $this->voucherResponse('118.00'),
         ], $history);
         $persistCalls = 0;
         $exporter = new VoucherExporter(
@@ -189,6 +198,38 @@ final class VoucherExporterTest extends TestCase
         self::assertSame(ExportResult::SKIPPED, $result->status);
         self::assertSame('77', $result->remoteId);
         self::assertSame(2, $lookups);
+        self::assertCount(1, $history);
+    }
+
+    public function testPreWriteGuardRunsAfterUploadAndPreventsVoucherPost(): void
+    {
+        $history = [];
+        $checkpoints = [];
+        $exporter = new VoucherExporter(
+            $this->client([
+                new Response(201, [], '{"objects":{"filename":"temporary.pdf"}}'),
+            ], $history),
+            static fn (): null => null,
+            static fn (): bool => true,
+        );
+
+        $result = $exporter->export(
+            $this->invoice(),
+            '42',
+            $this->taxDecision(),
+            "%PDF-1.7\nfake document",
+            static function (string $name) use (&$checkpoints): bool {
+                $checkpoints[] = $name;
+
+                return true;
+            },
+            false,
+            static fn (): bool => false,
+        );
+
+        self::assertSame(ExportResult::FAILED, $result->status);
+        self::assertSame('pre_write_guard_failed', $result->code);
+        self::assertSame(['pdf_upload_requested', 'pdf_uploaded'], $checkpoints);
         self::assertCount(1, $history);
     }
 
@@ -272,7 +313,9 @@ final class VoucherExporterTest extends TestCase
         $history = [];
         $client = $this->client([
             new Response(201, [], '{"objects":{"filename":"temporary.pdf"}}'),
-            new Response(201, [], '{"objects":{"voucher":{"id":99,"sumGross":"119.00"}}}'),
+            new Response(201, [], '{"objects":{"voucher":{"id":99}}}'),
+            $this->voucherResponse(),
+            $this->voucherPositionsResponse(),
         ], $history);
         $invoice = new InvoiceSnapshot(
             10,
@@ -308,6 +351,36 @@ final class VoucherExporterTest extends TestCase
         self::assertSame(100.0, $payload['voucherPosSave'][0]['sumNet']);
         self::assertSame('119.00', $invoice->total);
         self::assertSame('20.00', $invoice->creditApplied);
+    }
+
+    public function testWrongRemoteAccountAfterCreateNeverWritesMapping(): void
+    {
+        $history = [];
+        $mappings = [];
+        $exporter = new VoucherExporter(
+            $this->client([
+                new Response(201, [], '{"objects":{"filename":"temporary.pdf"}}'),
+                new Response(201, [], '{"objects":{"voucher":{"id":99}}}'),
+                $this->voucherResponse(),
+                $this->voucherPositionsResponse('999'),
+            ], $history),
+            static fn (): null => null,
+            static function (int $invoiceId, string $remoteId) use (&$mappings): void {
+                $mappings[$invoiceId] = $remoteId;
+            },
+        );
+
+        $result = $exporter->export(
+            $this->invoice(),
+            '42',
+            $this->taxDecision(),
+            "%PDF-1.7\nfake document",
+        );
+
+        self::assertSame(ExportResult::AMBIGUOUS, $result->status);
+        self::assertSame('voucher_remote_position_identity_mismatch', $result->code);
+        self::assertSame([], $mappings);
+        self::assertCount(4, $history);
     }
 
     public function testNegativePositionFailsPreflightWithoutRemoteWrite(): void
@@ -348,6 +421,45 @@ final class VoucherExporterTest extends TestCase
         $stack->push(Middleware::history($history));
 
         return new SevdeskClient(new Client(['handler' => $stack]), 'token');
+    }
+
+    private function voucherResponse(
+        string $sumGross = '119.00',
+        string $taxRuleId = '1',
+        string $contactId = '42',
+    ): Response {
+        return new Response(200, [], json_encode([
+            'objects' => [[
+                'id' => '99',
+                'objectName' => 'Voucher',
+                'voucherType' => 'VOU',
+                'creditDebit' => 'D',
+                'status' => 100,
+                'voucherDate' => '01.07.2026',
+                'currency' => 'EUR',
+                'supplier' => ['id' => $contactId, 'objectName' => 'Contact'],
+                'taxRule' => ['id' => $taxRuleId, 'objectName' => 'TaxRule'],
+                'description' => 'RE-10 [WHMCS-INVOICE:10]',
+                'sumGross' => $sumGross,
+            ]],
+        ], JSON_THROW_ON_ERROR));
+    }
+
+    private function voucherPositionsResponse(string $accountDatevId = '100'): Response
+    {
+        return new Response(200, [], json_encode([
+            'objects' => [[
+                'id' => '501',
+                'objectName' => 'VoucherPos',
+                'voucher' => ['id' => '99', 'objectName' => 'Voucher'],
+                'accountDatev' => ['id' => $accountDatevId, 'objectName' => 'AccountDatev'],
+                'taxRate' => '19',
+                'net' => true,
+                'sumNet' => '100.00',
+                'sumGross' => '119.00',
+                'comment' => 'Hosting',
+            ]],
+        ], JSON_THROW_ON_ERROR));
     }
 
     private function invoice(): InvoiceSnapshot

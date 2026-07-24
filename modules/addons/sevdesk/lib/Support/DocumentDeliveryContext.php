@@ -10,6 +10,33 @@ use WHMCS\Module\Addon\SevDesk\Repository\MappingRepository;
 final class DocumentDeliveryContext
 {
     /**
+     * @param array<string, mixed>|null $context
+     * @return null|array{documentType:string,documentAuthority:string}
+     */
+    public static function frozenConfirmedDocument(?array $context): ?array
+    {
+        if (
+            $context === null
+            || ($context['source'] ?? null) !== 'frozen'
+            || ($context['allowed'] ?? null) !== true
+        ) {
+            return null;
+        }
+
+        $documentType = trim((string) ($context['documentType'] ?? ''));
+        $documentAuthority = trim((string) ($context['documentAuthority'] ?? ''));
+        if (
+            !in_array($documentType, ['voucher', 'invoice'], true)
+            || !in_array($documentAuthority, ['whmcs', 'sevdesk'], true)
+            || ($documentType === 'voucher' && $documentAuthority !== 'whmcs')
+        ) {
+            return null;
+        }
+
+        return compact('documentType', 'documentAuthority');
+    }
+
+    /**
      * @param null|array{
      *     itemId:int,
      *     itemStatus:string,
@@ -26,19 +53,15 @@ final class DocumentDeliveryContext
      */
     public static function usesSevdeskInvoiceAuthority(?array $context, ?object $mapping): bool
     {
+        if ($mapping !== null) {
+            return self::mappedInvoiceUsesAuthority($mapping, $context, 'sevdesk');
+        }
         if (
             $context === null
             || $context['documentAuthority'] !== 'sevdesk'
             || $context['exportMode'] !== 'invoice_only'
         ) {
             return false;
-        }
-
-        if ($mapping !== null) {
-            return ($mapping->document_type ?? null) === MappingRepository::DOCUMENT_TYPE_INVOICE
-                && $context['source'] === 'frozen'
-                && $context['allowed'] === true
-                && $context['documentType'] === 'invoice';
         }
 
         if ($context['source'] === 'requested') {
@@ -54,5 +77,58 @@ final class DocumentDeliveryContext
 
         return ($context['allowed'] === true && $context['documentType'] === 'invoice')
             || ($context['allowed'] === false && $context['documentType'] === null);
+    }
+
+    /** @param array<string, mixed>|null $context */
+    public static function usesWhmcsInvoiceAuthority(?array $context, ?object $mapping): bool
+    {
+        return $mapping !== null
+            && self::mappedInvoiceUsesAuthority($mapping, $context, 'whmcs');
+    }
+
+    /**
+     * The mapping is authoritative once the additive column is populated.
+     * A frozen job context remains a compatibility fallback for Invoices that
+     * were created by an earlier RC. Conflicting durable and frozen evidence
+     * is never resolved by preference; both delivery surfaces remain blocked.
+     *
+     * @param array<string, mixed>|null $context
+     */
+    private static function mappedInvoiceUsesAuthority(
+        object $mapping,
+        ?array $context,
+        string $requestedAuthority,
+    ): bool {
+        if (($mapping->document_type ?? null) !== MappingRepository::DOCUMENT_TYPE_INVOICE) {
+            return false;
+        }
+
+        $storedAuthority = trim((string) ($mapping->document_authority ?? ''));
+        if (!in_array($storedAuthority, ['whmcs', 'sevdesk'], true)) {
+            $storedAuthority = '';
+        }
+        $frozenAuthority = self::frozenInvoiceAuthority($context);
+        if (
+            $storedAuthority !== ''
+            && $frozenAuthority !== null
+            && $storedAuthority !== $frozenAuthority
+        ) {
+            return false;
+        }
+
+        $effectiveAuthority = $storedAuthority !== '' ? $storedAuthority : $frozenAuthority;
+
+        return $effectiveAuthority === $requestedAuthority;
+    }
+
+    /** @param array<string, mixed>|null $context */
+    private static function frozenInvoiceAuthority(?array $context): ?string
+    {
+        $document = self::frozenConfirmedDocument($context);
+        if (($document['documentType'] ?? null) !== MappingRepository::DOCUMENT_TYPE_INVOICE) {
+            return null;
+        }
+
+        return $document['documentAuthority'];
     }
 }

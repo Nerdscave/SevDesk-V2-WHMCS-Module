@@ -30,6 +30,39 @@ final class ReferenceDataTest extends TestCase
         self::assertStringContainsString('code=CY', (string) $history[0]['request']->getUri()->getQuery());
     }
 
+    public function testExactCountryLookupSelectsUnitedKingdomFromSevdeskGbDuplicates(): void
+    {
+        $history = [];
+        $references = new ReferenceData($this->client([
+            new Response(200, [], json_encode([
+                'objects' => [
+                    ['id' => 74, 'code' => 'gb', 'nameEn' => 'England'],
+                    ['id' => 9, 'code' => 'gb', 'nameEn' => 'Great Britain'],
+                    ['id' => 77, 'code' => 'gb', 'nameEn' => 'United Kingdom'],
+                ],
+            ], JSON_THROW_ON_ERROR)),
+        ], $history));
+
+        self::assertSame('77', $references->exactCountryId('GB'));
+        self::assertCount(1, $history);
+    }
+
+    public function testExactCountryLookupRejectsGbDuplicatesWithoutOneCanonicalLabel(): void
+    {
+        $history = [];
+        $references = new ReferenceData($this->client([
+            new Response(200, [], json_encode([
+                'objects' => [
+                    ['id' => 74, 'code' => 'gb', 'nameEn' => 'England'],
+                    ['id' => 9, 'code' => 'gb', 'nameEn' => 'Great Britain'],
+                ],
+            ], JSON_THROW_ON_ERROR)),
+        ], $history));
+
+        self::assertNull($references->exactCountryId('GB'));
+        self::assertCount(1, $history);
+    }
+
     #[DataProvider('ambiguousCountryResponseProvider')]
     public function testExactCountryLookupRejectsUnlabelledWrongOrAmbiguousRows(string $responseBody): void
     {

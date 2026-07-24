@@ -49,6 +49,12 @@ final class QuickExportGuardTest extends TestCase
         yield 'applied credit' => [
             ['credit' => '10.00'], true, false, QuickExportGuard::CREDIT_REQUIRES_REVIEW,
         ];
+        yield 'full credit with zero direct cash' => [
+            ['credit' => '119.00', 'total' => '0.00'],
+            true,
+            false,
+            QuickExportGuard::CREDIT_REQUIRES_REVIEW,
+        ];
         yield 'zero total' => [
             ['total' => '0.00'], true, false, QuickExportGuard::NON_POSITIVE_TOTAL,
         ];

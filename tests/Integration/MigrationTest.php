@@ -26,7 +26,7 @@ final class MigrationTest extends MariaDbTestCase
         self::assertTrue(Capsule::schema()->hasTable(Migrator::ITEMS_TABLE));
         foreach (
             [
-                'document_type', 'document_number', 'document_ready_at', 'delivered_at',
+                'document_type', 'document_authority', 'document_number', 'document_ready_at', 'delivered_at',
                 'pdf_sha256', 'is_e_invoice', 'xml_sha256',
             ] as $column
         ) {
@@ -47,6 +47,8 @@ final class MigrationTest extends MariaDbTestCase
         self::assertSame('voucher_only', (new Config())->get('export_mode'));
         self::assertSame('off', (new Config())->get('e_invoice_mode'));
         self::assertFalse((new Config())->bool('e_invoice_canary_confirmed'));
+        self::assertFalse((new Config())->bool('small_business_invoice_canary_confirmed'));
+        self::assertSame('', (new Config())->get('small_business_until'));
     }
 
     public function testWorkerRuntimeRejectsUnsignedSchemaBeforeMigrationAndDisablesSync(): void
@@ -138,6 +140,7 @@ final class MigrationTest extends MariaDbTestCase
         self::assertSame(12, Capsule::table(Migrator::MAPPING_TABLE)->count());
         self::assertSame($before, $this->mappingChecksum());
         self::assertSame(12, Capsule::table(Migrator::MAPPING_TABLE)->whereNull('document_type')->count());
+        self::assertSame(12, Capsule::table(Migrator::MAPPING_TABLE)->whereNull('document_authority')->count());
         self::assertSame(12, Capsule::table(Migrator::MAPPING_TABLE)->whereNull('document_number')->count());
         self::assertSame(12, Capsule::table(Migrator::MAPPING_TABLE)->whereNull('document_ready_at')->count());
         self::assertSame(12, Capsule::table(Migrator::MAPPING_TABLE)->whereNull('delivered_at')->count());
@@ -296,8 +299,20 @@ final class MigrationTest extends MariaDbTestCase
         $deliveredAt = new DateTimeImmutable('2030-02-03 04:06:07');
         $hash = hash('sha256', 'synthetic-pdf');
 
-        $mappings->linkDocument(903, '700903', MappingRepository::DOCUMENT_TYPE_INVOICE, ' INV-903 ');
-        $mappings->linkDocument(903, '700903', MappingRepository::DOCUMENT_TYPE_INVOICE, 'INV-903');
+        $mappings->linkDocument(
+            903,
+            '700903',
+            MappingRepository::DOCUMENT_TYPE_INVOICE,
+            ' INV-903 ',
+            documentAuthority: MappingRepository::DOCUMENT_AUTHORITY_SEVDESK,
+        );
+        $mappings->linkDocument(
+            903,
+            '700903',
+            MappingRepository::DOCUMENT_TYPE_INVOICE,
+            'INV-903',
+            documentAuthority: MappingRepository::DOCUMENT_AUTHORITY_SEVDESK,
+        );
         $mappings->enrichDocumentMetadata(
             903,
             '700903',
@@ -306,6 +321,7 @@ final class MigrationTest extends MariaDbTestCase
             $readyAt,
             $deliveredAt,
             strtoupper($hash),
+            documentAuthority: MappingRepository::DOCUMENT_AUTHORITY_SEVDESK,
         );
         $mappings->enrichDocumentMetadata(
             903,
@@ -315,12 +331,14 @@ final class MigrationTest extends MariaDbTestCase
             new DateTimeImmutable('2030-02-04 00:00:00'),
             new DateTimeImmutable('2030-02-04 00:00:01'),
             $hash,
+            documentAuthority: MappingRepository::DOCUMENT_AUTHORITY_SEVDESK,
         );
 
         $mapping = $mappings->findCompleteByInvoiceAndType(903, MappingRepository::DOCUMENT_TYPE_INVOICE);
         self::assertNotNull($mapping);
         self::assertSame('700903', (string) $mapping->sevdesk_id);
         self::assertSame('invoice', (string) $mapping->document_type);
+        self::assertSame('sevdesk', (string) $mapping->document_authority);
         self::assertSame('INV-903', (string) $mapping->document_number);
         self::assertSame('2030-02-03 04:05:06', (string) $mapping->document_ready_at);
         self::assertSame('2030-02-03 04:06:07', (string) $mapping->delivered_at);
@@ -344,10 +362,12 @@ final class MigrationTest extends MariaDbTestCase
             MappingRepository::DOCUMENT_TYPE_VOUCHER,
             'VOU-904',
             new DateTimeImmutable('2030-03-04 05:06:07'),
+            documentAuthority: MappingRepository::DOCUMENT_AUTHORITY_WHMCS,
         );
 
         $mapping = Capsule::table(Migrator::MAPPING_TABLE)->where('invoice_id', 904)->first();
         self::assertSame('voucher', (string) $mapping->document_type);
+        self::assertSame('whmcs', (string) $mapping->document_authority);
         self::assertSame('VOU-904', (string) $mapping->document_number);
         self::assertSame('2030-03-04 05:06:07', (string) $mapping->document_ready_at);
     }
@@ -475,6 +495,39 @@ final class MigrationTest extends MariaDbTestCase
         self::assertSame('voucher', (string) $mapping->document_type);
         self::assertSame('VOU-905', (string) $mapping->document_number);
         self::assertSame(hash('sha256', 'first-pdf'), (string) $mapping->pdf_sha256);
+    }
+
+    public function testDocumentAuthorityIsAdditiveAndCannotBeReinterpreted(): void
+    {
+        Migrator::up();
+        $mappings = new MappingRepository();
+        $mappings->linkDocument(
+            909,
+            '700909',
+            MappingRepository::DOCUMENT_TYPE_INVOICE,
+            'INV-909',
+            documentAuthority: MappingRepository::DOCUMENT_AUTHORITY_WHMCS,
+        );
+
+        try {
+            $mappings->enrichDocumentMetadata(
+                909,
+                '700909',
+                MappingRepository::DOCUMENT_TYPE_INVOICE,
+                'INV-909',
+                documentAuthority: MappingRepository::DOCUMENT_AUTHORITY_SEVDESK,
+            );
+            self::fail('A confirmed document authority must not be overwritten.');
+        } catch (RuntimeException $error) {
+            self::assertStringContainsString('different document authority', $error->getMessage());
+        }
+
+        self::assertSame(
+            MappingRepository::DOCUMENT_AUTHORITY_WHMCS,
+            Capsule::table(Migrator::MAPPING_TABLE)
+                ->where('invoice_id', 909)
+                ->value('document_authority'),
+        );
     }
 
     public function testTypedMappingRejectsInvalidTypesAndDeliveryBeforeReadiness(): void

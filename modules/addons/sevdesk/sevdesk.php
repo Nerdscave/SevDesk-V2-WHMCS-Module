@@ -38,7 +38,7 @@ function sevdesk_config(): array
         'name' => 'sevdesk Integration',
         'description' => 'Fortsetzbarer WHMCS→sevdesk Voucher-/Invoice-Export. '
             . 'Die betriebliche Konfiguration erfolgt ausschließlich auf der Modul-Seite „Einrichtung“.',
-        'version' => '2.1.0-rc.4',
+        'version' => '2.1.0-rc.5',
         'author' => 'Nerdscave',
         'language' => 'german',
         // WHMCS persists fields declared here without passing through the guarded
@@ -382,12 +382,17 @@ function sevdesk_clientarea(array $vars): array
         if (!DocumentDeliveryContext::usesSevdeskInvoiceAuthority($documentContext, $mapping)) {
             return $page('Das Rechnungsdokument ist nicht verfügbar.', 404);
         }
-        if (!ClientDocumentPresenter::isReadyInvoiceMapping($mapping)) {
+        $invoiceStatus = $application->whmcs->invoiceStatusForDelivery($invoiceId);
+        if (!ClientDocumentPresenter::isDeliverableInvoiceMapping($invoiceStatus, $mapping)) {
             return $page('Das Rechnungsdokument ist noch nicht verfügbar.', 409);
         }
 
         $expectedHash = strtolower(trim((string) $mapping->pdf_sha256));
         $pdf = $application->invoicePdf()->fetch((string) $mapping->sevdesk_id);
+        $invoiceStatus = $application->whmcs->invoiceStatusForDelivery($invoiceId);
+        if (!ClientDocumentPresenter::isDeliverableInvoiceMapping($invoiceStatus, $mapping)) {
+            return $page('Das Rechnungsdokument ist noch nicht verfügbar.', 409);
+        }
         if (!hash_equals($expectedHash, $pdf['sha256'])) {
             throw new RuntimeException('The final sevdesk Invoice PDF changed after verification.');
         }

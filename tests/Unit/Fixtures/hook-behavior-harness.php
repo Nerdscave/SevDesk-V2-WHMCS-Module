@@ -44,9 +44,18 @@ namespace WHMCS\Module\Addon\SevDesk\Tests\Unit\Fixtures {
 
         public static bool $throwMappingRead = false;
 
+        public static bool $throwDocumentContextRead = false;
+
+        public static int $documentContextReads = 0;
+
         public static int $remoteCalls = 0;
 
         public static int $runnerCalls = 0;
+
+        /** @var list<int> */
+        public static array $massPaymentTargets = [];
+
+        public static bool $massPaymentExact = true;
     }
 
     final class FakeConfig
@@ -120,6 +129,11 @@ namespace WHMCS\Module\Addon\SevDesk\Tests\Unit\Fixtures {
         /** @return array<string, mixed>|null */
         public function latestDocumentContextForInvoice(int $invoiceId, bool $hasMapping): ?array
         {
+            ++HookState::$documentContextReads;
+            if (HookState::$throwDocumentContextRead) {
+                throw new \RuntimeException('Synthetic document-context read failure.');
+            }
+
             return HookState::$documentContext;
         }
     }
@@ -146,6 +160,88 @@ namespace WHMCS\Module\Addon\SevDesk\Tests\Unit\Fixtures {
         public function isActiveCustomInvoiceTemplate(string $template): bool
         {
             return true;
+        }
+
+        public function invoiceForDryRun(int $invoiceId): ?object
+        {
+            if ($invoiceId < 1) {
+                return null;
+            }
+
+            return (object) [
+                'id' => $invoiceId,
+                'status' => 'Paid',
+                'date' => '2026-01-01',
+                'credit' => '0.00',
+                'total' => '119.00',
+                'currencycode' => 'EUR',
+            ];
+        }
+    }
+
+    final class FakePaymentStructure
+    {
+        /** @return array{code:string,targetInvoiceIds:list<int>} */
+        public function classify(int $invoiceId): array
+        {
+            if (HookState::$throwLocalRead) {
+                throw new \RuntimeException('Synthetic payment-structure read failure.');
+            }
+            if (HookState::$massPaymentTargets === []) {
+                return [
+                    'code' => 'ordinary_invoice',
+                    'targetInvoiceIds' => [],
+                ];
+            }
+
+            if (!HookState::$massPaymentExact) {
+                return [
+                    'code' => 'mass_payment_requires_review',
+                    'targetInvoiceIds' => [],
+                ];
+            }
+            if ($invoiceId === 42) {
+                return [
+                    'code' => 'container_not_revenue',
+                    'targetInvoiceIds' => HookState::$massPaymentTargets,
+                ];
+            }
+
+            return [
+                'code' => in_array($invoiceId, HookState::$massPaymentTargets, true)
+                    ? 'exact_mass_payment_target'
+                    : 'ordinary_invoice',
+                'targetInvoiceIds' => [],
+            ];
+        }
+
+        /** @return list<int> */
+        public function massPaymentTargetIdsForHook(int $invoiceId): array
+        {
+            $classification = $this->classify($invoiceId);
+
+            return $classification['code'] === 'container_not_revenue'
+                ? $classification['targetInvoiceIds']
+                : [];
+        }
+
+        /** @return array{containerInvoiceId:int|null,targetInvoiceIds:list<int>} */
+        public function massPaymentContextForHook(int $invoiceId): array
+        {
+            $classification = $this->classify($invoiceId);
+            if ($classification['code'] === 'container_not_revenue') {
+                return [
+                    'containerInvoiceId' => $invoiceId,
+                    'targetInvoiceIds' => $classification['targetInvoiceIds'],
+                ];
+            }
+
+            return [
+                'containerInvoiceId' => $classification['code'] === 'exact_mass_payment_target'
+                    ? 42
+                    : null,
+                'targetInvoiceIds' => [],
+            ];
         }
     }
 
@@ -196,6 +292,25 @@ namespace WHMCS\Module\Addon\SevDesk\Tests\Unit\Fixtures {
         {
             return $this->table === 'tblinvoices' && $column === 'status' ? 'Paid' : null;
         }
+
+        /**
+         * @param list<string> $columns
+         * @return list<object>
+         */
+        public function get(array $columns = ['*']): array
+        {
+            if ($this->table !== 'tblinvoiceitems') {
+                return [];
+            }
+
+            return array_map(
+                static fn (int $targetId): object => (object) [
+                    'type' => 'Invoice',
+                    'relid' => $targetId,
+                ],
+                HookState::$massPaymentTargets,
+            );
+        }
     }
 }
 
@@ -235,6 +350,7 @@ namespace WHMCS\Module\Addon\SevDesk {
     use WHMCS\Module\Addon\SevDesk\Tests\Unit\Fixtures\FakeConfig;
     use WHMCS\Module\Addon\SevDesk\Tests\Unit\Fixtures\FakeJobs;
     use WHMCS\Module\Addon\SevDesk\Tests\Unit\Fixtures\FakeMappings;
+    use WHMCS\Module\Addon\SevDesk\Tests\Unit\Fixtures\FakePaymentStructure;
     use WHMCS\Module\Addon\SevDesk\Tests\Unit\Fixtures\FakeRunner;
     use WHMCS\Module\Addon\SevDesk\Tests\Unit\Fixtures\FakeWhmcs;
     use WHMCS\Module\Addon\SevDesk\Tests\Unit\Fixtures\HookState;
@@ -273,6 +389,11 @@ namespace WHMCS\Module\Addon\SevDesk {
         public function runner(): FakeRunner
         {
             return new FakeRunner();
+        }
+
+        public function paymentStructure(): FakePaymentStructure
+        {
+            return new FakePaymentStructure();
         }
     }
 }
@@ -347,6 +468,92 @@ namespace {
         ]);
     }
 
+    if ($scenario === 'mass_payment_container') {
+        HookState::$massPaymentTargets = [44, 43];
+        hook_callback('InvoicePaidPreEmail')(['invoiceid' => 42]);
+        $guard = InvoiceEmailGuardContext::appliesTo(42);
+        hook_callback('InvoicePaid')(['invoiceid' => 42]);
+        $items = HookState::$jobs[0]['items'] ?? [];
+
+        emit_result([
+            'guard' => $guard,
+            'invoiceIds' => array_column($items, 'invoice_id'),
+            'deliveryRequested' => array_map(
+                static fn (array $item): mixed => $item['candidate']['delivery_requested'] ?? null,
+                $items,
+            ),
+            'containerReferences' => array_map(
+                static fn (array $item): mixed =>
+                    $item['candidate']['massPaymentContainerInvoiceId'] ?? null,
+                $items,
+            ),
+            'remoteCalls' => HookState::$remoteCalls,
+        ]);
+    }
+
+    if ($scenario === 'mass_payment_target_first') {
+        HookState::$massPaymentTargets = [44, 43];
+        hook_callback('InvoicePaidPreEmail')(['invoiceid' => 43]);
+        $guard = InvoiceEmailGuardContext::appliesTo(43);
+        hook_callback('InvoicePaid')(['invoiceid' => 43]);
+        $items = HookState::$jobs[0]['items'] ?? [];
+
+        emit_result([
+            'guard' => $guard,
+            'invoiceIds' => array_column($items, 'invoice_id'),
+            'containerReferences' => array_map(
+                static fn (array $item): mixed =>
+                    $item['candidate']['massPaymentContainerInvoiceId'] ?? null,
+                $items,
+            ),
+            'remoteCalls' => HookState::$remoteCalls,
+        ]);
+    }
+
+    if ($scenario === 'mass_payment_container_then_target') {
+        HookState::$massPaymentTargets = [44, 43];
+        hook_callback('InvoicePaidPreEmail')(['invoiceid' => 42]);
+        hook_callback('InvoicePaid')(['invoiceid' => 42]);
+        hook_callback('InvoicePaidPreEmail')(['invoiceid' => 43]);
+        $targetGuard = InvoiceEmailGuardContext::appliesTo(43);
+        hook_callback('InvoicePaid')(['invoiceid' => 43]);
+        $items = array_merge(...array_map(
+            static fn (array $job): array => $job['items'],
+            HookState::$jobs,
+        ));
+
+        emit_result([
+            'targetGuard' => $targetGuard,
+            'invoiceIds' => array_column($items, 'invoice_id'),
+            'containerReferences' => array_map(
+                static fn (array $item): mixed =>
+                    $item['candidate']['massPaymentContainerInvoiceId'] ?? null,
+                $items,
+            ),
+            'remoteCalls' => HookState::$remoteCalls,
+        ]);
+    }
+
+    if ($scenario === 'invalid_mass_payment_container') {
+        HookState::$massPaymentTargets = [44, 43];
+        HookState::$massPaymentExact = false;
+        hook_callback('InvoicePaidPreEmail')(['invoiceid' => 42]);
+        $guard = InvoiceEmailGuardContext::appliesTo(42);
+        hook_callback('InvoicePaid')(['invoiceid' => 42]);
+        $items = HookState::$jobs[0]['items'] ?? [];
+
+        emit_result([
+            'guard' => $guard,
+            'invoiceIds' => array_column($items, 'invoice_id'),
+            'containerReferences' => array_map(
+                static fn (array $item): mixed =>
+                    $item['candidate']['massPaymentContainerInvoiceId'] ?? null,
+                $items,
+            ),
+            'remoteCalls' => HookState::$remoteCalls,
+        ]);
+    }
+
     if ($scenario === 'local_read_failure') {
         hook_callback('InvoicePaidPreEmail')(['invoiceid' => 42]);
         HookState::$throwLocalRead = true;
@@ -356,6 +563,22 @@ namespace {
         ]);
 
         emit_result([
+            'mailResult' => $result,
+            'logged' => HookState::$logs !== [],
+            'remoteCalls' => HookState::$remoteCalls,
+        ]);
+    }
+
+    if ($scenario === 'mass_payment_read_failure') {
+        HookState::$throwLocalRead = true;
+        hook_callback('InvoicePaidPreEmail')(['invoiceid' => 42]);
+        $result = hook_callback('EmailPreSend')([
+            'relid' => 42,
+            'messagename' => 'Invoice Payment Confirmation',
+        ]);
+
+        emit_result([
+            'guard' => InvoiceEmailGuardContext::appliesTo(42),
             'mailResult' => $result,
             'logged' => HookState::$logs !== [],
             'remoteCalls' => HookState::$remoteCalls,
@@ -629,6 +852,172 @@ namespace {
         ]);
     }
 
+    if ($scenario === 'voucher_mapping_pre_email_context_read_failure') {
+        HookState::$mapping = (object) ['sevdesk_id' => '99', 'document_type' => 'voucher'];
+        HookState::$throwDocumentContextRead = true;
+        hook_callback('InvoicePaidPreEmail')(['invoiceid' => 42]);
+        $guard = InvoiceEmailGuardContext::appliesTo(42);
+        HookState::$throwDocumentContextRead = false;
+        $result = hook_callback('EmailPreSend')([
+            'relid' => 42,
+            'messagename' => 'Invoice Payment Confirmation',
+        ]);
+
+        emit_result([
+            'guard' => $guard,
+            'mailResult' => $result,
+            'logged' => HookState::$logs !== [],
+            'documentContextReads' => HookState::$documentContextReads,
+            'remoteCalls' => HookState::$remoteCalls,
+        ]);
+    }
+
+    if ($scenario === 'mapped_whmcs_invoice_later_context_read_failure') {
+        HookState::$mapping = (object) ['sevdesk_id' => '99', 'document_type' => 'invoice'];
+        HookState::$documentContext = [
+            'itemId' => 1,
+            'itemStatus' => 'succeeded',
+            'checkpoint' => 'finished',
+            'source' => 'frozen',
+            'allowed' => true,
+            'documentType' => 'invoice',
+            'documentAuthority' => 'whmcs',
+            'exportMode' => 'invoice_only',
+            'ossProfile' => 'blocked',
+            'euB2cMode' => 'blocked',
+            'deliveryChannel' => null,
+        ];
+        hook_callback('InvoicePaidPreEmail')(['invoiceid' => 42]);
+        $guard = InvoiceEmailGuardContext::appliesTo(42);
+        HookState::$throwDocumentContextRead = true;
+        $result = hook_callback('EmailPreSend')([
+            'relid' => 42,
+            'messagename' => 'Invoice Payment Confirmation',
+        ]);
+
+        emit_result([
+            'guard' => $guard,
+            'mailResult' => $result,
+            'logged' => HookState::$logs !== [],
+            'documentContextReads' => HookState::$documentContextReads,
+            'remoteCalls' => HookState::$remoteCalls,
+        ]);
+    }
+
+    if ($scenario === 'typed_invoice_without_frozen_authority') {
+        HookState::$mapping = (object) ['sevdesk_id' => '99', 'document_type' => 'invoice'];
+        HookState::$documentContext = null;
+        hook_callback('InvoicePaidPreEmail')(['invoiceid' => 42]);
+        $result = hook_callback('EmailPreSend')([
+            'relid' => 42,
+            'messagename' => 'Invoice Payment Confirmation',
+        ]);
+
+        emit_result([
+            'guard' => InvoiceEmailGuardContext::appliesTo(42),
+            'mailResult' => $result,
+            'documentContextReads' => HookState::$documentContextReads,
+            'remoteCalls' => HookState::$remoteCalls,
+        ]);
+    }
+
+    if (
+        in_array($scenario, [
+            'durable_whmcs_paid_email',
+            'durable_whmcs_manual_email',
+            'durable_sevdesk_paid_email',
+            'durable_sevdesk_manual_email',
+        ], true)
+    ) {
+        $authority = str_contains($scenario, 'sevdesk') ? 'sevdesk' : 'whmcs';
+        HookState::$mapping = (object) [
+            'sevdesk_id' => '99',
+            'document_type' => 'invoice',
+            'document_authority' => $authority,
+        ];
+        HookState::$documentContext = null;
+        if (str_contains($scenario, 'paid_email')) {
+            hook_callback('InvoicePaidPreEmail')(['invoiceid' => 42]);
+        }
+        $result = hook_callback('EmailPreSend')([
+            'relid' => 42,
+            'messagename' => 'Invoice Payment Confirmation',
+        ]);
+
+        emit_result([
+            'guard' => InvoiceEmailGuardContext::appliesTo(42),
+            'mailResult' => $result,
+            'documentContextReads' => HookState::$documentContextReads,
+            'remoteCalls' => HookState::$remoteCalls,
+        ]);
+    }
+
+    if ($scenario === 'manual_typed_invoice_without_frozen_authority') {
+        HookState::$mapping = (object) ['sevdesk_id' => '99', 'document_type' => 'invoice'];
+        HookState::$documentContext = null;
+        $guardBeforeSend = InvoiceEmailGuardContext::appliesTo(42);
+        $result = hook_callback('EmailPreSend')([
+            'relid' => 42,
+            'messagename' => 'Invoice Payment Confirmation',
+        ]);
+
+        emit_result([
+            'guardBeforeSend' => $guardBeforeSend,
+            'mailResult' => $result,
+            'documentContextReads' => HookState::$documentContextReads,
+            'remoteCalls' => HookState::$remoteCalls,
+        ]);
+    }
+
+    if ($scenario === 'manual_typed_invoice_context_read_failure') {
+        HookState::$mapping = (object) ['sevdesk_id' => '99', 'document_type' => 'invoice'];
+        HookState::$throwDocumentContextRead = true;
+        $guardBeforeSend = InvoiceEmailGuardContext::appliesTo(42);
+        $result = hook_callback('EmailPreSend')([
+            'relid' => 42,
+            'messagename' => 'Invoice Payment Confirmation',
+        ]);
+
+        emit_result([
+            'guardBeforeSend' => $guardBeforeSend,
+            'mailResult' => $result,
+            'logged' => HookState::$logs !== [],
+            'documentContextReads' => HookState::$documentContextReads,
+            'remoteCalls' => HookState::$remoteCalls,
+        ]);
+    }
+
+    if ($scenario === 'mapped_sevdesk_invoice_later_context_read_failure') {
+        HookState::$mapping = (object) ['sevdesk_id' => '99', 'document_type' => 'invoice'];
+        HookState::$documentContext = [
+            'itemId' => 1,
+            'itemStatus' => 'succeeded',
+            'checkpoint' => 'finished',
+            'source' => 'frozen',
+            'allowed' => true,
+            'documentType' => 'invoice',
+            'documentAuthority' => 'sevdesk',
+            'exportMode' => 'invoice_only',
+            'ossProfile' => 'blocked',
+            'euB2cMode' => 'blocked',
+            'deliveryChannel' => 'sevdesk',
+        ];
+        hook_callback('InvoicePaidPreEmail')(['invoiceid' => 42]);
+        HookState::$throwDocumentContextRead = true;
+        $result = hook_callback('EmailPreSend')([
+            'relid' => 42,
+            'messagename' => 'Invoice Payment Confirmation',
+        ]);
+
+        emit_result([
+            'guard' => InvoiceEmailGuardContext::appliesTo(42),
+            'mailResult' => $result,
+            'logged' => HookState::$logs !== [],
+            'documentContextReads' => HookState::$documentContextReads,
+            'remoteCalls' => HookState::$remoteCalls,
+        ]);
+    }
+
     if ($scenario === 'mapped_sevdesk_invoice_later_read_failure') {
         HookState::$mapping = (object) ['sevdesk_id' => '99', 'document_type' => 'invoice'];
         HookState::$documentContext = [
@@ -716,23 +1105,12 @@ namespace {
         HookState::$mapping = (object) [
             'sevdesk_id' => '99',
             'document_type' => 'invoice',
+            'document_authority' => 'sevdesk',
             'document_number' => 'RE-42',
             'document_ready_at' => '2026-07-19 12:00:00',
             'pdf_sha256' => str_repeat('a', 64),
         ];
-        HookState::$documentContext = [
-            'itemId' => 1,
-            'itemStatus' => 'succeeded',
-            'checkpoint' => 'finished',
-            'source' => 'frozen',
-            'allowed' => true,
-            'documentType' => 'invoice',
-            'documentAuthority' => 'sevdesk',
-            'exportMode' => 'invoice_only',
-            'ossProfile' => 'blocked',
-            'euB2cMode' => 'blocked',
-            'deliveryChannel' => 'whmcs_template',
-        ];
+        HookState::$documentContext = null;
 
         $result = hook_callback('ClientAreaPageViewInvoice')([
             'invoiceid' => 42,
@@ -740,6 +1118,26 @@ namespace {
         ]);
 
         emit_result(['result' => $result, 'remoteCalls' => HookState::$remoteCalls]);
+    }
+
+    if ($scenario === 'client_invoice_whmcs_authority') {
+        HookState::$mapping = (object) [
+            'sevdesk_id' => '99',
+            'document_type' => 'invoice',
+            'document_authority' => 'whmcs',
+            'document_number' => 'RE-42',
+            'document_ready_at' => '2026-07-19 12:00:00',
+            'pdf_sha256' => str_repeat('a', 64),
+        ];
+        HookState::$documentContext = null;
+
+        emit_result([
+            'result' => hook_callback('ClientAreaPageViewInvoice')([
+                'invoiceid' => 42,
+                'WEB_ROOT' => '/whmcs',
+            ]),
+            'remoteCalls' => HookState::$remoteCalls,
+        ]);
     }
 
     fwrite(STDERR, 'Unknown hook scenario.');
