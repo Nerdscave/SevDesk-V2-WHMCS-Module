@@ -43,6 +43,9 @@ final class TaxPolicy
     ];
 
     /** @var list<string> */
+    private const DOMESTIC_RULE_ONE_TAX_RATES = ['7', '19'];
+
+    /** @var list<string> */
     private const EU_COUNTRIES = [
         'AT', 'BE', 'BG', 'HR', 'CY', 'CZ', 'DK', 'EE', 'FI', 'FR', 'GR',
         'HU', 'IE', 'IT', 'LV', 'LT', 'LU', 'MT', 'NL', 'PL', 'PT', 'RO',
@@ -166,6 +169,7 @@ final class TaxPolicy
             $decision = $this->fromProfile('third_country', true, null);
         }
 
+        $decision = self::validateDomesticRuleOneRates($decision, $lineItems);
         if ($decision->allowed && $decision->profile === 'eu_b2b') {
             foreach ($lineItems as $lineItem) {
                 if (Decimal::toMinorUnits($lineItem->taxRate) !== 0) {
@@ -262,6 +266,20 @@ final class TaxPolicy
                     return TaxDecision::block(
                         'oss_tax_rates_missing',
                         'Rule 19 requires the actual WHMCS position tax rates.',
+                        'eu_b2c_rule19',
+                    );
+                }
+                if (count($rates) !== 1) {
+                    return TaxDecision::block(
+                        'oss_mixed_tax_rates',
+                        'Rule 19 requires one uniform WHMCS destination tax rate across all positions.',
+                        'eu_b2c_rule19',
+                    );
+                }
+                if (Decimal::toMinorUnits($rates[0]) <= 0) {
+                    return TaxDecision::block(
+                        'oss_tax_rate_non_positive',
+                        'Rule 19 requires a positive WHMCS destination tax rate.',
                         'eu_b2c_rule19',
                     );
                 }
@@ -408,7 +426,10 @@ final class TaxPolicy
                     }
                 }
                 $allowedRates = array_values(array_unique($allowedRates));
-                $fixedRates = self::NORMAL_TAX_RATES_BY_RULE[$decision->taxRuleId ?? ''] ?? null;
+                $fixedRates = self::fixedTaxRatesForProfile(
+                    $decision->profile,
+                    $decision->taxRuleId ?? '',
+                );
                 if ($fixedRates === null) {
                     return TaxDecision::block(
                         'unsupported_voucher_tax_rule',
@@ -599,12 +620,21 @@ final class TaxPolicy
             );
         }
 
-        $allowedRates = self::NORMAL_TAX_RATES_BY_RULE[$taxRule];
+        $allowedRates = self::fixedTaxRatesForProfile($profileName, $taxRule)
+            ?? self::NORMAL_TAX_RATES_BY_RULE[$taxRule];
         foreach ($lineItems as $lineItem) {
-            if (in_array(self::normaliseNumericRate($lineItem->taxRate), $allowedRates, true)) {
+            $normalisedRate = self::normaliseNumericRate($lineItem->taxRate);
+            if (in_array($normalisedRate, $allowedRates, true)) {
                 continue;
             }
 
+            if (
+                in_array($profileName, ['domestic', 'eu_b2c_domestic'], true)
+                && $taxRule === '1'
+                && $normalisedRate === '0'
+            ) {
+                return self::domesticZeroTaxRateBlocked();
+            }
             if ($taxRule === '3') {
                 return TaxDecision::block(
                     'eu_b2b_tax_rate_mismatch',
@@ -626,6 +656,50 @@ final class TaxPolicy
             'Invoice tax profile selected without a Voucher accountDatev dependency.',
             $allowedRates,
         );
+    }
+
+    /** @param list<LineItem> $lineItems */
+    private static function validateDomesticRuleOneRates(
+        TaxDecision $decision,
+        array $lineItems,
+    ): TaxDecision {
+        if (
+            !$decision->allowed
+            || !in_array($decision->profile, ['domestic', 'eu_b2c_domestic'], true)
+            || $decision->taxRuleId !== '1'
+        ) {
+            return $decision;
+        }
+
+        foreach ($lineItems as $lineItem) {
+            if (self::normaliseNumericRate($lineItem->taxRate) === '0') {
+                return self::domesticZeroTaxRateBlocked();
+            }
+        }
+
+        return $decision;
+    }
+
+    private static function domesticZeroTaxRateBlocked(): TaxDecision
+    {
+        return TaxDecision::block(
+            'domestic_zero_tax_rate_outside_small_business_period',
+            'A domestic zero-percent position is not allowed outside the configured small-business period.',
+            'domestic',
+        );
+    }
+
+    /** @return list<string>|null */
+    private static function fixedTaxRatesForProfile(string $profileName, string $taxRule): ?array
+    {
+        if (
+            in_array($profileName, ['domestic', 'eu_b2c_domestic'], true)
+            && $taxRule === '1'
+        ) {
+            return self::DOMESTIC_RULE_ONE_TAX_RATES;
+        }
+
+        return self::NORMAL_TAX_RATES_BY_RULE[$taxRule] ?? null;
     }
 
     private function hasConflictingEuB2cProfiles(): bool
@@ -651,7 +725,7 @@ final class TaxPolicy
     private static function lineTaxRates(array $lineItems): array
     {
         return array_values(array_unique(array_map(
-            static fn (LineItem $lineItem): string => $lineItem->taxRate,
+            static fn (LineItem $lineItem): string => self::normaliseNumericRate($lineItem->taxRate),
             $lineItems,
         )));
     }

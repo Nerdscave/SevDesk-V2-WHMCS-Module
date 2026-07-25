@@ -75,6 +75,8 @@ final class InvoiceSnapshotTest extends TestCase
         self::assertSame(10_000, $invoice->lineGrossMinorUnits());
         self::assertSame(2_000, $invoice->discountGrossMinorUnits());
         self::assertSame(8_000, $invoice->calculatedDocumentGrossMinorUnits());
+        self::assertSame(2, $invoice->remotePositionCount());
+        self::assertMatchesRegularExpression('/^[a-f0-9]{64}$/', (string) $invoice->discountFingerprint());
     }
 
     public function testItDetectsMixedNetAndGrossLines(): void

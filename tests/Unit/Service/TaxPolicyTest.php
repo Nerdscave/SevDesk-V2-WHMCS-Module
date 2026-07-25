@@ -24,6 +24,81 @@ final class TaxPolicyTest extends TestCase
         self::assertTrue($decision->guidanceValidated);
     }
 
+    public function testDomesticZeroRateIsBlockedOutsideSmallBusinessPeriod(): void
+    {
+        $lines = [new LineItem('Service', '100', '0', false)];
+
+        $voucher = $this->policy()->decide('DE', false, null, false, false, $lines);
+        $invoice = $this->policy()->decideInvoice('DE', false, null, false, false, $lines);
+
+        self::assertFalse($voucher->allowed);
+        self::assertSame('domestic_zero_tax_rate_outside_small_business_period', $voucher->code);
+        self::assertSame('domestic', $voucher->profile);
+        self::assertFalse($invoice->allowed);
+        self::assertSame('domestic_zero_tax_rate_outside_small_business_period', $invoice->code);
+        self::assertSame('domestic', $invoice->profile);
+    }
+
+    public function testDomesticZeroRateUsesRuleElevenDuringSmallBusinessPeriod(): void
+    {
+        $lines = [new LineItem('Service', '100', '0', false)];
+
+        $voucher = $this->policy()->decide('DE', false, null, true, false, $lines);
+        $invoice = $this->policy()->decideInvoice('DE', false, null, true, false, $lines);
+
+        self::assertTrue($voucher->allowed);
+        self::assertSame('11', $voucher->taxRuleId);
+        self::assertSame('small_business', $voucher->profile);
+        self::assertTrue($invoice->allowed);
+        self::assertSame('11', $invoice->taxRuleId);
+        self::assertSame('small_business', $invoice->profile);
+    }
+
+    public function testLegacyEuB2cDomesticModeCannotReintroduceRuleOneAtZeroPercent(): void
+    {
+        $policy = new TaxPolicy(
+            $this->profiles(),
+            TaxPolicy::EU_B2C_DOMESTIC_CONFIRMED,
+        );
+
+        $voucher = $policy->decide('BE', false, null, false, false, [
+            new LineItem('Digital service', '100', '0', false),
+        ]);
+        $invoice = $policy->decideInvoice('BE', false, null, false, false, [
+            new LineItem('Digital service', '100', '0', false),
+        ]);
+
+        self::assertFalse($voucher->allowed);
+        self::assertSame('domestic_zero_tax_rate_outside_small_business_period', $voucher->code);
+        self::assertFalse($invoice->allowed);
+        self::assertSame('domestic_zero_tax_rate_outside_small_business_period', $invoice->code);
+    }
+
+    #[DataProvider('domesticPositiveTaxRateProvider')]
+    public function testDomesticSevenAndNineteenPercentRemainAllowedForVoucherAndInvoice(
+        string $amount,
+        string $taxRate,
+    ): void {
+        $lines = [new LineItem('Service', $amount, $taxRate, false)];
+
+        $voucher = $this->policy()->decide('DE', false, null, false, false, $lines);
+        $invoice = $this->policy()->decideInvoice('DE', false, null, false, false, $lines);
+
+        self::assertTrue($voucher->allowed);
+        self::assertSame('1', $voucher->taxRuleId);
+        self::assertSame(['7', '19'], $voucher->allowedTaxRates);
+        self::assertTrue($invoice->allowed);
+        self::assertSame('1', $invoice->taxRuleId);
+        self::assertSame(['7', '19'], $invoice->allowedTaxRates);
+    }
+
+    /** @return iterable<string, array{string,string}> */
+    public static function domesticPositiveTaxRateProvider(): iterable
+    {
+        yield 'seven percent' => ['107', '7'];
+        yield 'nineteen percent' => ['119', '19'];
+    }
+
     public function testTaxExemptGermanCustomerIsNotSilentlyPutOnDomesticRuleOne(): void
     {
         $decision = $this->policy()->decide('DE', true, null, false, false, [
@@ -374,7 +449,7 @@ final class TaxPolicyTest extends TestCase
         self::assertSame('1', $decision->taxRuleId);
         self::assertNull($decision->accountDatevId);
         self::assertFalse($decision->guidanceValidated);
-        self::assertSame(['0', '7', '19'], $decision->allowedTaxRates);
+        self::assertSame(['7', '19'], $decision->allowedTaxRates);
     }
 
     /** @param list<string> $expectedAllowedRates */
@@ -402,8 +477,15 @@ final class TaxPolicyTest extends TestCase
     /** @return iterable<string, array{string,string,bool,list<string>,?string}> */
     public static function normalInvoiceRuleRateProvider(): iterable
     {
-        foreach (['0', '7', '19'] as $rate) {
-            yield 'rule 1 allows ' . $rate . ' percent' => ['1', $rate, true, ['0', '7', '19'], null];
+        yield 'domestic rule 1 rejects zero percent outside small-business period' => [
+            '1',
+            '0',
+            false,
+            [],
+            'domestic_zero_tax_rate_outside_small_business_period',
+        ];
+        foreach (['7', '19'] as $rate) {
+            yield 'domestic rule 1 allows ' . $rate . ' percent' => ['1', $rate, true, ['7', '19'], null];
         }
         yield 'rule 1 rejects an unapproved domestic rate' => [
             '1',
@@ -555,6 +637,45 @@ final class TaxPolicyTest extends TestCase
         self::assertFalse($decision->guidanceValidated);
     }
 
+    public function testRuleNineteenBlocksZeroAndMixedDestinationRates(): void
+    {
+        $policy = new TaxPolicy(
+            $this->profiles(),
+            TaxPolicy::EU_B2C_BLOCKED,
+            null,
+            TaxPolicy::OSS_RULE_19_CONFIRMED,
+        );
+
+        $zero = $policy->decideInvoice('BE', false, null, false, false, [
+            new LineItem('Digital service', '100', '0', false),
+        ]);
+        $mixed = $policy->decideInvoice('BE', false, null, false, false, [
+            new LineItem('Digital service A', '100', '21', false),
+            new LineItem('Digital service B', '100', '6', false),
+        ]);
+
+        self::assertFalse($zero->allowed);
+        self::assertSame('oss_tax_rate_non_positive', $zero->code);
+        self::assertFalse($mixed->allowed);
+        self::assertSame('oss_mixed_tax_rates', $mixed->code);
+    }
+
+    public function testRuleNineteenNormalisesEquivalentDestinationRates(): void
+    {
+        $decision = (new TaxPolicy(
+            $this->profiles(),
+            TaxPolicy::EU_B2C_BLOCKED,
+            null,
+            TaxPolicy::OSS_RULE_19_CONFIRMED,
+        ))->decideInvoice('BE', false, null, false, false, [
+            new LineItem('Digital service A', '100', '21', false),
+            new LineItem('Digital service B', '100', '21.0000', false),
+        ]);
+
+        self::assertTrue($decision->allowed);
+        self::assertSame(['21'], $decision->allowedTaxRates);
+    }
+
     public function testEuB2cInvoiceWithoutConfirmedOssProfileRemainsBlocked(): void
     {
         $decision = $this->policy()->decideInvoice('BE', false, null, false, false, [
@@ -604,7 +725,7 @@ final class TaxPolicyTest extends TestCase
             [
                 'accountDatevId' => 100,
                 'allowedReceiptTypes' => ['REVENUE'],
-                'allowedTaxRules' => [['id' => 1, 'taxRates' => ['ZERO', 'NINETEEN']]],
+                'allowedTaxRules' => [['id' => 1, 'taxRates' => ['ZERO', 'SEVEN', 'NINETEEN']]],
             ],
             [
                 'accountDatevId' => 200,

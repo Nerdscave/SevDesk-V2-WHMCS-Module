@@ -1,6 +1,6 @@
 # Sicherer Ersatz eines bestehenden WHMCS-sevDesk-Moduls
 
-Diese Anleitung gehört zu `2.1.0-rc.5`. Der RC ist eine Vorabversion für Testinstallationen. Die technischen Invoice- und ZUGFeRD-Läufe unter WHMCS 8.13.4 sind weitgehend abgeschlossen. Zwei Postfachtests haben bestätigt, dass WHMCS 8.13 Binäranhänge aus `EmailPreSend` nicht übernimmt. Der Versandweg `whmcs_template` ist deshalb gesperrt; bei sevDesk-Dokumenthoheit steht der direkte sevDesk-Versand zur Verfügung. Für echte Buchhaltungsdaten fehlen außerdem Invoice-`bookAmount`, der rabattfreie Rule-11-Invoice-Canary, der anschließende Rabatt-Canary, die produktiven Voucher-Steuerfälle und die fachliche Abnahme.
+Diese Anleitung gehört zu `2.1.0-rc.6`. Der RC ist eine Vorabversion für Testinstallationen. Die technischen Invoice- und ZUGFeRD-Läufe unter WHMCS 8.13.4 sind weitgehend abgeschlossen. Zwei Postfachtests haben bestätigt, dass WHMCS 8.13 Binäranhänge aus `EmailPreSend` nicht übernimmt. Der Versandweg `whmcs_template` ist deshalb gesperrt; bei sevDesk-Dokumenthoheit steht der direkte sevDesk-Versand zur Verfügung. Für echte Buchhaltungsdaten fehlen außerdem Invoice-`bookAmount`, der rabattfreie Rule-11-Invoice-Canary, die vier getrennten Rabatt-Canaries, die produktiven Voucher-Steuerfälle und die fachliche Abnahme.
 
 Diese Version verwendet weiterhin den Addon-Namen und Ordner `sevdesk` sowie
 die Mappingtabelle `mod_sevdesk`. Der Austausch erhält vorhandene Zuordnungen
@@ -57,7 +57,12 @@ und Remote-fähige Adminaktionen bleiben bis zur bestätigten Setup-Prüfung ges
    bei Abweichung nicht produktiv fortfahren.
 5. Prüfen, dass `module_active=on`, `sync_enabled=off`,
    `runtime_review_required=on` sowie
-   `voucher_only + whmcs + OSS blocked + E-Rechnung aus` gelten. Unbekannte
+   `voucher_only + whmcs + OSS blocked + E-Rechnung aus` gelten. Alle
+   Rabatt-Gates müssen ebenfalls aus sein:
+   `invoice_discount_canary_confirmed`,
+   `invoice_discount_rule1_19_canary_confirmed`,
+   `invoice_discount_rule17_0_canary_confirmed` und
+   `invoice_discount_rule19_canary_confirmed`. Unbekannte
    Altsettings bleiben gespeichert, werden aber nicht als kompatible Aliase geraten.
 6. Migration, Health, Mappingbestand, offenen Jobbestand, Mandant/Token, Konten,
    Steuerprofile, Kontaktfeld-ID und vorhandene Kontakt-IDs prüfen. Die
@@ -79,7 +84,17 @@ und Remote-fähige Adminaktionen bleiben bis zur bestätigten Setup-Prüfung ges
    dokumentierten echten sevDesk-Testmandanten-Canary. Rule-11-Invoices benötigen
    darüber hinaus einen eigenen Canary und einen aktuellen passenden
    `REVENUE`-Scope aus `ReceiptGuidance`. Ein fester `PromoHosting`-Rabatt wird
-   erst danach über seinen zusätzlichen Rabatt-Canary freigegeben.
+   nur in `invoice_only`, in EUR und ohne E-Rechnung freigegeben. Rule 11/0 %,
+   Rule 1/19 %, Rule 17/0 % und Rule 19 mit positivem, einheitlichem
+   Zielsteuersatz haben getrennte Canaries. Ihre Settings speichern den exakten
+   Schlüssel des beim Setup-Speichern aktiven WHMCS-Netto-/Bruttomodus; Rule 19
+   verlangt außerdem den getesteten Zielsteuersatz. Der jeweilige Live-Lauf muss
+   Capability-Key, Rabatt-Fingerprint, die negative `InvoicePos`,
+   `discountSave=null`, `sumNet`, `sumTax`, `sumGross`, `sumDiscounts=0`, PDF
+   und read-only Recovery bestätigen. Der globale sevDesk-Rabatt ist kein
+   Fallback, weil er bei steuerpflichtigen Bruttorechnungen die
+   WHMCS-Centverteilung verändern kann. `LateFee` bleibt unabhängig davon
+   blockiert.
 
 ## Bestehende Zuordnungen
 

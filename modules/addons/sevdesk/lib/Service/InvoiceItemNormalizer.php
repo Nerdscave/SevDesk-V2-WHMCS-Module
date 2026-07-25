@@ -11,8 +11,9 @@ use WHMCS\Module\Addon\SevDesk\Domain\LineItem;
 use WHMCS\Module\Addon\SevDesk\Domain\WhmcsInvoiceItem;
 
 /**
- * Converts only structurally proven PromoHosting reductions into fixed
- * sevdesk discounts. Descriptions never participate in classification.
+ * Separates only structurally proven PromoHosting reductions for their
+ * dedicated negative InvoicePos representation. Descriptions never
+ * participate in classification.
  */
 final class InvoiceItemNormalizer
 {
@@ -50,7 +51,7 @@ final class InvoiceItemNormalizer
                 if ($minor >= 0) {
                     return InvoiceItemNormalization::block(
                         'promohosting_must_be_negative',
-                        'A PromoHosting item is accepted only as a negative fixed discount.',
+                        'A PromoHosting item is accepted only as a structurally matched reduction.',
                     );
                 }
                 if ($item->relatedId < 1) {
@@ -197,7 +198,7 @@ final class InvoiceItemNormalizer
             if (self::canonicalDecimal($item->lineItem->taxRate) !== $taxRate) {
                 return InvoiceItemNormalization::block(
                     'mixed_tax_rates',
-                    'All positions and fixed discounts must use the same effective tax rate.',
+                    'All positions and PromoHosting reductions must use the same effective tax rate.',
                 );
             }
         }

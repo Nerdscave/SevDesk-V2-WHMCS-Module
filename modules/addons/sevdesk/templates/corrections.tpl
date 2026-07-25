@@ -105,6 +105,7 @@
                 <option value="">Alle Klärfälle</option>
                 <option value="permanent_failed"{if $filters.status === 'permanent_failed'} selected{/if}>Nach Korrektur wiederholbar</option>
                 <option value="ambiguous"{if $filters.status === 'ambiguous'} selected{/if}>Unklar</option>
+                <option value="cancelled"{if $filters.status === 'cancelled'} selected{/if}>Abgebrochen mit offener Historie</option>
             </select>
         </div>
         <div class="form-group">
@@ -137,6 +138,18 @@
                 {if $item.recommendation}<p class="text-muted"><i class="fas fa-lightbulb" aria-hidden="true"></i> {$item.recommendation|escape:'html':'UTF-8'}</p>{/if}
             </div>
             <div class="panel-footer sd-actions">
+                {if $item.can_confirm_remote_absence}
+                    <form method="post" action="{$moduleLink|escape:'html':'UTF-8'}&amp;a=corrections" data-confirm="Gespeicherte Remote-ID bei Voucher und Invoice prüfen und die Historie nur bei beidseitig bestätigter Abwesenheit abschließen?">
+                        <input type="hidden" name="token" value="{$csrfToken|escape:'html':'UTF-8'}"><input type="hidden" name="item_id" value="{$item.id|escape:'html':'UTF-8'}">
+                        <div class="checkbox">
+                            <label>
+                                <input type="checkbox" name="confirm_remote_absence_checked" value="yes" required>
+                                Ich habe geprüft, dass der frühere Testbeleg bewusst gelöscht wurde. Das Modul darf Voucher und Invoice unter der gespeicherten ID erneut read-only prüfen und nur die passende lokale Historie abschließen.
+                            </label>
+                        </div>
+                        <button type="submit" name="confirm_remote_absence" value="1" class="btn btn-warning btn-sm"><i class="fas fa-check-double" aria-hidden="true"></i> Abwesenheit prüfen und Historie abschließen</button>
+                    </form>
+                {/if}
                 {if $item.can_retry}
                     <form method="post" action="{$moduleLink|escape:'html':'UTF-8'}&amp;a=corrections" data-loading-form>
                         <input type="hidden" name="token" value="{$csrfToken|escape:'html':'UTF-8'}"><input type="hidden" name="item_id" value="{$item.id|escape:'html':'UTF-8'}">

@@ -171,7 +171,10 @@ Verbindliche Regeln:
 - unveränderte effektive WHMCS-Nummer als `invoiceNumber`;
 - Marker `[WHMCS-INVOICE:<invoice_id>]` in einem lesbaren internen Feld;
 - positive EUR-Rechnung; angewendetes Guthaben ist nur bei einer exakt bewiesenen WHMCS-Sammelzahlung zulässig und verändert den Dokumentbrutto nicht;
-- negative Positionen bleiben blockiert. Die einzige Ausnahme ist genau ein strukturell zugeordneter `PromoHosting`-Eintrag, der im Rule-11-Pfad als festes `discountSave` übertragen wird;
+- Positionen vom WHMCS-Typ `LateFee` bleiben unabhängig von Datum, Land und
+  Dokumentmodus blockiert. Mahn- und Verzugsgebühren werden nicht still unter
+  Rule 1, 11, 17 oder 19 als normaler Leistungsumsatz übertragen;
+- negative Positionen bleiben blockiert. Die einzige Ausnahme ist genau ein strukturell zugeordneter `PromoHosting`-Eintrag, der hinter einer freigegebenen Rule-/Rate-Capability als negative `InvoicePos` übertragen wird; `discountSave` bleibt auch dann `null`;
 - exakt derselbe Netto-/Bruttomodus und WHMCS-Steuersatz wie im gefrorenen Snapshot;
 - eingefrorener, unmittelbar vor dem ersten Create nochmals lesend bestätigter `SevUser` und eine Standard-`Unity`;
 - vollständige WHMCS-Rechnungsadresse direkt am Dokument und `takeDefaultAddress=false`; ein bestehender sevDesk-Kontakt wird dafür weder ergänzt noch geändert;
@@ -179,6 +182,12 @@ Verbindliche Regeln:
 - kein benutzerdefiniertes `accountDatev` an Invoice-Positionen;
 - nach Create werden Invoice und alle Positionen gelesen und ID, Nummer, Status, Kontakt, Rule, Währung, Positionen und Summen exakt verglichen;
 - erst die bestätigte Remote-ID plus `document_type=invoice` ergibt ein erfolgreiches Mapping.
+
+Der [Umsatzsteuer-Anwendungserlass, Abschnitt 1.3 Abs. 6](https://www.bundesfinanzministerium.de/Content/DE/Downloads/BMF_Schreiben/Steuerarten/Umsatzsteuer/Umsatzsteuer-Anwendungserlass/Umsatzsteuer-Anwendungserlass-aktuell.pdf?__blob=publicationFile)
+behandelt nachgewiesene Mahngebühren, Mahnkosten und Verzugszinsen als
+Schadensersatz und nicht als Entgelt für die ursprüngliche Leistung. Da das
+Modul dafür noch keinen eigenen bestätigten sevDesk-Buchungsvertrag besitzt,
+bleibt `LateFee` ein Prüffall statt Teil einer normalen Umsatzrechnung.
 
 Jede normale Invoice übernimmt Empfängername, Straße einschließlich zweiter Adresszeile, Postleitzahl, Ort und die eindeutig aufgelöste `StaticCountry`-Referenz aus der WHMCS-Rechnungsadresse. Der Request verwendet immer `takeDefaultAddress=false`; damit hängt `sendBy` nicht davon ab, ob am bereits verknüpften sevDesk-Kontakt eine Standardadresse gepflegt ist. Vor dem Create werden nur Länder-ID und ein kanonischer SHA-256-Adresshash im Job eingefroren, niemals die Anschrift. Create, Recovery, `sendBy` und Versand verlangen anschließend denselben Remote-Adresshash. Fehlt der neue Snapshot nach einem möglicherweise ausgeführten Write, bleibt der Altjob `ambiguous`; er ergänzt weder den Kontakt noch verändert er einen bestehenden Draft.
 
@@ -188,7 +197,7 @@ Bei den OSS-Regeln 18 bis 20 erwartet sevDesk `deliveryAddressCountry` beim Crea
 
 Die fehlende freie `accountDatev`-Zuordnung ist eine sichtbare Einschränkung von `invoice_only`, nicht etwas, das das Modul verdeckt ergänzt.
 
-### Sammelzahlungen, Guthaben und `discountSave`
+### Sammelzahlungen, Guthaben und feste Rabattpositionen
 
 WHMCS-Sammelzahlungsrechnungen enthalten ausschließlich Positionen vom Typ `Invoice`. Deren `relid` zeigt auf die Originalrechnung, während die tatsächliche Gateway-Transaktion am Sammelbeleg hängt. Nur wenn alle Links, Mandanten, Status-, Steuer- und Betragsfelder sowie die Zahlungen zusammenpassen, gilt der Container als reiner Zahlungsbeleg. Er wird nicht als Umsatz nach sevDesk geschrieben.
 
@@ -202,9 +211,20 @@ Ein alter, eindeutig unbezahlter (`Unpaid`) oder stornierter (`Cancelled`) Samme
 
 Ein Parent gilt nur als eindeutig, wenn sein gesamter Zielgraph frei von einem zweiten aktiven Parent ist. Teilt er auch nur ein Ziel mit einem konkurrierenden Sammelbeleg, bleiben beide Container und sämtliche Ziele beider betroffenen Graphen gesperrt. Ein Ziel darf den Konflikt nicht deshalb umgehen, weil es selbst nur in einem der Container vorkommt.
 
-Ein negativer `PromoHosting`-Eintrag wird nur akzeptiert, wenn genau ein positiver `Hosting`-Eintrag mit derselben `relid` und demselben `taxed`-Wert existiert. Der Rabatt darf diesen Hosting-Betrag nicht überschreiten. Zulässig sind genau ein solcher Rabatt, `invoice_only`, Rule 11, durchgehend 0 %, EUR, der allgemeine Rule-11-Invoice-Canary und der zusätzliche Rabatt-Canary. Das Payload sendet ausschließlich positive `invoicePosSave`-Positionen und den absoluten Rabatt über `discountSave`.
+Ein negativer `PromoHosting`-Eintrag wird nur akzeptiert, wenn genau ein positiver `Hosting`-Eintrag mit derselben `relid` und demselben `taxed`-Wert existiert. Der Rabatt darf diesen Hosting-Betrag nicht überschreiten. Zulässig sind genau ein solcher Rabatt, `invoice_only`, EUR und eine normale Invoice ohne E-Rechnungsflag. Alle positiven Positionen und der Rabatt müssen denselben Netto-/Bruttomodus und denselben Steuersatz verwenden.
 
-Vor `invoice_write_requested` friert das Modul einen PII-freien SHA-256 des Rabattvertrags ein. Die Remote-Invoice trägt zusätzlich `[WHMCS-DISCOUNT:<sha256>]`. Recovery verlangt diesen Marker sowie exakte Rabatt-, Positions- und Gesamtsummen. Die dokumentierte API bietet keinen eigenen Invoice-Discount-Read-Endpunkt; deshalb gehört die atomare `discountSave`-Semantik zum externen Canary. Ohne bestätigten Canary erfolgt kein Create.
+| Tax Rule und Rate | Capability-Basis | Zusätzliches Gate |
+| --- | --- | --- |
+| Rule 11, 0 % | `promo_discount_rule11_0` | `small_business_invoice_canary_confirmed`, aktuelle Rule-11-`REVENUE`-Guidance und `invoice_discount_canary_confirmed` |
+| Rule 1, 19 % | `promo_discount_rule1_19` | `invoice_discount_rule1_19_canary_confirmed` |
+| Rule 17, 0 % | `promo_discount_rule17_0` | `invoice_discount_rule17_0_canary_confirmed` |
+| Rule 19, positiver einheitlicher Zielsteuersatz | `promo_discount_rule19_destination` | `invoice_discount_rule19_canary_confirmed`; die Rate muss in der bestätigten Zielbesteuerung enthalten sein |
+
+Profil, Länderklasse, Netto-/Bruttomodus, tatsächliche Rate und Vertragsversion gehören zum gespeicherten Capability-Key. Die Settings für Rules 1/17/19 enthalten diesen exakten Key; ein pauschales `on` gilt nicht als Freigabe. Rule 19 speichert den im Canary geprüften Zielsteuersatz separat in `invoice_discount_rule19_canary_rate`. Vor `invoice_write_requested` friert das Modul den Key und einen PII-freien SHA-256 des Rabattvertrags ein. Die Remote-Invoice trägt zusätzlich `[WHMCS-DISCOUNT:<sha256>]`.
+
+Für Rabattfälle ist der Payload-Vertrag absichtlich enger als ein allgemeiner sevDesk-Rabatt: `invoicePosSave` enthält die positiven Positionen und genau eine negative Rabattposition mit Menge 1, identischem Steuersatz und fortlaufender Positionsnummer. `discountSave` bleibt `null`. Ein Rule-1-Live-Canary mit 4,94 Euro Bruttoleistung und 2,47 Euro Bruttorabatt zeigte den Grund. Der globale Rabatt ergab 2,08 Euro netto und 0,39 Euro Umsatzsteuer; die negative `InvoicePos` erhielt die WHMCS-Verteilung von 2,07 Euro netto und 0,40 Euro Umsatzsteuer. Der synthetische Canary las genau zwei Remote-Positionen und `sumDiscounts=0` zurück.
+
+Readback und Recovery verlangen den Capability-Key, den Marker, die unveränderten positiven und negativen Positionen sowie exakte Werte für `sumNet`, `sumTax` und `sumGross`. `sumDiscounts` muss numerisch 0 sein. Deshalb benötigt jede der vier Semantiken ihren externen Canary. Ein fehlender oder geänderter Key, Marker, Positions- oder Summenwert blockiert vor dem Write beziehungsweise führt nach einem möglichen Write zu `ambiguous`. `LateFee`, mehrere Rabatte, andere negative Positionen und E-Rechnungen mit Rabatt bleiben gesperrt.
 
 ### Rule 11 bei normalen Invoices
 
@@ -281,9 +301,12 @@ Der Tax-Resolver verwendet unter anderem Kleinunternehmerstatus, Land, Organisat
 
 Der Kleinunternehmerstatus kann mit einem Enddatum versehen werden. Rule 11 gilt dann nur für Rechnungsdaten bis einschließlich dieses Tages. Sie hat in diesem Zeitraum auch Vorrang vor dem bestätigten AddFunds-Sonderprofil; dadurch kann AddFunds weder auf Rule 1 ausweichen noch die Rule-11-Invoice-Gates umgehen. Nach dem Stichtag gilt das AddFunds-Profil unverändert. Ohne Enddatum bleibt der aktivierte Schalter aus Gründen der Upgrade-Kompatibilität unbegrenzt wirksam. Bei aktivem Kleinunternehmerprofil wird ein ungültiger gespeicherter Stichtag nicht als „Regelbesteuerung“ interpretiert, sondern blockiert den Export. Im Modus `invoice_only` kommen der Rule-11-Invoice-Canary und die aktuelle Mandantenfähigkeit hinzu; `invoice_for_oss` lässt diese Fälle weiterhin als Voucher laufen.
 
+Nach dem Kleinunternehmer-Stichtag akzeptiert das normale deutsche Rule-1-Profil nur noch 7 % oder 19 %. Enthält eine deutsche, nicht steuerbefreite WHMCS-Rechnung weiterhin eine Position mit 0 %, wird sie vor jedem Voucher- oder Invoice-Write mit `domestic_zero_tax_rate_outside_small_business_period` blockiert. Das Modul rät in diesem Fall keinen anderen Steuergrund und ändert die WHMCS-Rechnung nicht.
+
 | Fall | Entscheidung |
 | --- | --- |
-| deutscher steuerpflichtiger Kunde | Rule 1; Voucher oder Invoice gemäß Modus |
+| deutscher steuerpflichtiger Kunde | Rule 1 mit 7 % oder 19 %; Voucher oder Invoice gemäß Modus |
+| deutscher Rule-1-Fall mit 0 % außerhalb des Kleinunternehmerzeitraums | blockiert; Quelldaten oder eigener bestätigter Steuerfall erforderlich |
 | EU-Privatkunde, fachlich kein OSS | Rule 1 nach bestätigtem Nicht-OSS-Profil; Ziel gemäß Modus |
 | bestätigte digitale EU-B2C-Leistung | Rule 19; nur `invoice_for_oss`/`invoice_only`, OSS-Profil und Canary |
 | Rule-18-/Rule-20-Fall | blockiert |
@@ -296,7 +319,8 @@ Der Kleinunternehmerstatus kann mit einem Enddatum versehen werden. Rule 11 gilt
 | exakt bewiesene WHMCS-Sammelzahlung | Container ohne Umsatzexport; Originalrechnungen mit vollständigem Dokumentbruttobetrag |
 | gewöhnliches Guthaben ohne `Invoice`-Verknüpfung | nur als ausdrücklich bestätigter Voucher-Einzelexport über den vollständigen Dokumentbruttobetrag |
 | unklare Sammelzahlung oder anderer Guthabenfall | blockiert, manuelle Prüfung |
-| genau ein struktureller `PromoHosting`-Rabatt, Rule 11/0 %, Canary bestätigt | feste Invoice-Discount-Struktur in `invoice_only` |
+| WHMCS-Position vom Typ `LateFee` | blockiert; eigener steuerlicher Grund und separate fachliche Behandlung erforderlich |
+| genau ein struktureller `PromoHosting`-Rabatt mit passender Rule-/Rate-Capability und Canary | negative `InvoicePos` in `invoice_only`, `discountSave=null`; keine E-Rechnung |
 | Null-/Negativbetrag, andere negative Position, Refund oder Storno | normaler Export blockiert oder eigener bestätigter Voucher-Korrekturpfad |
 | Fremdwährung | blockiert, bis separat freigegeben |
 
@@ -341,7 +365,7 @@ Erlaubt ein Voucher-Konto laut Guidance nur `AUSFUHREN`, muss jede andere Rule l
 - Dezimalwerte werden ohne binäre Rundungsartefakte normalisiert.
 - Beim Voucher- und Korrekturpfad gelten die jeweils dokumentierten Cent-Toleranzen für aus WHMCS abgeleitete Summen. Der normale Invoice-Pfad vergleicht Payload und gelesene Remote-Werte dagegen exakt in normalisierten Minor Units; eine Abweichung von einem Cent ist dort bereits ein Vertragsfehler.
 - Invoice- und Voucher-Payload müssen denselben gefrorenen Netto-/Bruttomodus abbilden.
-- Negative Positionen bleiben im normalen Export verboten.
+- Negative Positionen bleiben im normalen Export verboten. Einzige Ausnahme ist der oben beschriebene feste `PromoHosting`-Rabatt; er wird als exakt geprüfte negative `InvoicePos` übertragen. `discountSave` bleibt leer.
 - Leere und Nullsummen-Rechnungen sind Prüffälle.
 - Beschreibungen sind Dokumentinhalt, aber kein Klassifikationssignal und kein Joblogfeld.
 

@@ -14,7 +14,6 @@ use WHMCS\Module\Addon\SevDesk\Domain\EInvoiceContext;
 use WHMCS\Module\Addon\SevDesk\Domain\ExportResult;
 use WHMCS\Module\Addon\SevDesk\Domain\ContactData;
 use WHMCS\Module\Addon\SevDesk\Domain\InvoiceAddressContext;
-use WHMCS\Module\Addon\SevDesk\Domain\InvoiceDiscount;
 use WHMCS\Module\Addon\SevDesk\Domain\InvoiceSnapshot;
 use WHMCS\Module\Addon\SevDesk\Domain\LineItem;
 use WHMCS\Module\Addon\SevDesk\Domain\TaxDecision;
@@ -41,6 +40,8 @@ final class InvoiceExporter
 
     private readonly InvoiceXml $invoiceXml;
 
+    private readonly InvoiceDiscountCapabilityPolicy $discountPolicy;
+
     /**
      * Collaborator signatures:
      *
@@ -60,6 +61,7 @@ final class InvoiceExporter
         ?callable $resolveCountryId = null,
         private readonly bool $discountsConfirmed = false,
         ?callable $validateReferences = null,
+        ?InvoiceDiscountCapabilityPolicy $discountPolicy = null,
     ) {
         $this->findMapping = Closure::fromCallable($findMapping);
         $this->persistMapping = Closure::fromCallable($persistMapping);
@@ -71,6 +73,9 @@ final class InvoiceExporter
             : Closure::fromCallable($validateReferences);
         $this->remoteVerifier = new InvoiceRemoteVerifier($sevUserId, $unityId);
         $this->invoiceXml = new InvoiceXml($client);
+        $this->discountPolicy = $discountPolicy ?? new InvoiceDiscountCapabilityPolicy(
+            ruleElevenZeroConfirmed: $discountsConfirmed,
+        );
     }
 
     public function withReferences(string $sevUserId, string $unityId): self
@@ -88,6 +93,7 @@ final class InvoiceExporter
             $this->resolveCountryId,
             $this->discountsConfirmed,
             $this->validateReferences,
+            $this->discountPolicy,
         );
     }
 
@@ -170,6 +176,13 @@ final class InvoiceExporter
         if ($preflight !== null) {
             return $preflight;
         }
+        $discountCapability = $this->discountPolicy->evaluate(
+            $invoice,
+            $taxDecision,
+            $target,
+            $eInvoiceContext !== null,
+        );
+        $discountCapabilityKey = $discountCapability['capabilityKey'];
 
         $addressContextFailure = self::addressContextFailure(
             $invoice,
@@ -239,7 +252,7 @@ final class InvoiceExporter
                     'documentType' => DocumentTargetDecision::DOCUMENT_INVOICE,
                     'documentNumber' => $invoice->invoiceNumber,
                 ],
-                self::discountCheckpointContext($invoice),
+                self::discountCheckpointContext($invoice, $discountCapabilityKey),
                 $invoiceAddressContext?->frozenContext() ?? [],
                 $eInvoiceContext?->frozenContext() ?? ['isEInvoice' => false],
             ))
@@ -307,7 +320,7 @@ final class InvoiceExporter
                     'documentType' => DocumentTargetDecision::DOCUMENT_INVOICE,
                     'documentNumber' => $invoice->invoiceNumber,
                 ],
-                self::discountCheckpointContext($invoice),
+                self::discountCheckpointContext($invoice, $discountCapabilityKey),
                 $invoiceAddressContext?->frozenContext() ?? [],
                 $eInvoiceContext?->frozenContext() ?? ['isEInvoice' => false],
             ))
@@ -439,7 +452,7 @@ final class InvoiceExporter
                     'documentType' => DocumentTargetDecision::DOCUMENT_INVOICE,
                     'documentNumber' => $invoice->invoiceNumber,
                 ],
-                self::discountCheckpointContext($invoice),
+                self::discountCheckpointContext($invoice, $discountCapabilityKey),
                 $invoiceAddressContext?->frozenContext() ?? [],
                 $eInvoiceContext?->frozenContext($xmlSha256) ?? [
                     'isEInvoice' => false,
@@ -1178,6 +1191,22 @@ final class InvoiceExporter
                 'taxRate' => Decimal::toFloat($lineItem->taxRate),
             ];
         }
+        foreach ($invoice->discounts as $discount) {
+            $positions[] = [
+                'objectName' => 'InvoicePos',
+                'mapAll' => true,
+                'quantity' => 1,
+                'unity' => [
+                    'id' => self::payloadId($this->unityId),
+                    'objectName' => 'Unity',
+                ],
+                'positionNumber' => count($positions) + 1,
+                'name' => mb_substr($discount->text, 0, 255),
+                'text' => mb_substr($discount->text, 0, 1000),
+                'price' => Decimal::toFloat($discount->negativeAmount()),
+                'taxRate' => Decimal::toFloat($discount->taxRate),
+            ];
+        }
 
         $invoicePayload = [
                 'objectName' => 'Invoice',
@@ -1233,12 +1262,10 @@ final class InvoiceExporter
             // sevdesk documents that these four members must be present and in
             // this order even when a new Invoice has nothing to delete.
             'invoicePosDelete' => null,
-            'discountSave' => $invoice->discounts === []
-                ? null
-                : array_map(
-                    static fn (InvoiceDiscount $discount): array => $discount->toSevdeskPayload(),
-                    $invoice->discounts,
-                ),
+            // A matched PromoHosting reduction is an explicit negative
+            // InvoicePos. Global fixed discounts round taxable gross-mode
+            // invoices differently and therefore must remain unused.
+            'discountSave' => null,
             'discountDelete' => null,
             'takeDefaultAddress' => false,
         ];
@@ -1264,12 +1291,21 @@ final class InvoiceExporter
         return InvoiceRemoteVerifier::markerMatches($note, $invoiceId);
     }
 
-    /** @return array{invoiceDiscountCount:int,invoiceDiscountFingerprint:?string} */
-    private static function discountCheckpointContext(InvoiceSnapshot $invoice): array
-    {
+    /**
+     * @return array{
+     *     invoiceDiscountCount:int,
+     *     invoiceDiscountFingerprint:?string,
+     *     invoiceDiscountCapabilityKey:?string
+     * }
+     */
+    private static function discountCheckpointContext(
+        InvoiceSnapshot $invoice,
+        ?string $capabilityKey,
+    ): array {
         return [
             'invoiceDiscountCount' => count($invoice->discounts),
             'invoiceDiscountFingerprint' => $invoice->discountFingerprint(),
+            'invoiceDiscountCapabilityKey' => $capabilityKey,
         ];
     }
 
@@ -1347,7 +1383,7 @@ final class InvoiceExporter
                 'All sevdesk Invoice positions must use the same net/gross mode.',
             );
         }
-        if (count($invoice->lineItems) >= 1000) {
+        if ($invoice->remotePositionCount() >= 1000) {
             return ExportResult::failed(
                 $invoice->invoiceId,
                 'invoice_position_limit_exceeded',
@@ -1364,51 +1400,28 @@ final class InvoiceExporter
             }
         }
         if ($invoice->discounts !== []) {
-            if (!$this->discountsConfirmed) {
+            $discountCapability = $this->discountPolicy->evaluate(
+                $invoice,
+                $taxDecision,
+                $target,
+                $eInvoiceContext !== null,
+            );
+            if (!$discountCapability['allowed']) {
                 return ExportResult::failed(
                     $invoice->invoiceId,
-                    'invoice_discount_canary_not_confirmed',
-                    'Fixed Invoice discounts require a separately confirmed sevdesk canary.',
+                    $discountCapability['code'],
+                    $discountCapability['message'],
                 );
             }
-            if (count($invoice->discounts) !== 1) {
+            if (
+                $invoice->expectedNetMinorUnits() === null
+                || $invoice->expectedTaxMinorUnits() === null
+            ) {
                 return ExportResult::failed(
                     $invoice->invoiceId,
-                    'invoice_discount_structure_not_supported',
-                    'Exactly one structurally matched fixed Invoice discount is supported.',
+                    'invoice_discount_tax_totals_unavailable',
+                    'Taxable Invoice discounts require frozen WHMCS net and tax totals.',
                 );
-            }
-            if ($eInvoiceContext !== null) {
-                return ExportResult::failed(
-                    $invoice->invoiceId,
-                    'e_invoice_discount_not_supported',
-                    'ZUGFeRD Invoices with WHMCS discounts are not enabled in this release.',
-                );
-            }
-            if ($taxDecision->taxRuleId !== '11') {
-                return ExportResult::failed(
-                    $invoice->invoiceId,
-                    'invoice_discount_tax_rule_not_supported',
-                    'The confirmed discount path is limited to small-business Invoices with Tax Rule 11.',
-                );
-            }
-            foreach ($invoice->lineItems as $lineItem) {
-                if (Decimal::toMinorUnits($lineItem->taxRate) !== 0) {
-                    return ExportResult::failed(
-                        $invoice->invoiceId,
-                        'invoice_discount_tax_rate_not_supported',
-                        'The confirmed discount path requires zero-tax WHMCS positions.',
-                    );
-                }
-            }
-            foreach ($invoice->discounts as $discount) {
-                if (Decimal::toMinorUnits($discount->taxRate) !== 0) {
-                    return ExportResult::failed(
-                        $invoice->invoiceId,
-                        'invoice_discount_tax_rate_not_supported',
-                        'The confirmed discount path requires zero-tax WHMCS discounts.',
-                    );
-                }
             }
         }
         if ($invoice->calculatedDocumentGrossMinorUnits() !== $invoice->totalMinorUnits()) {
@@ -1494,6 +1507,22 @@ final class InvoiceExporter
                         $invoice->invoiceId,
                         'oss_tax_rate_mismatch',
                         'A Rule 19 position rate differs from the confirmed WHMCS tax decision.',
+                    );
+                }
+            }
+            foreach ($invoice->discounts as $discount) {
+                $rateAllowed = false;
+                foreach ($taxDecision->allowedTaxRates as $allowedRate) {
+                    if (Decimal::toMinorUnits($discount->taxRate) === Decimal::toMinorUnits($allowedRate)) {
+                        $rateAllowed = true;
+                        break;
+                    }
+                }
+                if (!$rateAllowed) {
+                    return ExportResult::failed(
+                        $invoice->invoiceId,
+                        'oss_tax_rate_mismatch',
+                        'A Rule 19 discount rate differs from the confirmed WHMCS tax decision.',
                     );
                 }
             }

@@ -81,7 +81,7 @@ Der allgemeine Invoice-Canary deckt Rule 11 nicht ab. Ein synthetischer Live-Lau
 
 `small_business_invoice_canary_confirmed` bleibt beim Upgrade aus. Die Freigabe setzt einen neuen, rabattfreien Rule-11-Lauf im verbundenen Mandanten voraus: Create, exakter Readback, `sendBy`, finale PDF und Recovery ohne zweiten Write. Zusätzlich wird bei jeder relevanten Vorprüfung die aktuelle `ReceiptGuidance` gelesen. Fehlt ein passendes `REVENUE`-Konto für Rule 11 mit 0 %, endet der Vorgang vor Create mit `invoice_rule11_tenant_scope_unsupported`. Ein bereits begonnener Write bleibt ohne weiteren Remote-Aufruf `ambiguous`.
 
-Der Rabatt-Canary ist darauf aufgebaut. `invoice_discount_canary_confirmed` kann Rule 11 nicht allein freigeben.
+Der Rule-11-Rabatt-Canary ist darauf aufgebaut. `invoice_discount_canary_confirmed` kann Rule 11 nicht allein freigeben. Die Rabatt-Gates für Rule 1, Rule 17 und Rule 19 sind davon getrennt und dürfen den Rule-11-Vertrag nicht freischalten.
 
 ## Architekturentscheidung: sevDesk-natives ZUGFeRD
 
@@ -97,9 +97,9 @@ Der persistierte Jobsnapshot enthält nur IDs, E-Invoice-Flag und SHA-256-Werte.
 
 Rule 19 bleibt eine normale Invoice. Rules 18/20, B2G/XRechnung, historische E-Rechnungs-Backfills und eine nachträgliche Umwandlung bestehender Dokumente sind ausgeschlossen. Dasselbe gilt für ZUGFeRD mit angewendetem WHMCS-Guthaben, auch wenn die zugrunde liegende Sammelzahlung exakt bewiesen ist. Dafür fehlt ein eigener Create-/XML-Canary; ein stiller Rückfall auf eine PDF-Invoice findet nicht statt.
 
-## Architekturentscheidung: WHMCS-Sammelzahlungen und Rule-11-Rabatte
+## Architekturentscheidung: WHMCS-Sammelzahlungen und Invoice-Rabatte
 
-**Status:** implementiert, der Rabatt-Write bleibt bis zum eigenen sevDesk-Canary gesperrt.
+**Status:** implementiert, jeder Rabatt-Write bleibt bis zum Canary seiner konkreten Capability gesperrt.
 
 Eine reine WHMCS-Sammelzahlungsrechnung ist ein Zahlungscontainer und kein Umsatzbeleg. Schon der Paid-Hook prüft die vollständige Kette anhand von `relid`, Mandant, Status, Beträgen, Steuerfeldern, `tblaccounts` und Mappingzustand. Nur dann lässt er die normale WHMCS-Mail für den Container zu und reiht die Originalrechnungen ein. Den einmal bestätigten Graphen merkt sich der Hook für den laufenden WHMCS-Request. So führen die Paid-Ereignisse der Originalrechnungen nicht jedes Mal dieselbe Tabellenprüfung aus. Diese Abkürzung gilt nur für Hooks; der Worker liest stets neu.
 
@@ -111,7 +111,20 @@ Die Prüfung umfasst auch den übrigen Rechnungsvertrag: Datum, effektive Nummer
 
 Bei einer Originalrechnung mit exakt bewiesener Kette gilt centgenau `subtotal + tax + tax2 = total + credit`. `tblinvoices.total` ist der direkte Zahlteil, `total + credit` der Dokumentbrutto. Die Summe positiver `tblaccounts`-Buchungen an der Originalrechnung muss deshalb genau `total` entsprechen; bei Vollguthaben sind beide null. Die Sammeltransaktion bleibt beim Container und wird nicht automatisch über `bookAmount` auf einzelne sevDesk-Dokumente verteilt. Fehlt ein Beweis, endet der Vorgang vor dem ersten Remote-Write.
 
-Der einzige freigegebene negative Positionsfall ist genau ein `PromoHosting`-Eintrag, der anhand Typ, `relid` und `taxed` genau einer positiven `Hosting`-Position zugeordnet werden kann. Er wird nicht zur negativen Invoice-Position, sondern zu einem festen `discountSave`. Dieser Pfad setzt `invoice_only`, Rule 11, durchgehend 0 %, EUR, positiven Dokumentbrutto und den separaten Rabatt-Canary voraus. Ein SHA-256 über Anzahl, Text, Betrag, Typ, Relation, Steuerkennzeichen, Netto-/Bruttomodus und Steuersatz wird vor dem Create im Job eingefroren. Derselbe Hash steht als `[WHMCS-DISCOUNT:<sha256>]` neben dem normalen Invoice-Marker. Readback und Recovery verlangen Marker, Rabattsumme, Positionen und Gesamtsumme; eine Drift führt zu `ambiguous`.
+Der einzige freigegebene negative Positionsfall ist genau ein `PromoHosting`-Eintrag, der anhand Typ, `relid` und `taxed` genau einer positiven `Hosting`-Position zugeordnet werden kann. Er wird als eigene negative `InvoicePos` übertragen; `discountSave` bleibt leer. Der Pfad setzt `invoice_only`, EUR, positiven Dokumentbrutto und eine normale, nicht als E-Rechnung ausgewählte Invoice voraus. Alle positiven Positionen und der Rabatt müssen denselben Netto-/Bruttomodus und denselben Steuersatz tragen.
+
+Diese Form ist eine bewusst enge Architekturkorrektur. Im Rule-1-Live-Canary bestand die Rechnung aus einer Hostingposition über 4,94 Euro brutto und einem Rabatt über 2,47 Euro brutto. sevDesk verteilte den globalen `discountSave` auf 2,08 Euro netto und 0,39 Euro Umsatzsteuer. WHMCS weist dagegen 2,07 Euro netto und 0,40 Euro Umsatzsteuer aus. Dieselbe Rechnung mit negativer `InvoicePos` behielt die WHMCS-Centverteilung exakt bei. Ein globaler Rabatt ist daher kein zulässiger Fallback.
+
+| Capability | Gate |
+| --- | --- |
+| Rule 11, 0 % | `small_business_invoice_canary_confirmed`, aktuelle Rule-11-`REVENUE`-Guidance und `invoice_discount_canary_confirmed` |
+| Rule 1, 19 % | `invoice_discount_rule1_19_canary_confirmed` |
+| Rule 17, 0 % | `invoice_discount_rule17_0_canary_confirmed` |
+| Rule 19, positiver einheitlicher Zielsteuersatz | `invoice_discount_rule19_canary_confirmed`; der Positions- und Rabattsteuersatz muss in der bestätigten Zielbesteuerung enthalten sein |
+
+Alle vier Rabatt-Gates sind bei Installation und Upgrade aus. Die drei neuen Settings für Rules 1/17/19 enthalten nach der Bestätigung den exakten Capability-Key statt eines einfachen `on`; Rule 19 speichert den geprüften Zielsteuersatz zusätzlich. Die Capability enthält Profil, Länderklasse, Rule, Steuersatz in Minor Units, Netto-/Bruttomodus und Vertragsversion. Ein Wechsel des WHMCS-Steuermodus macht den gespeicherten Schlüssel ungültig. Der Worker friert diesen Capability-Key und einen SHA-256 über Anzahl, Text, Betrag, Typ, Relation, Steuerkennzeichen, Netto-/Bruttomodus und Steuersatz vor `invoice_write_requested` ein. Ein älterer Rule-11-Job ohne Capability-Key darf nur vor einem möglichen Write um den deterministisch gleichen Schlüssel ergänzt werden. Nach einem möglichen Write führt ein fehlender oder abweichender Schlüssel zu `ambiguous`.
+
+Der Rabatt-Fingerprint steht außerdem als `[WHMCS-DISCOUNT:<sha256>]` neben dem normalen Invoice-Marker. Readback und Recovery verlangen Marker, Capability-Key, alle positiven und negativen Positionen sowie `sumNet`, `sumTax` und `sumGross` exakt in Minor Units. `sumDiscounts` muss numerisch 0 sein, weil der Rabatt vollständig in den Positionen steckt. Eine Drift führt nach einem möglichen Write zu `ambiguous`. Mehrere Rabatte, andere negative Positionen, `LateFee` und E-Rechnungen mit Rabatt bleiben blockiert.
 
 ## Systemgrenzen
 
@@ -182,7 +195,8 @@ Ist das Custom-Field leer, kann die exakte Kundennummernsuche nur Alt-Kontakte f
 | Job-Persistenz | Jobs/Items anlegen, atomar claimen, Lease erneuern, Checkpoints und Ergebnis speichern |
 | `DocumentTargetResolver` | Modus, Hoheit, Tax Rule, Paid-Status und effektive Nummer in genau ein Ziel übersetzen |
 | `WhmcsPaymentStructureService` | Sammelzahlungscontainer und exakt bezahlte Originalrechnungen anhand lokaler Struktur unterscheiden |
-| `InvoiceItemNormalizer` | genau einen belegten `PromoHosting`-Rabatt in positive Positionen plus festen Invoice-Rabatt zerlegen |
+| `InvoiceItemNormalizer` | genau einen belegten `PromoHosting`-Rabatt als zusätzliche negative Invoice-Position normalisieren |
+| `InvoiceDiscountCapabilityPolicy` | Rule, Steuersatz, Netto-/Bruttomodus, E-Rechnungsstatus und separates Canary-Gate in einen stabilen Rabatt-Capability-Key übersetzen |
 | `VoucherExporter` | WHMCS-PDF hochladen, Voucher erstellen und exakt verifizieren |
 | `InvoiceExporter` | normale Invoice erstellen, Positionen verifizieren, öffnen und zustellen |
 | `EInvoiceEligibilityService` | ZUGFeRD-Auswahl, Kontakt-/Referenzprüfung und PII-freien Snapshot bestimmen |
@@ -257,7 +271,7 @@ Der bestehende Pfad bleibt fachlich unverändert:
 
 ### Invoice-Pfad
 
-1. Mapping, Paid-Status, effektive Nummer, Tax Rule, Land, Währung, positive Positionen, optionalen freigegebenen Festrabatt, SevUser und Unity prüfen. Für jede Invoice wird genau eine passende `StaticCountry`-ID lesend aufgelöst; kein oder mehr als ein eindeutiger Treffer blockiert vor dem Write. Unmittelbar vor `invoice_write_requested` müssen auch die im Job eingefrorenen SevUser- und Unity-IDs noch im Mandanten vorhanden sein.
+1. Mapping, Paid-Status, effektive Nummer, Tax Rule, Land, Währung, positive Positionen, optional genau eine freigegebene negative Rabattposition, SevUser und Unity prüfen. Ein Rabatt braucht zusätzlich den passenden Capability-Key und Canary; `LateFee` blockiert unabhängig von Rule und Datum. Für jede Invoice wird genau eine passende `StaticCountry`-ID lesend aufgelöst; kein oder mehr als ein eindeutiger Treffer blockiert vor dem Write. Unmittelbar vor `invoice_write_requested` müssen auch die im Job eingefrorenen SevUser- und Unity-IDs noch im Mandanten vorhanden sein.
 2. Kontakt eindeutig auflösen.
 3. normale Invoice `RE` im Draft-Status 100 mit unveränderter WHMCS-Nummer, Marker und vollständiger WHMCS-Rechnungsadresse erstellen. `takeDefaultAddress=false` entkoppelt das Dokument von einer möglicherweise fehlenden sevDesk-Kontaktadresse; der bestehende Kontakt wird nicht geändert. Vor dem Write werden nur Länder-ID und PII-freier Adresshash eingefroren.
 4. Invoice und Positionen erneut lesen; ID, Nummer, Kontakt, Rule, Status, Währung, Netto/Brutto, Empfängeradresse, Positionen und Summen exakt vergleichen. Rule 19 verlangt außerdem einen zum eingefrorenen Zielland passenden Ländercode.
@@ -362,6 +376,9 @@ Funktionale Legacy-Einstellungen bleiben erhalten. Hinzu kommen insbesondere:
 - `invoice_canary_confirmed`;
 - `small_business_invoice_canary_confirmed`;
 - `invoice_discount_canary_confirmed`;
+- `invoice_discount_rule1_19_canary_confirmed`;
+- `invoice_discount_rule17_0_canary_confirmed`;
+- `invoice_discount_rule19_canary_confirmed`;
 - `invoice_sev_user_id`, `invoice_unity_id`;
 - `e_invoice_mode`, `e_invoice_client_field_id`, `e_invoice_payment_method_id`, `e_invoice_active_from`, `e_invoice_canary_confirmed`;
 - `invoice_delivery_channel`;
@@ -382,11 +399,13 @@ Der Dedupe-Key bleibt absichtlich `export_voucher:<invoiceId>` für beide neuen 
 
 Das globale Kleinunternehmerprofil kann optional mit `small_business_until` begrenzt werden. Die Steuerentscheidung vergleicht diesen Stichtag mit dem unveränderlichen Rechnungsdatum; Korrekturen verwenden das Datum der Originalrechnung. Ein leeres Feld erhält die bisherige unbegrenzte Semantik. Bei aktivem Kleinunternehmerprofil führt ein syntaktisch oder kalendarisch ungültiger Altwert vor jedem Write zu einem Fehler.
 
-Vor einer Änderung von Modus, Hoheit, OSS-, E-Invoice-, Rule-11-Invoice-, Rabatt-Canary- oder Kleinunternehmerprofil zeigt das Setup eine rein lokale Übergangsinventur. Sie zählt typisierte und untypisierte Mappings, `NULL`- und verwaiste Zeilen, aktive, fehlgeschlagene und unklare Exportjobs sowie bezahlte ungemappte Rechnungen. Ein Fingerprint verhindert die Freigabe einer inzwischen veralteten Ansicht. Aktive oder unklare Exportjobs sperren außerdem Änderungen am Kleinunternehmerschalter, seinem Stichtag, Rule-11-Konto und den beiden Rule-11-Freigaben.
+Vor einer Änderung von Modus, Hoheit, OSS-, E-Invoice-, Rule-11-Invoice-, Rabatt-Canary- oder Kleinunternehmerprofil zeigt das Setup eine rein lokale Übergangsinventur. Sie zählt typisierte und untypisierte Mappings, `NULL`- und verwaiste Zeilen, aktive, fehlgeschlagene und unklare Exportjobs sowie bezahlte ungemappte Rechnungen. Ein Fingerprint verhindert die Freigabe einer inzwischen veralteten Ansicht. Aktive oder unklare Exportjobs sperren außerdem Änderungen am Kleinunternehmerschalter, seinem Stichtag, Rule-11-Konto, dem Rule-11-Invoice-Gate und allen vier Rabatt-Gates.
 
 Ein Moduswechsel startet keinen Nachlauf. Alte fehlgeschlagene Exportitems behalten ihren historischen Zielpfad. Sichere Zustände vor einem Dokument-Write können nach neuer Vorschau als eigenes mailfreies `export_document`-Item eingereiht werden; riskante Zustände bleiben Reconciliation-Fälle. Der Sammelexport markiert seinen Job als historischen Backfill, schaltet E-Invoice aus und prüft vor jedem Create Invoice-Nummer, Datum/Kontakt/Betrag sowie markerlose und markertragende Voucher-Kandidaten.
 
-Eine vollständige lokale Zuordnung lässt sich nur entfernen, wenn Voucher und Invoice unter der gespeicherten ID nachweislich mit 404 fehlen. Das Mapping wird danach unter Lock nochmals gegen Remote-ID und Dokumenttyp geprüft. Ein vorhandener oder nicht eindeutig prüfbarer Remote-Beleg bleibt geschützt.
+Eine vollständige lokale Zuordnung lässt sich nur entfernen, wenn Voucher und Invoice unter der gespeicherten ID nachweislich mit 400 oder 404 fehlen. Das Mapping wird danach unter Lock nochmals gegen Remote-ID und Dokumenttyp geprüft. Ein vorhandener oder nicht eindeutig prüfbarer Remote-Beleg bleibt geschützt.
+
+Passende terminale Exporthistorien werden dabei nicht gelöscht. Stimmen Remote-ID, eingefrorener Typ und Dokumentcheckpoint exakt überein, erhalten sie atomar den lokalen Abschluss `remote_absence_confirmed`; erst dann wird ihr Dedupe-Key frei. Wurde das Mapping schon nach derselben beidseitigen Prüfung entfernt, bietet die Klärfallansicht denselben Check noch einmal anhand der im Item gespeicherten Identität an. Kontakt-, Buchungs-, Korrektur- und Versandfolgen lassen sich durch einen fehlenden Beleg nicht widerlegen und bleiben deshalb gesperrt.
 
 ### `mod_sevdesk_jobs`
 
@@ -507,7 +526,8 @@ WHMCS-Kundenguthaben bleibt ein eigener Sonderfall. Eine vollständig bewiesene 
 | reine Sammelzahlungsrechnung | `skipped`; Originalrechnungen werden getrennt verarbeitet |
 | exakt bewiesene Originalrechnung mit Sammelguthaben | voller Dokumentbrutto; kombinierte Zahlung bleibt manuell zuzuordnen |
 | unklare Guthaben- oder Sammelzahlungsstruktur | `permanent_failed` vor Remote-I/O |
-| PromoHosting-Rabatt ohne Canary oder mit Drift | blockiert beziehungsweise nach möglichem Write `ambiguous` |
+| PromoHosting-Rabatt ohne passende Rule-/Rate-Capability, ohne Canary oder mit Schlüssel-/Fingerprint-/Summendrift | blockiert beziehungsweise nach möglichem Write `ambiguous` |
+| `LateFee` | unabhängig von Rule und Datum vor dem Remote-Write blockiert |
 | ZUGFeRD mit angewendetem Guthaben | blockiert, kein PDF-Fallback |
 | 400/409/422 | `permanent_failed`, Daten/Tax/Lifecycle prüfen |
 | 401/403 | globaler Auth-Alarm; keine weiteren Claims bis erfolgreicher Setup-Read |

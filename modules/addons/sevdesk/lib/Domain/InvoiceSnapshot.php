@@ -25,6 +25,12 @@ final class InvoiceSnapshot
     /** @var list<InvoiceDiscount> */
     public readonly array $discounts;
 
+    /** WHMCS subtotal after line discounts, used for exact taxable-discount readback. */
+    public readonly ?string $netTotal;
+
+    /** Combined WHMCS tax and tax2 amount. */
+    public readonly ?string $taxTotal;
+
     /**
      * @param non-empty-list<LineItem> $lineItems
      * @param list<InvoiceDiscount> $discounts
@@ -39,6 +45,8 @@ final class InvoiceSnapshot
         string $creditApplied,
         array $lineItems,
         array $discounts = [],
+        ?string $netTotal = null,
+        ?string $taxTotal = null,
     ) {
         if ($invoiceId < 1 || $clientId < 1) {
             throw new \InvalidArgumentException('Invoice and client IDs must be positive.');
@@ -74,9 +82,32 @@ final class InvoiceSnapshot
         $this->creditApplied = Decimal::assert($creditApplied, 'Applied credit');
         $this->lineItems = array_values($lineItems);
         $this->discounts = array_values($discounts);
+        if (($netTotal === null) !== ($taxTotal === null)) {
+            throw new \InvalidArgumentException('Invoice net and tax totals must be provided together.');
+        }
+        $this->netTotal = $netTotal === null
+            ? null
+            : Decimal::assert($netTotal, 'Invoice net total');
+        $this->taxTotal = $taxTotal === null
+            ? null
+            : Decimal::assert($taxTotal, 'Invoice tax total');
 
         if (Decimal::toMinorUnits($this->creditApplied) < 0) {
             throw new \InvalidArgumentException('Applied credit cannot be negative.');
+        }
+        if (
+            $this->netTotal !== null
+            && $this->taxTotal !== null
+            && (
+                Decimal::toMinorUnits($this->netTotal) < 0
+                || Decimal::toMinorUnits($this->taxTotal) < 0
+                || Decimal::toMinorUnits($this->netTotal)
+                    + Decimal::toMinorUnits($this->taxTotal) !== $this->totalMinorUnits()
+            )
+        ) {
+            throw new \InvalidArgumentException(
+                'Invoice net and tax totals must be non-negative and equal the document gross.',
+            );
         }
     }
 
@@ -112,6 +143,12 @@ final class InvoiceSnapshot
         ));
     }
 
+    /** Number of InvoicePos records expected from sevdesk, including the reduction. */
+    public function remotePositionCount(): int
+    {
+        return count($this->lineItems) + count($this->discounts);
+    }
+
     public function discountFingerprint(): ?string
     {
         if ($this->discounts === []) {
@@ -121,8 +158,10 @@ final class InvoiceSnapshot
         $context = array_map(
             static fn (InvoiceDiscount $discount): array => [
                 'sourceType' => 'PromoHosting',
+                'remoteRepresentation' => 'negative_invoice_position',
                 'text' => $discount->text,
                 'valueMinor' => $discount->amountMinorUnits(),
+                'positionValueMinor' => -$discount->amountMinorUnits(),
                 'taxRateMinor' => Decimal::toMinorUnits($discount->taxRate),
                 'net' => $discount->net,
                 'relatedId' => $discount->relatedId,
@@ -132,7 +171,7 @@ final class InvoiceSnapshot
         );
 
         return hash('sha256', json_encode([
-            'version' => 'whmcs_invoice_discount_v1',
+            'version' => 'whmcs_invoice_discount_negative_position_v2',
             'discounts' => $context,
         ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES));
     }
@@ -140,6 +179,30 @@ final class InvoiceSnapshot
     public function calculatedDocumentGrossMinorUnits(): int
     {
         return $this->lineGrossMinorUnits() - $this->discountGrossMinorUnits();
+    }
+
+    public function expectedNetMinorUnits(): ?int
+    {
+        if ($this->netTotal !== null) {
+            return Decimal::toMinorUnits($this->netTotal);
+        }
+        if ($this->allRatesAreZero()) {
+            return $this->totalMinorUnits();
+        }
+
+        return null;
+    }
+
+    public function expectedTaxMinorUnits(): ?int
+    {
+        if ($this->taxTotal !== null) {
+            return Decimal::toMinorUnits($this->taxTotal);
+        }
+        if ($this->allRatesAreZero()) {
+            return 0;
+        }
+
+        return null;
     }
 
     public function hasMixedNetModes(): bool
@@ -152,5 +215,21 @@ final class InvoiceSnapshot
         }
 
         return false;
+    }
+
+    private function allRatesAreZero(): bool
+    {
+        foreach ($this->lineItems as $lineItem) {
+            if (Decimal::toMinorUnits($lineItem->taxRate) !== 0) {
+                return false;
+            }
+        }
+        foreach ($this->discounts as $discount) {
+            if (Decimal::toMinorUnits($discount->taxRate) !== 0) {
+                return false;
+            }
+        }
+
+        return true;
     }
 }

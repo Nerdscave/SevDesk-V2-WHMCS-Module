@@ -18,6 +18,7 @@ use WHMCS\Database\Capsule;
 use WHMCS\Module\Addon\SevDesk\Api\SevdeskClient;
 use WHMCS\Module\Addon\SevDesk\Application;
 use WHMCS\Module\Addon\SevDesk\Controllers\AdminController;
+use WHMCS\Module\Addon\SevDesk\Service\InvoiceItemExportPolicy;
 use WHMCS\Module\Addon\SevDesk\Service\ReferenceData;
 use WHMCS\Module\Addon\SevDesk\Service\WhmcsPaymentStructureService;
 use WHMCS\Module\Addon\SevDesk\Support\Csrf;
@@ -202,7 +203,7 @@ final class AdminDryRunTotalBehaviorTest extends TestCase
         self::assertSame('', $invoice->invoicenum, 'The preview must not backfill the WHMCS row.');
     }
 
-    public function testPreviewAppliesTheSmallBusinessProfileOnlyThroughTheConfiguredCutoff(): void
+    public function testPreviewBlocksDomesticZeroRateAfterTheConfiguredSmallBusinessCutoff(): void
     {
         Capsule::table('tblinvoiceitems')->where('invoiceid', 10)->update([
             'amount' => '100.00',
@@ -232,9 +233,12 @@ final class AdminDryRunTotalBehaviorTest extends TestCase
         self::assertTrue($rows2025[0]['exportable']);
         self::assertSame('small_business', $rows2025[0]['tax_profile']);
         self::assertSame('11', $rows2025[0]['tax_rule']);
-        self::assertTrue($rows2026[0]['exportable']);
+        self::assertFalse($rows2026[0]['exportable']);
         self::assertSame('domestic', $rows2026[0]['tax_profile']);
-        self::assertSame('1', $rows2026[0]['tax_rule']);
+        self::assertSame(
+            'domestic_zero_tax_rate_outside_small_business_period',
+            $rows2026[0]['reason_code'],
+        );
     }
 
     public function testPreviewDoesNotLetAddFundsBypassTheSmallBusinessPeriod(): void
@@ -339,6 +343,33 @@ final class AdminDryRunTotalBehaviorTest extends TestCase
 
         self::assertFalse($rows[0]['exportable']);
         self::assertSame('small_business_period_invalid', $rows[0]['reason_code']);
+    }
+
+    public function testPreviewBlocksLateFeeBeforeChoosingAnyTaxRule(): void
+    {
+        Capsule::table('tblinvoiceitems')->where('invoiceid', 10)->update([
+            'type' => 'LateFee',
+            'relid' => 0,
+            'description' => 'Synthetic late fee',
+            'amount' => '100.00',
+            'taxed' => 0,
+        ]);
+        $application = new Application();
+        $application->config->set('export_mode', 'invoice_only');
+        $application->config->set('document_authority', 'whmcs');
+        $application->config->set('invoice_canary_confirmed', true);
+
+        $rows = (new ReflectionMethod(AdminController::class, 'decorateDryRun'))->invoke(
+            $this->controller($application),
+            [$this->zeroTaxInvoice('2025-12-31')],
+        );
+
+        self::assertFalse($rows[0]['exportable']);
+        self::assertSame(
+            InvoiceItemExportPolicy::LATE_FEE_REQUIRES_REVIEW,
+            $rows[0]['reason_code'],
+        );
+        self::assertNull($rows[0]['tax_rule']);
     }
 
     public function testVoucherPreviewOffersTheExplicitFullGrossConfirmationForOrdinaryCredit(): void

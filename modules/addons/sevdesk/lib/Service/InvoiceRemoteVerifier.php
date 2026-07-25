@@ -163,22 +163,37 @@ final class InvoiceRemoteVerifier
         }
         $sumDiscounts = $remote['sumDiscounts'] ?? null;
         if ($invoice->discounts !== []) {
-            if (!is_string($sumDiscounts) && !is_int($sumDiscounts) && !is_float($sumDiscounts)) {
-                return 'discount_total_missing';
+            $expectedNet = $invoice->expectedNetMinorUnits();
+            $expectedTax = $invoice->expectedTaxMinorUnits();
+            if ($expectedNet === null || $expectedTax === null) {
+                return 'discount_tax_totals_unavailable';
+            }
+            $sumNet = $remote['sumNet'] ?? null;
+            $sumTax = $remote['sumTax'] ?? null;
+            if (
+                (!is_string($sumNet) && !is_int($sumNet) && !is_float($sumNet))
+                || (!is_string($sumTax) && !is_int($sumTax) && !is_float($sumTax))
+            ) {
+                return 'discount_tax_totals_missing';
             }
             try {
                 if (
-                    Decimal::toMinorUnits((string) $sumDiscounts)
-                    !== $invoice->discountGrossMinorUnits()
+                    Decimal::toMinorUnits((string) $sumNet) !== $expectedNet
+                    || Decimal::toMinorUnits((string) $sumTax) !== $expectedTax
                 ) {
-                    return 'discount_total_mismatch';
+                    return 'discount_tax_totals_mismatch';
                 }
             } catch (\InvalidArgumentException) {
+                return 'discount_tax_totals_invalid';
+            }
+            if ($sumDiscounts === null) {
+                return 'discount_total_missing';
+            }
+            if (!is_string($sumDiscounts) && !is_int($sumDiscounts) && !is_float($sumDiscounts)) {
                 return 'discount_total_invalid';
             }
-        } elseif (
-            (is_string($sumDiscounts) || is_int($sumDiscounts) || is_float($sumDiscounts))
-        ) {
+        }
+        if (is_string($sumDiscounts) || is_int($sumDiscounts) || is_float($sumDiscounts)) {
             try {
                 if (Decimal::toMinorUnits((string) $sumDiscounts) !== 0) {
                     return 'unexpected_discount_total';
@@ -186,6 +201,8 @@ final class InvoiceRemoteVerifier
             } catch (\InvalidArgumentException) {
                 return 'discount_total_invalid';
             }
+        } elseif ($sumDiscounts !== null) {
+            return 'discount_total_invalid';
         }
 
         return null;
@@ -245,7 +262,7 @@ final class InvoiceRemoteVerifier
         if (count($positions) >= 1000) {
             return 'position_search_truncated';
         }
-        if (count($positions) !== count($invoice->lineItems)) {
+        if (count($positions) !== $invoice->remotePositionCount()) {
             return 'position_count_mismatch';
         }
 
@@ -253,7 +270,23 @@ final class InvoiceRemoteVerifier
             (int) (is_array($left) ? ($left['positionNumber'] ?? 0) : 0)
             <=> (int) (is_array($right) ? ($right['positionNumber'] ?? 0) : 0));
 
-        foreach ($invoice->lineItems as $index => $lineItem) {
+        $expectedPositions = [];
+        foreach ($invoice->lineItems as $lineItem) {
+            $expectedPositions[] = [
+                'description' => $lineItem->description,
+                'amount' => $lineItem->amount,
+                'taxRate' => $lineItem->taxRate,
+            ];
+        }
+        foreach ($invoice->discounts as $discount) {
+            $expectedPositions[] = [
+                'description' => $discount->text,
+                'amount' => $discount->negativeAmount(),
+                'taxRate' => $discount->taxRate,
+            ];
+        }
+
+        foreach ($expectedPositions as $index => $expected) {
             $position = $positions[$index] ?? null;
             if (!is_array($position)) {
                 return 'position_invalid';
@@ -264,8 +297,8 @@ final class InvoiceRemoteVerifier
                 || (string) ($position['unity']['id'] ?? '') !== $this->unityId
                 || (int) ($position['positionNumber'] ?? 0) !== $index + 1
                 || abs((float) ($position['quantity'] ?? 0) - 1.0) > 0.0001
-                || (string) ($position['name'] ?? '') !== mb_substr($lineItem->description, 0, 255)
-                || (string) ($position['text'] ?? '') !== mb_substr($lineItem->description, 0, 1000)
+                || (string) ($position['name'] ?? '') !== mb_substr($expected['description'], 0, 255)
+                || (string) ($position['text'] ?? '') !== mb_substr($expected['description'], 0, 1000)
             ) {
                 return 'position_identity_mismatch';
             }
@@ -280,8 +313,11 @@ final class InvoiceRemoteVerifier
             }
             try {
                 if (
-                    Decimal::toMinorUnits((string) $price) !== Decimal::toMinorUnits($lineItem->amount)
-                    || abs(Decimal::toFloat((string) $taxRate) - Decimal::toFloat($lineItem->taxRate)) > 0.0001
+                    Decimal::toMinorUnits((string) $price) !== Decimal::toMinorUnits($expected['amount'])
+                    || abs(
+                        Decimal::toFloat((string) $taxRate)
+                        - Decimal::toFloat($expected['taxRate'])
+                    ) > 0.0001
                 ) {
                     return 'position_amount_mismatch';
                 }

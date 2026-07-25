@@ -155,7 +155,7 @@ final class InvoiceRemoteVerifierTest extends TestCase
         );
     }
 
-    public function testFixedDiscountTotalMustBeReportedExactly(): void
+    public function testNegativePositionDiscountRequiresNoGlobalDiscountTotal(): void
     {
         $invoice = new InvoiceSnapshot(
             10,
@@ -172,8 +172,10 @@ final class InvoiceRemoteVerifierTest extends TestCase
         $remote['invoiceDate'] = '01.07.2025';
         $remote['taxRule']['id'] = '11';
         $remote['showNet'] = false;
+        $remote['sumNet'] = '80.00';
+        $remote['sumTax'] = '0.00';
         $remote['sumGross'] = '80.00';
-        $remote['sumDiscounts'] = '20.00';
+        $remote['sumDiscounts'] = '0.00';
         $remote['customerInternalNote'] = InvoiceExporter::documentMarker($invoice);
 
         self::assertNull($this->verifier()->invoiceMismatch(
@@ -193,16 +195,223 @@ final class InvoiceRemoteVerifierTest extends TestCase
             '11',
             100,
         ));
-        $remote['customerInternalNote'] = InvoiceExporter::documentMarker($invoice);
 
-        $remote['sumDiscounts'] = '19.99';
-        self::assertSame('discount_total_mismatch', $this->verifier()->invoiceMismatch(
+        $legacyGlobalDiscountFingerprint = hash('sha256', json_encode([
+            'version' => 'whmcs_invoice_discount_v1',
+            'discounts' => [[
+                'sourceType' => 'PromoHosting',
+                'text' => 'Promotion',
+                'valueMinor' => 2_000,
+                'taxRateMinor' => 0,
+                'net' => false,
+                'relatedId' => 42,
+                'taxed' => false,
+            ]],
+        ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES));
+        self::assertNotSame($legacyGlobalDiscountFingerprint, $invoice->discountFingerprint());
+        $remote['customerInternalNote'] = InvoiceExporter::marker(10)
+            . ' [WHMCS-DISCOUNT:' . $legacyGlobalDiscountFingerprint . ']';
+        self::assertSame('discount_marker_mismatch', $this->verifier()->invoiceMismatch(
             $remote,
             $invoice,
             '42',
             '11',
             100,
         ));
+        $remote['customerInternalNote'] = InvoiceExporter::documentMarker($invoice);
+
+        $remote['sumDiscounts'] = '0.01';
+        self::assertSame('unexpected_discount_total', $this->verifier()->invoiceMismatch(
+            $remote,
+            $invoice,
+            '42',
+            '11',
+            100,
+        ));
+
+        unset($remote['sumDiscounts']);
+        self::assertSame('discount_total_missing', $this->verifier()->invoiceMismatch(
+            $remote,
+            $invoice,
+            '42',
+            '11',
+            100,
+        ));
+
+        $remote['sumDiscounts'] = ['value' => '0.00'];
+        self::assertSame('discount_total_invalid', $this->verifier()->invoiceMismatch(
+            $remote,
+            $invoice,
+            '42',
+            '11',
+            100,
+        ));
+    }
+
+    public function testTaxableDiscountRequiresExactFrozenNetAndTaxReadback(): void
+    {
+        $invoice = new InvoiceSnapshot(
+            10,
+            20,
+            'RE-10',
+            new DateTimeImmutable('2026-07-01'),
+            'EUR',
+            '95.20',
+            '0',
+            [new LineItem('Hosting', '100.00', '19', true)],
+            [new InvoiceDiscount('Promotion', '20.00', '19', true, 42, true)],
+            '80.00',
+            '15.20',
+        );
+        $remote = $this->remoteInvoice();
+        $remote['sumGross'] = '95.20';
+        $remote['sumNet'] = '80.00';
+        $remote['sumTax'] = '15.20';
+        $remote['sumDiscounts'] = '0.00';
+        $remote['customerInternalNote'] = InvoiceExporter::documentMarker($invoice);
+
+        self::assertNull($this->verifier()->invoiceMismatch(
+            $remote,
+            $invoice,
+            '42',
+            '1',
+            100,
+        ));
+
+        unset($remote['sumTax']);
+        self::assertSame('discount_tax_totals_missing', $this->verifier()->invoiceMismatch(
+            $remote,
+            $invoice,
+            '42',
+            '1',
+            100,
+        ));
+
+        $remote['sumTax'] = '15.19';
+        self::assertSame('discount_tax_totals_mismatch', $this->verifier()->invoiceMismatch(
+            $remote,
+            $invoice,
+            '42',
+            '1',
+            100,
+        ));
+    }
+
+    public function testNegativeDiscountPositionMustMatchAmountTaxIdentityAndUnityExactly(): void
+    {
+        $invoice = new InvoiceSnapshot(
+            10,
+            20,
+            'RE-10',
+            new DateTimeImmutable('2025-07-01'),
+            'EUR',
+            '80.00',
+            '0',
+            [new LineItem('Hosting', '100.00', '0', false)],
+            [new InvoiceDiscount('Promotion', '20.00', '0', false, 42)],
+        );
+        $positive = array_merge($this->remotePosition(), ['taxRate' => '0']);
+        $discount = [
+            'objectName' => 'InvoicePos',
+            'invoice' => ['id' => '99'],
+            'unity' => ['id' => '8'],
+            'positionNumber' => 2,
+            'quantity' => 1,
+            'name' => 'Promotion',
+            'text' => 'Promotion',
+            'price' => '-20.00',
+            'taxRate' => '0',
+        ];
+
+        self::assertNull($this->verifier()->positionsMismatch(
+            [$positive, $discount],
+            $invoice,
+            '99',
+        ));
+        self::assertSame(
+            'position_count_mismatch',
+            $this->verifier()->positionsMismatch([$positive], $invoice, '99'),
+        );
+
+        $positivePrice = $discount;
+        $positivePrice['price'] = '20.00';
+        self::assertSame(
+            'position_amount_mismatch',
+            $this->verifier()->positionsMismatch([$positive, $positivePrice], $invoice, '99'),
+        );
+
+        $wrongTax = $discount;
+        $wrongTax['taxRate'] = '19';
+        self::assertSame(
+            'position_amount_mismatch',
+            $this->verifier()->positionsMismatch([$positive, $wrongTax], $invoice, '99'),
+        );
+
+        $wrongUnity = $discount;
+        $wrongUnity['unity']['id'] = '9';
+        self::assertSame(
+            'position_identity_mismatch',
+            $this->verifier()->positionsMismatch([$positive, $wrongUnity], $invoice, '99'),
+        );
+
+        $wrongText = $discount;
+        $wrongText['text'] = 'Changed promotion';
+        self::assertSame(
+            'position_identity_mismatch',
+            $this->verifier()->positionsMismatch([$positive, $wrongText], $invoice, '99'),
+        );
+    }
+
+    public function testInclusiveRuleOneReductionMatchesTheExactLiveTaxSplit(): void
+    {
+        $invoice = new InvoiceSnapshot(
+            10,
+            20,
+            'RE-10',
+            new DateTimeImmutable('2026-07-01'),
+            'EUR',
+            '2.47',
+            '0',
+            [new LineItem('Hosting', '4.94', '19', false)],
+            [new InvoiceDiscount('Promotion', '2.47', '19', false, 42, true)],
+            '2.07',
+            '0.40',
+        );
+        $remote = $this->remoteInvoice();
+        $remote['showNet'] = false;
+        $remote['sumNet'] = '2.07';
+        $remote['sumTax'] = '0.4';
+        $remote['sumGross'] = '2.47';
+        $remote['sumDiscounts'] = '0';
+        $remote['customerInternalNote'] = InvoiceExporter::documentMarker($invoice);
+        $positions = [
+            array_merge($this->remotePosition(), [
+                'name' => 'Hosting',
+                'text' => 'Hosting',
+                'price' => '4.94',
+                'taxRate' => '19',
+            ]),
+            [
+                'objectName' => 'InvoicePos',
+                'invoice' => ['id' => '99'],
+                'unity' => ['id' => '8'],
+                'positionNumber' => 2,
+                'quantity' => 1,
+                'name' => 'Promotion',
+                'text' => 'Promotion',
+                'price' => '-2.47',
+                'taxRate' => '19',
+            ],
+        ];
+
+        self::assertNull($this->verifier()->invoiceMismatch(
+            $remote,
+            $invoice,
+            '42',
+            '1',
+            100,
+        ));
+        self::assertNull($this->verifier()->positionsMismatch($positions, $invoice, '99'));
     }
 
     public function testOssInvoiceRequiresReadableCountryConfirmation(): void

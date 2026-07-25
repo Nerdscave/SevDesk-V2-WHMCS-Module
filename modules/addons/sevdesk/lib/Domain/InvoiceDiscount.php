@@ -4,7 +4,13 @@ declare(strict_types=1);
 
 namespace WHMCS\Module\Addon\SevDesk\Domain;
 
-/** A fixed-value discount derived from one structurally matched PromoHosting item. */
+/**
+ * A structurally matched PromoHosting reduction.
+ *
+ * The amount stays positive in the domain model so invoice-total calculations
+ * remain explicit. At the sevdesk boundary it is emitted as one negative
+ * InvoicePos; sevdesk's global discountSave contract is deliberately not used.
+ */
 final class InvoiceDiscount
 {
     public readonly string $text;
@@ -31,7 +37,7 @@ final class InvoiceDiscount
             throw new \InvalidArgumentException('A PromoHosting discount requires a positive related item ID.');
         }
         if (Decimal::toMinorUnits($this->amount) <= 0) {
-            throw new \InvalidArgumentException('A fixed Invoice discount must be positive.');
+            throw new \InvalidArgumentException('The PromoHosting reduction amount must be positive.');
         }
 
         $rate = Decimal::toFloat($this->taxRate);
@@ -50,25 +56,8 @@ final class InvoiceDiscount
         return Decimal::grossMinorUnits($this->amount, $this->taxRate, $this->net);
     }
 
-    /**
-     * @return array{
-     *     discount: true,
-     *     text: string,
-     *     percentage: false,
-     *     value: float,
-     *     objectName: 'Discounts',
-     *     mapAll: true
-     * }
-     */
-    public function toSevdeskPayload(): array
+    public function negativeAmount(): string
     {
-        return [
-            'discount' => true,
-            'text' => mb_substr($this->text, 0, 1000),
-            'percentage' => false,
-            'value' => Decimal::toFloat($this->amount),
-            'objectName' => 'Discounts',
-            'mapAll' => true,
-        ];
+        return '-' . $this->amount;
     }
 }

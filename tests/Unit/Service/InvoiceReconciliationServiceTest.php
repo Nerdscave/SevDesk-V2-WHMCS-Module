@@ -109,12 +109,14 @@ final class InvoiceReconciliationServiceTest extends TestCase
         $candidate['taxRule'] = ['id' => '11', 'objectName' => 'TaxRule'];
         $candidate['showNet'] = false;
         $candidate['sumGross'] = '80.00';
-        $candidate['sumDiscounts'] = '20.00';
+        $candidate['sumNet'] = '80.00';
+        $candidate['sumTax'] = '0.00';
+        $candidate['sumDiscounts'] = '0.00';
         $candidate['customerInternalNote'] = InvoiceExporter::documentMarker($invoice);
         $service = new InvoiceReconciliationService(
             $this->client([
                 new Response(200, [], json_encode(['objects' => [$candidate]], JSON_THROW_ON_ERROR)),
-                $this->positionResponse('100.00', '0'),
+                $this->discountPositionResponse(),
             ], $history),
             static fn (): null => null,
             static function () use (&$persistCalls): void {
@@ -151,7 +153,9 @@ final class InvoiceReconciliationServiceTest extends TestCase
         $candidate['taxRule'] = ['id' => '11', 'objectName' => 'TaxRule'];
         $candidate['showNet'] = false;
         $candidate['sumGross'] = '80.00';
-        $candidate['sumDiscounts'] = '20.00';
+        $candidate['sumNet'] = '80.00';
+        $candidate['sumTax'] = '0.00';
+        $candidate['sumDiscounts'] = '0.00';
         $candidate['customerInternalNote'] = InvoiceExporter::marker(10)
             . ' [WHMCS-DISCOUNT:' . str_repeat('0', 64) . ']';
         $service = new InvoiceReconciliationService(
@@ -904,6 +908,36 @@ final class InvoiceReconciliationServiceTest extends TestCase
             'price' => $price,
             'taxRate' => $taxRate,
         ]]], JSON_THROW_ON_ERROR));
+    }
+
+    private function discountPositionResponse(): Response
+    {
+        return new Response(200, [], json_encode(['objects' => [
+            [
+                'id' => '901',
+                'objectName' => 'InvoicePos',
+                'invoice' => ['id' => '99', 'objectName' => 'Invoice'],
+                'unity' => ['id' => '8', 'objectName' => 'Unity'],
+                'positionNumber' => '1',
+                'quantity' => '1',
+                'name' => 'Hosting',
+                'text' => 'Hosting',
+                'price' => '100.00',
+                'taxRate' => '0',
+            ],
+            [
+                'id' => '902',
+                'objectName' => 'InvoicePos',
+                'invoice' => ['id' => '99', 'objectName' => 'Invoice'],
+                'unity' => ['id' => '8', 'objectName' => 'Unity'],
+                'positionNumber' => '2',
+                'quantity' => '1',
+                'name' => 'PromoHosting',
+                'text' => 'PromoHosting',
+                'price' => '-20.00',
+                'taxRate' => '0',
+            ],
+        ]], JSON_THROW_ON_ERROR));
     }
 
     /** @param Response|list<Response> $responses */

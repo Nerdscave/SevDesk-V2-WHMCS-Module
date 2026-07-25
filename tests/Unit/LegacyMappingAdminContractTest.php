@@ -95,15 +95,40 @@ final class LegacyMappingAdminContractTest extends TestCase
         self::assertStringContainsString('$invoiceId = $storedInvoiceId;', $method);
         self::assertStringContainsString('Zuordnungs-ID und Rechnungs-ID widersprechen sich', $method);
         self::assertStringContainsString('remoteDocumentDefinitelyMissing', $method);
-        self::assertStringContainsString('mappings->unlinkById(', $method);
+        self::assertStringContainsString('jobs->resolveAbsentRemoteMapping(', $method);
+        self::assertStringContainsString('mappings->unlinkById($mappingId)', $method);
         self::assertStringContainsString('$remoteMissingConfirmed', $method);
-        self::assertStringContainsString('$remoteId !== \'\' ? $remoteId : null', $method);
+        self::assertStringContainsString('$resolution[\'resolvedItems\']', $method);
         self::assertStringNotContainsString('mappings->unlink($invoiceId)', $method);
         $lookupPosition = strpos($method, "->first(['invoice_id', 'sevdesk_id', 'document_type'])");
         $activeItemPosition = strpos($method, "->where('invoice_id', \$invoiceId)");
         self::assertNotFalse($lookupPosition);
         self::assertNotFalse($activeItemPosition);
         self::assertLessThan($activeItemPosition, $lookupPosition);
+    }
+
+    public function testAlreadyUnmappedRiskHistoryUsesTheSameReadOnlyAbsenceProof(): void
+    {
+        $controller = $this->source('lib/Controllers/AdminController.php');
+        $template = $this->template('corrections.tpl');
+        $method = $this->between(
+            $controller,
+            'private function closeAbsentRemoteHistory(int $itemId): int',
+            'private function requestedExportContext(): array',
+        );
+
+        self::assertStringContainsString('absentRemoteHistoryCandidate($itemId)', $method);
+        self::assertStringContainsString("remoteDocumentDefinitelyMissing('Voucher', \$remoteId)", $method);
+        self::assertStringContainsString("remoteDocumentDefinitelyMissing('Invoice', \$remoteId)", $method);
+        self::assertStringContainsString('resolveAbsentRemoteHistory(', $method);
+        self::assertStringContainsString('name="confirm_remote_absence"', $template);
+        self::assertStringContainsString('name="confirm_remote_absence_checked"', $template);
+        self::assertStringContainsString('name="token"', $template);
+        self::assertStringContainsString(
+            "['permanent_failed', 'ambiguous', 'cancelled']",
+            $controller,
+        );
+        self::assertStringContainsString('option value="cancelled"', $template);
     }
 
     public function testBatchTypingOnlyAcceptsMarkerBackedFreshRemoteEvidence(): void

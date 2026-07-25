@@ -8,7 +8,9 @@ Die Voucher-Basisphasen sowie die Codepfade für wählbare Voucher-/Invoice-Ziel
 
 `2.1.0-rc.5` ergänzt den zeitlich begrenzten Kleinunternehmerpfad, die strukturelle Behandlung von WHMCS-Sammelzahlungen und den eng freigegebenen Rule-11-Rabatt. Ein Live-Lauf mit einer normalen Rule-11-Invoice scheiterte erst beim Öffnen: sevDesk akzeptierte den Draft, wies `sendBy` wegen des automatisch gewählten Konten-Scopes aber mit Code 7100 zurück. Deshalb gibt es nun vor dem Rabattpfad ein eigenes Gate für alle Rule-11-Invoices. Offen bleiben Invoice-`bookAmount`, dieser rabattfreie Rule-11-Canary, der darauf aufbauende Rabatt-Canary, die Voucher-Canaries der produktiv genutzten Steuerfälle und die fachliche Abnahme.
 
-Der Invoice-Canary bleibt ein hartes Release-Gate. Bis dahin blockiert `invoice_canary_confirmed=off` alle Invoice-Modi. Rule-11-Invoices benötigen zusätzlich `small_business_invoice_canary_confirmed` und eine aktuelle `ReceiptGuidance` mit Rule 11, 0 % und `REVENUE`-Scope. ZUGFeRD hat mit `e_invoice_canary_confirmed` ein eigenes Gate. Das additive Upgrade behält `voucher_only` bei und setzt das neue Rule-11-Gate auf aus. Der 2.0-Betrieb stoppt beim Upgrade einmalig mit `sync_enabled=off` und `runtime_review_required=on`.
+`2.1.0-rc.6` erweitert diesen festen Rabattvertrag auf vier getrennte Invoice-Capabilities: Rule 11 mit 0 %, Rule 1 mit 19 %, Rule 17 mit 0 % und Rule 19 mit positivem, einheitlichem Zielsteuersatz. Jede Capability besitzt ein eigenes, standardmäßig ausgeschaltetes Canary-Gate. Der Rule-11-Invoice-Canary und seine aktuelle `REVENUE`-Guidance bleiben davon unabhängig Pflicht. Capability-Key und Rabatt-Fingerprint werden vor dem Write eingefroren. Der Rabatt wird als exakt geprüfte negative `InvoicePos` übertragen, weil der globale `discountSave` im Rule-1-Live-Canary die WHMCS-Centverteilung verändert hat. Der Remote-Readback prüft alle Positionen sowie `sumNet`, `sumTax` und `sumGross` exakt; `sumDiscounts` muss numerisch 0 sein. `LateFee` bleibt ein eigener, stets blockierter Prüffall.
+
+Der Invoice-Canary bleibt ein hartes Release-Gate. Bis dahin blockiert `invoice_canary_confirmed=off` alle Invoice-Modi. Rule-11-Invoices benötigen zusätzlich `small_business_invoice_canary_confirmed` und eine aktuelle `ReceiptGuidance` mit Rule 11, 0 % und `REVENUE`-Scope. ZUGFeRD hat mit `e_invoice_canary_confirmed` ein eigenes Gate. Die vier Rabatt-Gates sind `invoice_discount_canary_confirmed`, `invoice_discount_rule1_19_canary_confirmed`, `invoice_discount_rule17_0_canary_confirmed` und `invoice_discount_rule19_canary_confirmed`. Das additive Upgrade behält `voucher_only` bei und setzt die neuen Gates auf aus. Der 2.0-Betrieb stoppt beim Upgrade einmalig mit `sync_enabled=off` und `runtime_review_required=on`.
 
 ## Feste Produktentscheidungen
 
@@ -34,6 +36,8 @@ Der Invoice-Canary bleibt ein hartes Release-Gate. Bis dahin blockiert `invoice_
 - keine sevDesk→WHMCS-Rücksynchronisation und keine sevDesk-Webhooks
 - keine dauerhafte Invoice-PDF-/XML-Spiegelung und kein Invoice-`CreditNote`-Pfad
 - ZUGFeRD ausschließlich sevDesk-nativ für neue deutsche B2B-Rule-1-Invoices bei `invoice_only + sevdesk`; kein eigenes XML, kein B2G/XRechnung, keine OSS-E-Rechnung und kein historischer E-Rechnungs-Backfill
+- genau ein strukturell belegter `PromoHosting`-Rabatt nur in `invoice_only`, EUR und ohne E-Rechnung; Rule 11/0 %, Rule 1/19 %, Rule 17/0 % und Rule 19 mit positivem einheitlichem Zielsteuersatz haben getrennte Canary-Gates
+- `LateFee` bleibt unabhängig von Rule, Datum und Dokumentmodus blockiert
 
 ## Phase 0: Dokumentation und Sicherheitsgrundlagen
 
@@ -157,7 +161,8 @@ Der Invoice-Canary bleibt ein hartes Release-Gate. Bis dahin blockiert `invoice_
 - Rule 19 in `invoice_for_oss`/`invoice_only` nur für bestätigte digitale EU-B2C-Leistungen; Rules 18/20, unbestätigtes OSS, gemischte Leistung, Nullsumme und Fremdwährung als blockierte/manuelle Fälle;
 - reine WHMCS-Sammelzahlungsrechnungen strukturell als Zahlungscontainer erkennen, nur die exakt verknüpften Originalrechnungen freigeben, dabei `subtotal + tax + tax2 = total + credit`, Dokumentbrutto `total + credit` und direkten Zahlteil `total` centgenau prüfen und die gemeinsame Banktransaktion nicht automatisch aufteilen;
 - sonstiges Kundenguthaben blockieren; im Voucher-Einzelfall bleibt nur die gespeicherte Bestätigung des vollen Rechnungsbruttos zulässig;
-- genau einen über Typ, `relid` und `taxed` bewiesenen `PromoHosting`-Rabatt ausschließlich in `invoice_only` mit Rule 11/0 % und eigenem Canary als festes `discountSave` abbilden; Rabatt-Fingerprint und Remote-Marker gehören zur Recovery;
+- genau einen über Typ, `relid` und `taxed` bewiesenen `PromoHosting`-Rabatt ausschließlich in `invoice_only`, EUR und außerhalb des E-Rechnungspfads als negative `InvoicePos` abbilden. `discountSave` bleibt leer. Zulässig sind nur Rule 11/0 %, Rule 1/19 %, Rule 17/0 % und Rule 19 mit positivem, einheitlichem Zielsteuersatz, jeweils hinter eigenem Canary. Capability-Key, Rabatt-Fingerprint, Remote-Marker, exakte positive und negative Positionen sowie `sumNet`-/`sumTax`-/`sumGross`-Werte und `sumDiscounts=0` gehören zur Recovery;
+- `LateFee` vor Steuerklassifikation, Kontakt- und Dokument-Write als eigenen Prüffall blockieren;
 - Inclusive/Exclusive Tax und Cent-Rundung.
 
 ### Exit-Kriterium
@@ -413,6 +418,7 @@ Der Buchungsassistent und die manuellen Korrektur-Voucher gehören zu Release 2.
 - historische ungemappte Rechnungen vor Create anhand Nummer, Marker sowie Datum/Kontakt/Betrag rein lesend gegen Invoice und Voucher prüfen.
 - einen bestätigten Altbestand ausschließlich als mailfreien `historical_backfill` einreihen; der Moduswechsel selbst startet keinen Export und historische Jobs erzeugen keine E-Rechnung.
 - sichere alte Voucher-Vor-Write-Jobs nur über einen neuen `export_document`-Job im aktuellen Modus fortsetzen. Riskante Checkpoints bleiben auf ihrem ursprünglichen Dokumentpfad.
+- terminale Dokumenthistorien nach einer bewusst gelöschten Testanlage nur über eine beidseitige Remote-Abwesenheitsprüfung und einen atomaren ID-/Typ-Abgleich lokal abschließen; Kontakt-, Zahlungs- und Versandfolgen bleiben davon ausgenommen.
 - kleine Canary-Batches pro Steuerklasse exportieren und in sevDesk prüfen.
 - anschließend quartals- oder monatsweise Jobs starten.
 - nach jedem Abschnitt WHMCS, Mapping, sevDesk und Buchhaltungszahlen abstimmen.
@@ -441,7 +447,7 @@ Der technische Live-Lauf hat Rule 19, Marker, Nummer, Pflichtreferenzen, PDF und
 
 ### Aufgaben
 
-- Setupfelder `export_mode`, `document_authority`, `oss_profile`, `invoice_canary_confirmed`, `small_business_invoice_canary_confirmed`, `invoice_sev_user_id` und `invoice_unity_id` bereitstellen.
+- Setupfelder `export_mode`, `document_authority`, `oss_profile`, `invoice_canary_confirmed`, `small_business_invoice_canary_confirmed`, die vier getrennten Rabatt-Canaries, `invoice_sev_user_id` und `invoice_unity_id` bereitstellen.
 - Rule-11-Invoices vor Create zusätzlich gegen den eigenen Canary und die aktuelle Rule-11-/0-%-Fähigkeit eines `REVENUE`-Kontos aus `ReceiptGuidance` prüfen. `InvoicePos` erhält weiterhin kein `accountDatev`.
 - Rule 19 ausschließlich aus einer ausdrücklich bestätigten EU-B2C-Digitalentscheidung erzeugen; keine Textheuristik.
 - `DocumentTargetResolver` vor jedem Remote-Write ausführen und Entscheidung unter `document_type_selected` einfrieren.
@@ -458,6 +464,7 @@ Der technische Live-Lauf hat Rule 19, Marker, Nummer, Pflichtreferenzen, PDF und
 - vollständige Modus-/Hoheitsmatrix sowie paid-only und effektive Nummer;
 - Rule 19 in Hybrid/Invoice-only und alle Blockaden für Rule 18/20, gemischt, unklar und Rule 3;
 - Rule 11 als Voucher unverändert; als Invoice ohne eigenen Canary oder ohne aktuellen REVENUE-Scope vor Create blockiert;
+- Rabatt-Capability-Matrix für Rule 11/0 %, Rule 1/19 %, Rule 17/0 % und Rule 19 mit positivem Zielsteuersatz; falscher oder fehlender Canary, uneinheitliche Steuerkontexte, E-Rechnung und `LateFee` blockieren vor Create;
 - Migration mit neuen Nullable-Spalten und unveränderten Legacy-Mappings;
 - Invoice-Payload, Rundung, Pflichtreferenzen, fehlendes `accountDatev` und exakte Remote-Rückprüfung;
 - Cross-Type-Dedupe, alte `export_voucher`-Items und Recovery an jedem riskanten Checkpoint;

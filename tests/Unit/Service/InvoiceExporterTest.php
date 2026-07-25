@@ -26,11 +26,12 @@ use WHMCS\Module\Addon\SevDesk\Domain\InvoiceSnapshot;
 use WHMCS\Module\Addon\SevDesk\Domain\LineItem;
 use WHMCS\Module\Addon\SevDesk\Domain\TaxDecision;
 use WHMCS\Module\Addon\SevDesk\Service\DocumentTargetResolver;
+use WHMCS\Module\Addon\SevDesk\Service\InvoiceDiscountCapabilityPolicy;
 use WHMCS\Module\Addon\SevDesk\Service\InvoiceExporter;
 
 final class InvoiceExporterTest extends TestCase
 {
-    public function testConfirmedRule11DiscountUsesDiscountSaveAndExactDocumentGross(): void
+    public function testConfirmedRule11DiscountUsesANegativePositionAndExactDocumentGross(): void
     {
         $history = [];
         $invoice = new InvoiceSnapshot(
@@ -70,18 +71,18 @@ final class InvoiceExporterTest extends TestCase
 
         self::assertSame(11, $payload['invoice']['taxRule']['id']);
         self::assertSame(100.0, $payload['invoicePosSave'][0]['price']);
+        self::assertSame(-20.0, $payload['invoicePosSave'][1]['price']);
+        self::assertSame(1, $payload['invoicePosSave'][1]['quantity']);
+        self::assertSame(8, $payload['invoicePosSave'][1]['unity']['id']);
+        self::assertSame(2, $payload['invoicePosSave'][1]['positionNumber']);
+        self::assertSame('Promotion', $payload['invoicePosSave'][1]['name']);
+        self::assertSame('Promotion', $payload['invoicePosSave'][1]['text']);
+        self::assertSame(0.0, $payload['invoicePosSave'][1]['taxRate']);
         self::assertSame(
             InvoiceExporter::documentMarker($invoice),
             $payload['invoice']['customerInternalNote'],
         );
-        self::assertSame([[
-            'discount' => true,
-            'text' => 'Promotion',
-            'percentage' => false,
-            'value' => 20.0,
-            'objectName' => 'Discounts',
-            'mapAll' => true,
-        ]], $payload['discountSave']);
+        self::assertNull($payload['discountSave']);
     }
 
     public function testRule11DiscountRemainsBlockedUntilItsCanaryIsConfirmed(): void
@@ -235,7 +236,8 @@ final class InvoiceExporterTest extends TestCase
         );
 
         self::assertSame(100.0, $payload['invoicePosSave'][0]['price']);
-        self::assertSame(20.0, $payload['discountSave'][0]['value']);
+        self::assertSame(-20.0, $payload['invoicePosSave'][1]['price']);
+        self::assertNull($payload['discountSave']);
         self::assertSame(8_000, $invoice->calculatedDocumentGrossMinorUnits());
         self::assertSame(3_000, $invoice->appliedCreditMinorUnits());
     }
@@ -500,8 +502,10 @@ final class InvoiceExporterTest extends TestCase
             'invoiceDate' => '01.07.2025',
             'taxRule' => ['id' => '11', 'objectName' => 'TaxRule'],
             'showNet' => false,
+            'sumNet' => '80.00',
+            'sumTax' => '0.00',
             'sumGross' => '80.00',
-            'sumDiscounts' => '20.00',
+            'sumDiscounts' => '0.00',
             'customerInternalNote' => InvoiceExporter::documentMarker($discountInvoice),
         ];
         $position = [
@@ -511,12 +515,12 @@ final class InvoiceExporterTest extends TestCase
         $client = $this->client([
             new Response(201, [], '{"objects":{"invoice":{"id":"99"}}}'),
             $this->invoiceResponse(100, $remote),
-            $this->positionResponse($position),
+            $this->discountPositionResponse($position),
             $this->invoiceResponse(100, $remote),
-            $this->positionResponse($position),
+            $this->discountPositionResponse($position),
             new Response(200, [], '{"objects":{"id":"501","objectName":"InvoiceLog"}}'),
             $this->invoiceResponse(200, $remote),
-            $this->positionResponse($position),
+            $this->discountPositionResponse($position),
         ], $history);
         $mapping = null;
         $checkpoints = [];
@@ -575,6 +579,10 @@ final class InvoiceExporterTest extends TestCase
             $checkpointContexts['invoice_write_requested']['invoiceDiscountFingerprint'] ?? null,
         );
         self::assertSame(
+            'promo_discount_rule11_0_gross_v1',
+            $checkpointContexts['invoice_write_requested']['invoiceDiscountCapabilityKey'] ?? null,
+        );
+        self::assertSame(
             1,
             $checkpointContexts['mapping_persisted']['invoiceDiscountCount'] ?? null,
         );
@@ -584,11 +592,132 @@ final class InvoiceExporterTest extends TestCase
             512,
             JSON_THROW_ON_ERROR,
         );
-        self::assertSame(20.0, $payload['discountSave'][0]['value']);
+        self::assertSame(-20.0, $payload['invoicePosSave'][1]['price']);
+        self::assertSame('Promotion', $payload['invoicePosSave'][1]['name']);
+        self::assertNull($payload['discountSave']);
         self::assertSame(
             InvoiceExporter::documentMarker($discountInvoice),
             $payload['invoice']['customerInternalNote'],
         );
+    }
+
+    public function testConfirmedRuleOneDiscountUsesFrozenWhmcsNetAndTaxTotals(): void
+    {
+        $history = [];
+        $invoice = new InvoiceSnapshot(
+            10,
+            20,
+            'RE-10',
+            new DateTimeImmutable('2026-07-01'),
+            'EUR',
+            '95.20',
+            '0',
+            [new LineItem('Hosting', '100.00', '19', true)],
+            [new InvoiceDiscount('Promotion', '20.00', '19', true, 42, true)],
+            '80.00',
+            '15.20',
+        );
+        $tax = TaxDecision::allowInvoice('domestic', '1', 'Domestic profile.', ['7', '19']);
+        $target = (new DocumentTargetResolver(
+            DocumentTargetResolver::MODE_INVOICE_ONLY,
+            DocumentTargetResolver::AUTHORITY_WHMCS,
+            DocumentTargetResolver::OSS_BLOCKED,
+        ))->resolve($tax, true, true);
+        $exporter = new InvoiceExporter(
+            $this->client([], $history),
+            static fn (): null => null,
+            static fn (): bool => true,
+            '7',
+            '8',
+            discountPolicy: new InvoiceDiscountCapabilityPolicy(
+                ruleOneNineteenCapabilityKey: InvoiceDiscountCapabilityPolicy::capabilityKey(
+                    'domestic',
+                    '1',
+                    1900,
+                    'exclusive',
+                ),
+            ),
+        );
+
+        $payload = $exporter->buildPayload(
+            $invoice,
+            '42',
+            $tax,
+            'DE',
+            $target,
+            invoiceAddressContext: $this->invoiceAddressContext(),
+        );
+
+        self::assertSame(1, $payload['invoice']['taxRule']['id']);
+        self::assertTrue($payload['invoice']['showNet']);
+        self::assertSame(19.0, $payload['invoicePosSave'][0]['taxRate']);
+        self::assertSame(100.0, $payload['invoicePosSave'][0]['price']);
+        self::assertSame(-20.0, $payload['invoicePosSave'][1]['price']);
+        self::assertSame(19.0, $payload['invoicePosSave'][1]['taxRate']);
+        self::assertNull($payload['discountSave']);
+        self::assertSame(8000, $invoice->expectedNetMinorUnits());
+        self::assertSame(1520, $invoice->expectedTaxMinorUnits());
+        self::assertSame([], $history);
+    }
+
+    public function testInclusiveRuleOneReductionUsesANegativePositionToPreserveTheWhmcsTaxSplit(): void
+    {
+        $history = [];
+        $invoice = new InvoiceSnapshot(
+            10,
+            20,
+            'RE-10',
+            new DateTimeImmutable('2026-07-01'),
+            'EUR',
+            '2.47',
+            '0',
+            [new LineItem('Hosting', '4.94', '19', false)],
+            [new InvoiceDiscount('Promotion', '2.47', '19', false, 42, true)],
+            '2.07',
+            '0.40',
+        );
+        $tax = TaxDecision::allowInvoice('domestic', '1', 'Domestic profile.', ['7', '19']);
+        $target = (new DocumentTargetResolver(
+            DocumentTargetResolver::MODE_INVOICE_ONLY,
+            DocumentTargetResolver::AUTHORITY_WHMCS,
+            DocumentTargetResolver::OSS_BLOCKED,
+        ))->resolve($tax, true, true);
+        $exporter = new InvoiceExporter(
+            $this->client([], $history),
+            static fn (): null => null,
+            static fn (): bool => true,
+            '7',
+            '8',
+            discountPolicy: new InvoiceDiscountCapabilityPolicy(
+                ruleOneNineteenCapabilityKey: InvoiceDiscountCapabilityPolicy::capabilityKey(
+                    'domestic',
+                    '1',
+                    1900,
+                    'inclusive',
+                ),
+            ),
+        );
+
+        $payload = $exporter->buildPayload(
+            $invoice,
+            '42',
+            $tax,
+            'DE',
+            $target,
+            invoiceAddressContext: $this->invoiceAddressContext(),
+        );
+
+        self::assertFalse($payload['invoice']['showNet']);
+        self::assertCount(2, $payload['invoicePosSave']);
+        self::assertSame(4.94, $payload['invoicePosSave'][0]['price']);
+        self::assertSame(-2.47, $payload['invoicePosSave'][1]['price']);
+        self::assertSame(19.0, $payload['invoicePosSave'][1]['taxRate']);
+        self::assertSame('Promotion', $payload['invoicePosSave'][1]['name']);
+        self::assertNull($payload['discountSave']);
+        self::assertSame(207, $invoice->expectedNetMinorUnits());
+        self::assertSame(40, $invoice->expectedTaxMinorUnits());
+        self::assertSame(247, $invoice->calculatedDocumentGrossMinorUnits());
+        self::assertSame([], $history);
     }
 
     public function testRule19PayloadUsesCountryRatesAndNoVoucherAccount(): void
@@ -2236,6 +2365,45 @@ final class InvoiceExporterTest extends TestCase
         ], $overrides);
 
         return new Response(200, [], json_encode(['objects' => [$position]], JSON_THROW_ON_ERROR));
+    }
+
+    /**
+     * @param array<string, mixed> $positiveOverrides
+     * @param array<string, mixed> $discountOverrides
+     */
+    private function discountPositionResponse(
+        array $positiveOverrides = [],
+        array $discountOverrides = [],
+    ): Response {
+        $positive = array_merge([
+            'id' => '901',
+            'objectName' => 'InvoicePos',
+            'invoice' => ['id' => '99', 'objectName' => 'Invoice'],
+            'unity' => ['id' => '8', 'objectName' => 'Unity'],
+            'positionNumber' => '1',
+            'quantity' => '1',
+            'name' => 'Hosting',
+            'text' => 'Hosting',
+            'price' => '100.00',
+            'taxRate' => '0',
+        ], $positiveOverrides);
+        $discount = array_merge([
+            'id' => '902',
+            'objectName' => 'InvoicePos',
+            'invoice' => ['id' => '99', 'objectName' => 'Invoice'],
+            'unity' => ['id' => '8', 'objectName' => 'Unity'],
+            'positionNumber' => '2',
+            'quantity' => '1',
+            'name' => 'Promotion',
+            'text' => 'Promotion',
+            'price' => '-20.00',
+            'taxRate' => '0',
+        ], $discountOverrides);
+
+        return new Response(200, [], json_encode(
+            ['objects' => [$positive, $discount]],
+            JSON_THROW_ON_ERROR,
+        ));
     }
 
     /**

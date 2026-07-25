@@ -22,6 +22,9 @@ use WHMCS\Module\Addon\SevDesk\Repository\JobRepository;
 use WHMCS\Module\Addon\SevDesk\Repository\MappingRepository;
 use WHMCS\Module\Addon\SevDesk\Service\CorrectionService;
 use WHMCS\Module\Addon\SevDesk\Service\DocumentTargetResolver;
+use WHMCS\Module\Addon\SevDesk\Service\EInvoiceEligibilityService;
+use WHMCS\Module\Addon\SevDesk\Service\InvoiceDiscountCapabilityPolicy;
+use WHMCS\Module\Addon\SevDesk\Service\InvoiceItemExportPolicy;
 use WHMCS\Module\Addon\SevDesk\Service\InvoiceItemNormalizer;
 use WHMCS\Module\Addon\SevDesk\Service\TaxPolicy;
 use WHMCS\Module\Addon\SevDesk\Service\WhmcsGateway;
@@ -358,7 +361,7 @@ final class AdminController
                         . 'die Vorschau wurde nicht abgeschnitten und kein Job angelegt.',
                     );
                 }
-                $invoices = $this->decorateDryRun($rows);
+                $invoices = $this->decorateDryRun($rows, true);
 
                 if (isset($_POST['import'])) {
                     $this->assertJobMutationAllowed();
@@ -1068,46 +1071,78 @@ final class AdminController
         $createdJob = null;
         if ($this->isPost()) {
             $this->csrf->assertPost();
-            $this->assertJobMutationAllowed();
-            if (isset($_POST['create_correction'])) {
+            if (isset($_POST['confirm_remote_absence'])) {
+                $this->assertModuleActiveForJobSafetyAction();
                 try {
-                    $createdJob = $this->createCorrectionJob();
+                    if ((string) ($_POST['confirm_remote_absence_checked'] ?? '') !== 'yes') {
+                        throw new RuntimeException(
+                            'Die ausdrückliche Bestätigung der Remote-Abwesenheitsprüfung fehlt.',
+                        );
+                    }
+                    $resolvedItems = $this->closeAbsentRemoteHistory(
+                        (int) ($_POST['item_id'] ?? 0),
+                    );
                     $this->view->flash(
                         'success',
-                        'Der bestätigte Korrektur-Voucher wurde als eigener Job eingereiht. Es wurde noch nichts festgeschrieben.',
-                        'Job #' . $createdJob->id . ' angelegt',
+                        'Voucher und Invoice wurden erneut read-only geprüft. '
+                            . $resolvedItems . ' passende Exporthistorie'
+                            . ($resolvedItems === 1 ? ' wurde' : 'n wurden')
+                            . ' lokal abgeschlossen; es wurde kein Exportjob angelegt.',
+                        'Remote-Abwesenheit bestätigt',
                     );
-                } catch (Throwable $error) {
-                    $this->view->flash('danger', $error->getMessage(), 'Korrektur nicht eingeplant');
+                } catch (Throwable) {
+                    $this->view->flash(
+                        'danger',
+                        'Remote-ID, Belegtyp, Historie und aktueller Mappingbestand konnten nicht vollständig '
+                            . 'als derselbe gelöschte Beleg bestätigt werden. Es wurde nichts verändert.',
+                        'Exporthistorie bleibt geschützt',
+                    );
                 }
             } else {
-                $itemId = (int) ($_POST['item_id'] ?? 0);
-                if (isset($_POST['requeue_current_mode'])) {
-                    $newJobId = ($_POST['confirm_mail_free_requeue'] ?? '') === 'yes'
-                        ? $this->application->jobs->requeueExportDocument(
-                            $itemId,
-                            $this->requestedExportContext(),
-                            $this->adminId(),
-                        )
-                        : null;
-                    $ok = $newJobId !== null;
-                } elseif (isset($_POST['confirm_email_retry'])) {
-                    $ok = ($_POST['confirm_duplicate_delivery_risk'] ?? '') === 'yes'
-                        && $this->application->jobs->confirmEmailRetry($itemId);
+                $this->assertJobMutationAllowed();
+                if (isset($_POST['create_correction'])) {
+                    try {
+                        $createdJob = $this->createCorrectionJob();
+                        $this->view->flash(
+                            'success',
+                            'Der bestätigte Korrektur-Voucher wurde als eigener Job eingereiht. '
+                                . 'Es wurde noch nichts festgeschrieben.',
+                            'Job #' . $createdJob->id . ' angelegt',
+                        );
+                    } catch (Throwable $error) {
+                        $this->view->flash('danger', $error->getMessage(), 'Korrektur nicht eingeplant');
+                    }
                 } else {
-                    $ok = isset($_POST['reconcile'])
-                        ? $this->application->jobs->reconcile($itemId)
-                        : $this->application->jobs->retry($itemId);
+                    $itemId = (int) ($_POST['item_id'] ?? 0);
+                    if (isset($_POST['requeue_current_mode'])) {
+                        $newJobId = ($_POST['confirm_mail_free_requeue'] ?? '') === 'yes'
+                            ? $this->application->jobs->requeueExportDocument(
+                                $itemId,
+                                $this->requestedExportContext(),
+                                $this->adminId(),
+                            )
+                            : null;
+                        $ok = $newJobId !== null;
+                    } elseif (isset($_POST['confirm_email_retry'])) {
+                        $ok = ($_POST['confirm_duplicate_delivery_risk'] ?? '') === 'yes'
+                            && $this->application->jobs->confirmEmailRetry($itemId);
+                    } else {
+                        $ok = isset($_POST['reconcile'])
+                            ? $this->application->jobs->reconcile($itemId)
+                            : $this->application->jobs->retry($itemId);
+                    }
+                    $this->view->flash(
+                        $ok ? 'success' : 'warning',
+                        $ok && isset($newJobId)
+                            ? 'Ein neuer mailfreier Exportjob wurde im aktuell bestätigten Modus angelegt. '
+                                . 'Der alte Job bleibt als Nachweis erhalten.'
+                            : ($ok
+                            ? 'Die Position wurde mit der erforderlichen Bestätigung erneut eingeplant.'
+                            : 'Die Position konnte nicht erneut eingeplant werden; '
+                                . 'prüfen Sie Status und Warnbestätigung.'),
+                        $ok ? 'Aktion eingeplant' : 'Keine Änderung'
+                    );
                 }
-                $this->view->flash(
-                    $ok ? 'success' : 'warning',
-                    $ok && isset($newJobId)
-                        ? 'Ein neuer mailfreier Exportjob wurde im aktuell bestätigten Modus angelegt. Der alte Job bleibt als Nachweis erhalten.'
-                        : ($ok
-                        ? 'Die Position wurde mit der erforderlichen Bestätigung erneut eingeplant.'
-                        : 'Die Position konnte nicht erneut eingeplant werden; prüfen Sie Status und Warnbestätigung.'),
-                    $ok ? 'Aktion eingeplant' : 'Keine Änderung'
-                );
             }
         }
 
@@ -1115,6 +1150,20 @@ final class AdminController
         $status = trim((string) ($_GET['status'] ?? ''));
         $query = trim((string) ($_GET['q'] ?? ''));
         $items = $this->application->jobs->reviewItems($jobId > 0 ? $jobId : null, $status, $query);
+        $mappedInvoiceIds = [];
+        $reviewInvoiceIds = array_values(array_unique(array_filter(array_map(
+            static fn (object $item): int => (int) ($item->invoice_id ?? 0),
+            $items,
+        ), static fn (int $invoiceId): bool => $invoiceId > 0)));
+        if ($reviewInvoiceIds !== []) {
+            $mappedReviewInvoiceIds = Capsule::table(Migrator::MAPPING_TABLE)
+                ->whereIn('invoice_id', $reviewInvoiceIds)
+                ->pluck('invoice_id')
+                ->all();
+            foreach ($mappedReviewInvoiceIds as $mappedInvoiceId) {
+                $mappedInvoiceIds[(int) $mappedInvoiceId] = true;
+            }
+        }
         foreach ($items as $item) {
             $item->can_retry = (string) $item->status === 'permanent_failed'
                 && !in_array((string) ($item->error_code ?? ''), [
@@ -1129,13 +1178,37 @@ final class AdminController
                 && (string) $item->checkpoint === 'whmcs_email_write_requested';
             $item->can_reconcile = (string) $item->status === 'ambiguous'
                 && !$item->can_confirm_email_retry;
-            $item->recommendation = $item->can_confirm_email_retry
+            $item->can_confirm_remote_absence = !isset(
+                $mappedInvoiceIds[(int) ($item->invoice_id ?? 0)],
+            )
+                && in_array(
+                    (string) ($item->status ?? ''),
+                    ['permanent_failed', 'ambiguous', 'cancelled'],
+                    true,
+                )
+                && in_array((string) ($item->action ?? ''), [
+                    'export_voucher',
+                    'export_document',
+                    'reconcile_voucher',
+                ], true)
+                && JobRepository::isRemoteAbsenceResolvableExportCheckpoint(
+                    (string) ($item->checkpoint ?? ''),
+                )
+                && preg_match('/^[1-9]\d*$/', trim((string) ($item->sevdesk_id ?? ''))) === 1;
+            if ($item->can_confirm_remote_absence) {
+                $item->can_retry = false;
+                $item->can_reconcile = false;
+            }
+            $item->recommendation = $item->can_confirm_remote_absence
+                ? 'Wenn dieser Testbeleg bereits bewusst gelöscht wurde, kann seine gespeicherte ID '
+                    . 'an beiden sevdesk-Endpunkten erneut geprüft und die lokale Historie abgeschlossen werden.'
+                : ($item->can_confirm_email_retry
                 ? 'Der frühere Provider-Übergang ist nicht lesend beweisbar. Ein erneuter Versand kann zu einer Doppelmail führen.'
                 : ($item->can_requeue_current_mode
                     ? 'Der alte Belegpfad bleibt eingefroren. Nach Prüfung kann ein neuer, mailfreier Job im aktuellen Modus angelegt werden.'
                 : ($item->can_reconcile
                     ? 'Zuerst anhand des WHMCS-Markers in sevdesk abgleichen.'
-                    : 'Konfiguration oder Belegdaten korrigieren und danach erneut versuchen.'));
+                    : 'Konfiguration oder Belegdaten korrigieren und danach erneut versuchen.')));
         }
         $counts = $this->application->jobs->statusCounts();
         $refundTransactions = [];
@@ -1357,7 +1430,14 @@ final class AdminController
                 'book_payment',
                 'correction_voucher',
             ])
-            ->whereIn('status', ['pending', 'running', 'retry_wait', 'ambiguous'])
+            ->where(static function ($query): void {
+                $query->whereIn('status', ['pending', 'running', 'retry_wait'])
+                    ->orWhere(static function ($ambiguousNonExport): void {
+                        $ambiguousNonExport
+                            ->where('status', 'ambiguous')
+                            ->whereIn('action', ['book_payment', 'correction_voucher']);
+                    });
+            })
             ->exists();
         if ($activeAccountingItem) {
             $this->view->flash(
@@ -1404,27 +1484,51 @@ final class AdminController
             }
         }
 
-        $removed = $this->application->mappings->unlinkById(
-            $mappingId,
-            $remoteMissingConfirmed,
-            $remoteId !== '' ? $remoteId : null,
-            $documentType,
-        );
+        $resolvedHistoryCount = 0;
+        if ($remoteId !== '') {
+            $resolution = $this->application->jobs->resolveAbsentRemoteMapping(
+                $mappingId,
+                $invoiceId,
+                $remoteId,
+                $documentType,
+            );
+            if ($resolution === null) {
+                $this->view->flash(
+                    'danger',
+                    'Zuordnung oder Exporthistorie passen nicht mehr eindeutig zu derselben Remote-ID und '
+                        . 'demselben Belegtyp. Es wurde nichts verändert.',
+                    'Entkopplung blockiert',
+                );
+                return;
+            }
+            $resolvedHistoryCount = $resolution['resolvedItems'];
+            $removed = true;
+        } else {
+            $removed = $this->application->mappings->unlinkById($mappingId);
+        }
         if (!$removed) {
+            $this->view->flash(
+                'danger',
+                'Die Zuordnung hat sich während der Prüfung geändert. Es wurde nichts verändert.',
+                'Entkopplung abgebrochen',
+            );
             return;
         }
         if (function_exists('logActivity')) {
             logActivity(
                 'sevdesk: local mapping detached by admin ' . $this->adminId()
                 . '; invoice ' . $invoiceId
-                . '; mapping ' . $mappingId,
+                . '; mapping ' . $mappingId
+                . '; resolved export histories ' . $resolvedHistoryCount,
             );
         }
         $this->view->flash(
             'warning',
             $remoteId === ''
                 ? 'Die unvollständige lokale Reservierung wurde entfernt; eine Remote-ID war nicht gespeichert.'
-                : 'Die lokale Zuordnung wurde erst entfernt, nachdem Voucher und Invoice unter dieser ID nicht gefunden wurden.',
+                : 'Die lokale Zuordnung wurde erst entfernt, nachdem Voucher und Invoice unter dieser ID nicht '
+                    . 'gefunden wurden. Passende terminale Exporthistorien wurden lokal abgeschlossen'
+                    . ($resolvedHistoryCount > 0 ? ' (' . $resolvedHistoryCount . ').' : '.'),
             'Zuordnung aufgehoben',
         );
     }
@@ -1448,6 +1552,45 @@ final class AdminController
 
             throw $error;
         }
+    }
+
+    private function closeAbsentRemoteHistory(int $itemId): int
+    {
+        $candidate = $this->application->jobs->absentRemoteHistoryCandidate($itemId);
+        if ($candidate === null) {
+            throw new RuntimeException(
+                'The terminal export history no longer has a unique remote identity.',
+            );
+        }
+        $remoteId = $candidate['remoteId'];
+        if (
+            !$this->remoteDocumentDefinitelyMissing('Voucher', $remoteId)
+            || !$this->remoteDocumentDefinitelyMissing('Invoice', $remoteId)
+        ) {
+            throw new RuntimeException('The remote document still exists.');
+        }
+
+        $resolution = $this->application->jobs->resolveAbsentRemoteHistory(
+            $candidate['itemId'],
+            $candidate['invoiceId'],
+            $remoteId,
+            $candidate['documentType'],
+        );
+        if ($resolution === null || $resolution['resolvedItems'] < 1) {
+            throw new RuntimeException(
+                'The terminal export history changed during remote-absence resolution.',
+            );
+        }
+        if (function_exists('logActivity')) {
+            logActivity(
+                'sevdesk: absent remote export history closed by admin ' . $this->adminId()
+                . '; invoice ' . $candidate['invoiceId']
+                . '; item ' . $candidate['itemId']
+                . '; resolved export histories ' . $resolution['resolvedItems'],
+            );
+        }
+
+        return $resolution['resolvedItems'];
     }
 
     /**
@@ -1603,6 +1746,10 @@ final class AdminController
             'invoice_canary_confirmed',
             'small_business_invoice_canary_confirmed',
             'invoice_discount_canary_confirmed',
+            'invoice_discount_rule1_19_canary_confirmed',
+            'invoice_discount_rule17_0_canary_confirmed',
+            'invoice_discount_rule19_canary_confirmed',
+            'invoice_discount_rule19_canary_rate',
             'invoice_sev_user_id',
             'invoice_unity_id',
             'e_invoice_mode',
@@ -1818,6 +1965,36 @@ final class AdminController
             $_POST['small_business_invoice_canary_confirmed'],
         );
         $invoiceDiscountCanaryConfirmed = isset($_POST['invoice_discount_canary_confirmed']);
+        $invoiceDiscountRuleOneCanaryConfirmed = isset(
+            $_POST['invoice_discount_rule1_19_canary_confirmed'],
+        );
+        $invoiceDiscountRuleSeventeenCanaryConfirmed = isset(
+            $_POST['invoice_discount_rule17_0_canary_confirmed'],
+        );
+        $invoiceDiscountRuleNineteenCanaryConfirmed = isset(
+            $_POST['invoice_discount_rule19_canary_confirmed'],
+        );
+        $invoiceDiscountRuleNineteenRate = trim(
+            (string) ($_POST['invoice_discount_rule19_canary_rate'] ?? ''),
+        );
+        $invoiceDiscountRuleOneCapabilityKey = self::requestedDiscountCapabilityKey(
+            $invoiceDiscountRuleOneCanaryConfirmed,
+            'domestic',
+            '1',
+            '19',
+        );
+        $invoiceDiscountRuleSeventeenCapabilityKey = self::requestedDiscountCapabilityKey(
+            $invoiceDiscountRuleSeventeenCanaryConfirmed,
+            'third_country',
+            '17',
+            '0',
+        );
+        $invoiceDiscountRuleNineteenCapabilityKey = self::requestedDiscountCapabilityKey(
+            $invoiceDiscountRuleNineteenCanaryConfirmed,
+            'eu_b2c_rule19',
+            '19',
+            $invoiceDiscountRuleNineteenRate,
+        );
         $sevUserId = trim((string) ($_POST['invoice_sev_user_id'] ?? ''));
         $unityId = trim((string) ($_POST['invoice_unity_id'] ?? ''));
         if ($exportMode !== 'voucher_only') {
@@ -1834,6 +2011,45 @@ final class AdminController
         ) {
             throw new RuntimeException(
                 'Der Invoice-Rabatt-Canary setzt zuerst den allgemeinen Rule-11-Invoice-Canary voraus.',
+            );
+        }
+        if (
+            (
+                $invoiceDiscountRuleOneCanaryConfirmed
+                || $invoiceDiscountRuleSeventeenCanaryConfirmed
+                || $invoiceDiscountRuleNineteenCanaryConfirmed
+            )
+            && !$invoiceCanaryConfirmed
+        ) {
+            throw new RuntimeException(
+                'Die neuen Rabatt-Capabilities setzen zuerst den allgemeinen Invoice-Canary voraus.',
+            );
+        }
+        if (
+            $invoiceDiscountRuleOneCanaryConfirmed
+            && trim((string) ($_POST['taxRuleGeneral'] ?? '')) !== '1'
+        ) {
+            throw new RuntimeException(
+                'Der Rabatt-Canary für Rule 1 mit 19 % benötigt Rule 1 im deutschen Steuerprofil.',
+            );
+        }
+        if (
+            $invoiceDiscountRuleSeventeenCanaryConfirmed
+            && (
+                !isset($_POST['third_country_confirmed'])
+                || trim((string) ($_POST['taxRuleThirdPartyCountry'] ?? '')) !== '17'
+            )
+        ) {
+            throw new RuntimeException(
+                'Der Rabatt-Canary für Rule 17 mit 0 % benötigt das bestätigte Drittlandsprofil mit Rule 17.',
+            );
+        }
+        if (
+            $invoiceDiscountRuleNineteenCanaryConfirmed
+            && $ossProfile !== DocumentTargetResolver::OSS_RULE_19_CONFIRMED
+        ) {
+            throw new RuntimeException(
+                'Der Rabatt-Canary für Rule 19 benötigt das bestätigte Profil für digitale EU-B2C-Leistungen.',
             );
         }
         if (
@@ -2001,6 +2217,26 @@ final class AdminController
                 )
             || ($invoiceDiscountCanaryConfirmed ? 'on' : '')
                 !== (string) $this->application->config->get('invoice_discount_canary_confirmed', '')
+            || $invoiceDiscountRuleOneCapabilityKey
+                !== (string) $this->application->config->get(
+                    'invoice_discount_rule1_19_canary_confirmed',
+                    '',
+                )
+            || $invoiceDiscountRuleSeventeenCapabilityKey
+                !== (string) $this->application->config->get(
+                    'invoice_discount_rule17_0_canary_confirmed',
+                    '',
+                )
+            || $invoiceDiscountRuleNineteenCapabilityKey
+                !== (string) $this->application->config->get(
+                    'invoice_discount_rule19_canary_confirmed',
+                    '',
+                )
+            || $invoiceDiscountRuleNineteenRate
+                !== (string) $this->application->config->get(
+                    'invoice_discount_rule19_canary_rate',
+                    '',
+                )
             || ($smallBusinessOwner ? 'on' : '')
                 !== (string) $this->application->config->get('smallBusinessOwner', '')
             || ($smallBusinessUntil?->format('d-m-Y') ?? '')
@@ -2078,6 +2314,22 @@ final class AdminController
         $this->application->config->set(
             'invoice_discount_canary_confirmed',
             $invoiceDiscountCanaryConfirmed,
+        );
+        $this->application->config->set(
+            'invoice_discount_rule1_19_canary_confirmed',
+            $invoiceDiscountRuleOneCapabilityKey,
+        );
+        $this->application->config->set(
+            'invoice_discount_rule17_0_canary_confirmed',
+            $invoiceDiscountRuleSeventeenCapabilityKey,
+        );
+        $this->application->config->set(
+            'invoice_discount_rule19_canary_confirmed',
+            $invoiceDiscountRuleNineteenCapabilityKey,
+        );
+        $this->application->config->set(
+            'invoice_discount_rule19_canary_rate',
+            $invoiceDiscountRuleNineteenRate,
         );
         $this->application->config->set('invoice_sev_user_id', $sevUserId);
         $this->application->config->set('invoice_unity_id', $unityId);
@@ -2214,6 +2466,40 @@ final class AdminController
         $this->application->config->set('sync_enabled', $enableSync);
     }
 
+    private static function requestedDiscountCapabilityKey(
+        bool $confirmed,
+        string $profile,
+        string $taxRule,
+        string $taxRate,
+    ): string {
+        if (!$confirmed) {
+            return '';
+        }
+
+        $taxType = strtolower(trim((string) ($GLOBALS['CONFIG']['TaxType'] ?? 'Exclusive')));
+        if (!in_array($taxType, ['exclusive', 'inclusive'], true)) {
+            throw new RuntimeException(
+                'Der konfigurierte WHMCS-Steuermodus ist für den Rabatt-Canary nicht unterstützt.',
+            );
+        }
+
+        try {
+            $rateMinor = Decimal::toMinorUnits($taxRate);
+        } catch (\InvalidArgumentException) {
+            throw new RuntimeException('Der bestätigte Rule-19-Zielsteuersatz ist ungültig.');
+        }
+        if ($rateMinor < 0 || ($taxRule === '19' && $rateMinor <= 0)) {
+            throw new RuntimeException('Der Rule-19-Rabatt-Canary benötigt einen positiven Zielsteuersatz.');
+        }
+
+        return InvoiceDiscountCapabilityPolicy::capabilityKey(
+            $profile,
+            $taxRule,
+            $rateMinor,
+            $taxType,
+        );
+    }
+
     private function operationalSettingsChanged(): bool
     {
         $date = $this->parseIsoDate((string) ($_POST['import_after'] ?? ''));
@@ -2232,6 +2518,27 @@ final class AdminController
             'invoice_discount_canary_confirmed' => isset($_POST['invoice_discount_canary_confirmed'])
                 ? 'on'
                 : '',
+            'invoice_discount_rule1_19_canary_confirmed' => self::requestedDiscountCapabilityKey(
+                isset($_POST['invoice_discount_rule1_19_canary_confirmed']),
+                'domestic',
+                '1',
+                '19',
+            ),
+            'invoice_discount_rule17_0_canary_confirmed' => self::requestedDiscountCapabilityKey(
+                isset($_POST['invoice_discount_rule17_0_canary_confirmed']),
+                'third_country',
+                '17',
+                '0',
+            ),
+            'invoice_discount_rule19_canary_confirmed' => self::requestedDiscountCapabilityKey(
+                isset($_POST['invoice_discount_rule19_canary_confirmed']),
+                'eu_b2c_rule19',
+                '19',
+                trim((string) ($_POST['invoice_discount_rule19_canary_rate'] ?? '')),
+            ),
+            'invoice_discount_rule19_canary_rate' => trim(
+                (string) ($_POST['invoice_discount_rule19_canary_rate'] ?? ''),
+            ),
             'invoice_sev_user_id' => trim((string) ($_POST['invoice_sev_user_id'] ?? '')),
             'invoice_unity_id' => trim((string) ($_POST['invoice_unity_id'] ?? '')),
             'e_invoice_mode' => trim((string) ($_POST['e_invoice_mode'] ?? 'off')),
@@ -2447,7 +2754,7 @@ final class AdminController
      * @param list<object> $rows
      * @return list<array<string,mixed>>
      */
-    private function decorateDryRun(array $rows): array
+    private function decorateDryRun(array $rows, bool $historicalBackfill = false): array
     {
         if ($rows === []) {
             return [];
@@ -2553,6 +2860,11 @@ final class AdminController
                 $reason = $reasonCode === 'unresolved_export_history'
                     ? 'Ein älterer Export endete nach einem möglichen Remote-Write und muss zuerst geklärt werden'
                     : 'Ein aktiver oder ungeklärter Exportjob besitzt diese Rechnung bereits';
+            }
+            if ($exportable && InvoiceItemExportPolicy::containsLateFee($sourceTypes)) {
+                $exportable = false;
+                $reason = InvoiceItemExportPolicy::LATE_FEE_MESSAGE;
+                $reasonCode = InvoiceItemExportPolicy::LATE_FEE_REQUIRES_REVIEW;
             }
             if ($exportable && $requiresPaymentStructure) {
                 $paymentStructure = $this->application->paymentStructure()->classify($invoiceId);
@@ -2717,6 +3029,11 @@ final class AdminController
                         (string) $invoice->credit,
                         $lines,
                         $discounts,
+                        (string) $invoice->subtotal,
+                        Decimal::fromMinorUnits(
+                            Decimal::toMinorUnits((string) $invoice->tax)
+                                + Decimal::toMinorUnits((string) $invoice->tax2),
+                        ),
                     );
                     if (
                         abs(
@@ -2785,6 +3102,41 @@ final class AdminController
                     (string) $invoice->status === 'Paid',
                     $effectiveInvoiceNumber !== '',
                 );
+                $discountCapability = null;
+                if (
+                    $target->allowed
+                    && $snapshot instanceof InvoiceSnapshot
+                    && $snapshot->discounts !== []
+                ) {
+                    $selectionCandidate = $this->requestedExportContext();
+                    if ($historicalBackfill) {
+                        $selectionCandidate['historicalBackfill'] = true;
+                        $selectionCandidate['requestedEInvoiceMode'] = EInvoiceEligibilityService::MODE_OFF;
+                        $selectionCandidate['requestedEInvoiceCanaryConfirmed'] = false;
+                    }
+                    $eInvoiceSelection = EInvoiceEligibilityService::selectionIntent(
+                        $this->application->config,
+                        $this->application->whmcs,
+                        $snapshot,
+                        $decision,
+                        $target,
+                        $selectionCandidate,
+                    );
+                    $discountCapability = $eInvoiceSelection->isFailure()
+                        ? [
+                            'allowed' => false,
+                            'code' => $eInvoiceSelection->errorCode() ?? 'e_invoice_selection_failed',
+                            'message' => $eInvoiceSelection->errorMessage()
+                                ?? 'Die E-Rechnungsentscheidung ist fehlgeschlagen.',
+                            'capabilityKey' => null,
+                        ]
+                        : $this->application->invoiceDiscountPolicy()->evaluate(
+                            $snapshot,
+                            $decision,
+                            $target,
+                            $eInvoiceSelection->valueOrNull() === true,
+                        );
+                }
                 if (
                     $target->allowed
                     && $target->documentType === DocumentTargetDecision::DOCUMENT_INVOICE
@@ -2794,40 +3146,10 @@ final class AdminController
                     $exportable = false;
                     $reason = 'Für Invoices müssen Positionssumme und WHMCS-Rechnungsbetrag centgenau übereinstimmen';
                     $reasonCode = 'invoice_total_mismatch';
-                } elseif (
-                    $target->allowed
-                    && $target->documentType !== DocumentTargetDecision::DOCUMENT_INVOICE
-                    && $snapshot instanceof InvoiceSnapshot
-                    && $snapshot->discounts !== []
-                ) {
+                } elseif ($discountCapability !== null && !$discountCapability['allowed']) {
                     $exportable = false;
-                    $reason = 'Strukturelle PromoHosting-Rabatte sind nur im Modus „Invoice only“ freigegeben';
-                    $reasonCode = 'voucher_discount_not_supported';
-                } elseif (
-                    $target->allowed
-                    && $snapshot instanceof InvoiceSnapshot
-                    && $snapshot->discounts !== []
-                    && (
-                        $decision->taxRuleId !== '11'
-                        || array_filter(
-                            $snapshot->lineItems,
-                            static fn (LineItem $line): bool =>
-                                Decimal::toMinorUnits($line->taxRate) !== 0,
-                        ) !== []
-                    )
-                ) {
-                    $exportable = false;
-                    $reason = 'PromoHosting-Rabatte sind zunächst nur für Rule 11 mit 0 % freigegeben';
-                    $reasonCode = 'invoice_discount_tax_rule_not_supported';
-                } elseif (
-                    $target->allowed
-                    && $snapshot instanceof InvoiceSnapshot
-                    && $snapshot->discounts !== []
-                    && !$this->application->config->bool('invoice_discount_canary_confirmed')
-                ) {
-                    $exportable = false;
-                    $reason = 'Der separate sevdesk-Canary für feste Invoice-Rabatte ist noch nicht bestätigt';
-                    $reasonCode = 'invoice_discount_canary_not_confirmed';
+                    $reason = $discountCapability['message'];
+                    $reasonCode = $discountCapability['code'];
                 } elseif (
                     $target->allowed
                     && $target->documentType === DocumentTargetDecision::DOCUMENT_INVOICE

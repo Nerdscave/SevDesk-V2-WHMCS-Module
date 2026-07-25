@@ -17,7 +17,7 @@ final class InvoiceItemNormalizerTest extends TestCase
         $this->normalizer = new InvoiceItemNormalizer();
     }
 
-    public function testItConvertsAStructurallyMatchedPromoHostingItemIntoAFixedDiscount(): void
+    public function testItSeparatesAStructurallyMatchedPromoHostingItemForANegativePosition(): void
     {
         $result = $this->normalizer->normalize([
             $this->item('Hosting', 42, true, 'Hosting package', '100.00', '19', true),
@@ -31,17 +31,10 @@ final class InvoiceItemNormalizerTest extends TestCase
         self::assertSame('100.00', $result->lines[0]->amount);
         self::assertSame('20.00', $result->discounts[0]->amount);
         self::assertSame(2_000, $result->discounts[0]->amountMinorUnits());
+        self::assertSame('-20.00', $result->discounts[0]->negativeAmount());
+        self::assertSame('19', $result->discounts[0]->taxRate);
+        self::assertSame('Any operator-defined promo text', $result->discounts[0]->text);
         self::assertSame(9_520, $result->expectedGrossMinorUnits);
-        self::assertSame([
-            [
-                'discount' => true,
-                'text' => 'Any operator-defined promo text',
-                'percentage' => false,
-                'value' => 20.0,
-                'objectName' => 'Discounts',
-                'mapAll' => true,
-            ],
-        ], $result->discountSavePayload());
     }
 
     public function testDescriptionNeverClassifiesADiscount(): void

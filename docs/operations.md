@@ -2,9 +2,9 @@
 
 ## Freigabestatus
 
-Dieses Runbook gilt für den Arbeitsstand nach `2.1.0-rc.5`. Der RC ist für Testinstallationen gedacht, nicht für Produktivdaten. Die automatisierten Prüfungen unter PHP 8.3 mit XMLReader und MariaDB sowie die technischen Live-Läufe für normale Invoices, Rule 19 und ZUGFeRD wurden mit synthetischen Daten ausgeführt. Der direkte sevDesk-Versand, echte Kundensitzungen und die Rechteprüfung waren erfolgreich. Zwei WHMCS-Postfachläufe enthielten dagegen die WHMCS-Core-PDF. WHMCS 8.13 führt den Hook zwar aus, kann dessen Binäranhang aber nicht übernehmen. Der Kanal `whmcs_template` ist auf der Zielplattform daher gesperrt. Vor der Freigabe stehen noch Invoice-`bookAmount`, der rabattfreie Rule-11-Invoice-Canary, der darauf aufbauende Rabatt-Canary, die Voucher-Canaries der produktiv verwendeten Steuerfälle und die fachliche Abnahme aus.
+Dieses Runbook gilt für den Arbeitsstand `2.1.0-rc.6`. Der RC ist für Testinstallationen gedacht, nicht für Produktivdaten. Die automatisierten Prüfungen unter PHP 8.3 mit XMLReader und MariaDB sowie die technischen Live-Läufe für normale Invoices, Rule 19 und ZUGFeRD wurden mit synthetischen Daten ausgeführt. Der direkte sevDesk-Versand, echte Kundensitzungen und die Rechteprüfung waren erfolgreich. Zwei WHMCS-Postfachläufe enthielten dagegen die WHMCS-Core-PDF. WHMCS 8.13 führt den Hook zwar aus, kann dessen Binäranhang aber nicht übernehmen. Der Kanal `whmcs_template` ist auf der Zielplattform daher gesperrt. Vor der Freigabe stehen noch Invoice-`bookAmount`, der rabattfreie Rule-11-Invoice-Canary, die vier getrennten Rabatt-Canaries, die Voucher-Canaries der produktiv verwendeten Steuerfälle und die fachliche Abnahme aus.
 
-Bis dahin bleiben `invoice_canary_confirmed`, `small_business_invoice_canary_confirmed`, `e_invoice_canary_confirmed`, `invoice_discount_canary_confirmed` und bei neuen Rollouts auch `sync_enabled` deaktiviert. Ein 2.0-Bestand behält beim Upgrade den Modus `voucher_only` und erhält `runtime_review_required=on`. Diese Quarantäne stoppt automatische und manuelle Verarbeitung. Sie endet erst nach einer erfolgreichen read-only Prüfung und der Bestätigung im Setup.
+Bis dahin bleiben `invoice_canary_confirmed`, `small_business_invoice_canary_confirmed`, `e_invoice_canary_confirmed`, `invoice_discount_canary_confirmed`, `invoice_discount_rule1_19_canary_confirmed`, `invoice_discount_rule17_0_canary_confirmed`, `invoice_discount_rule19_canary_confirmed` und bei neuen Rollouts auch `sync_enabled` deaktiviert. Ein 2.0-Bestand behält beim Upgrade den Modus `voucher_only` und erhält `runtime_review_required=on`. Diese Quarantäne stoppt automatische und manuelle Verarbeitung. Sie endet erst nach einer erfolgreichen read-only Prüfung und der Bestätigung im Setup.
 
 ## Unterstützte Umgebung
 
@@ -128,6 +128,11 @@ document_authority=whmcs
 oss_profile=blocked
 invoice_canary_confirmed=off
 small_business_invoice_canary_confirmed=off
+invoice_discount_canary_confirmed=off
+invoice_discount_rule1_19_canary_confirmed=
+invoice_discount_rule17_0_canary_confirmed=
+invoice_discount_rule19_canary_confirmed=
+invoice_discount_rule19_canary_rate=
 e_invoice_mode=off
 e_invoice_canary_confirmed=off
 customer_number_contact_creation_confirmed=off
@@ -142,7 +147,7 @@ Ein widersprüchlicher Marker oder eine ID, die an beiden Endpoints existiert, b
 
 ### Übergangsinventur und Moduswechsel
 
-Vor einer Änderung an Exportmodus, Dokumenthoheit, OSS-, E-Rechnungs-, Rule-11-Invoice-, Rabatt-Canary- oder Kleinunternehmerprofil zeigt das Setup eine rein lokale Bestandsaufnahme. Sie zählt:
+Vor einer Änderung an Exportmodus, Dokumenthoheit, OSS-, E-Rechnungs-, Rule-11-Invoice-, einem der vier Rabatt-Canaries oder Kleinunternehmerprofil zeigt das Setup eine rein lokale Bestandsaufnahme. Sie zählt:
 
 - typisierte Voucher und Invoices;
 - vollständige Mappings ohne Dokumenttyp;
@@ -160,6 +165,8 @@ Alte fehlgeschlagene `export_voucher`-Items behalten ihren ursprünglichen Pfad.
 Die Zuordnungsansicht kann höchstens 25 sichtbare Legacy-Mappings gesammelt vorprüfen. Nur eindeutige Treffer mit passendem Rewrite-Marker sind für die Sammelbestätigung zugelassen. Markerlose Belege des Originalmoduls, Cross-Type-Kollisionen und widersprüchliche Treffer bleiben Einzelfälle. Vor jeder Übernahme liest das Modul beide Endpoints erneut.
 
 Eine vollständige Zuordnung lässt sich nicht mehr allein durch einen Admin-Klick für einen Neu-Export freigeben. Das Modul prüft die gespeicherte ID zuerst am Voucher- und am Invoice-by-ID-Endpoint. Nur wenn beide Abfragen die Remote-Abwesenheit jeweils eindeutig mit HTTP 400 oder 404 bestätigen, darf die lokale Zeile entfernt werden. Authentifizierungsfehler, Timeouts, 429, 5xx und jeder vorhandene Remote-Beleg lassen das Mapping stehen. Unvollständige lokale Reservierungen ohne Remote-ID können weiterhin nach der gesonderten Prüfung entfernt werden.
+
+Gehört zur Zuordnung noch ein terminaler Exportcheckpoint, schließt dieselbe Aktion nur Historien mit identischer Remote-ID und identischem Belegtyp ab. Ist das Mapping bereits nach einer früheren beidseitigen Abwesenheitsprüfung entfernt worden, steht dafür unter **Klärfälle** die Aktion **Abwesenheit prüfen und Historie abschließen** bereit. Sie liest Voucher und Invoice erneut, legt keinen Job an und markiert nur exakt passende Dokumentcheckpoints als `remote_absence_confirmed`. Bei einer abweichenden ID, einem anderen Typ, einem aktiven Item oder einem Kontakt-, Booking-, Korrektur- beziehungsweise Versandcheckpoint bleibt alles unverändert.
 
 ## Erforderliche Konfiguration
 
@@ -280,7 +287,7 @@ Teilstand vom 24.07.2026: Ein normaler Draft an einem vorhandenen Kontakt ohne s
 
 ## Rule-11-Invoice-Canary
 
-Dieses Gate ist vom allgemeinen Invoice-Canary und vom Rabatt-Canary getrennt. Es gilt nur für Rule-11-Invoices; Rule-11-Voucher verwenden weiterhin ihr konfiguriertes und durch Guidance geprüftes `accountDatev`.
+Dieses Gate ist vom allgemeinen Invoice-Canary und vom Rule-11-Rabatt-Canary getrennt. Es gilt nur für Rule-11-Invoices; Rule-11-Voucher verwenden weiterhin ihr konfiguriertes und durch Guidance geprüftes `accountDatev`.
 
 Der Anlass ist ein reproduzierter Livebefund: sevDesk akzeptierte eine normale Rule-11-Invoice zunächst als Draft. `sendBy` scheiterte danach mit HTTP 422 und Code 7100, weil `KLEINUNTERNEHMER_P19` für das automatisch gewählte Konto beziehungsweise dessen Scope nicht zulässig war. Das Modul kann dieses Konto bei einer Invoice nicht über `InvoicePos.accountDatev` vorgeben.
 
@@ -293,7 +300,24 @@ Vor `small_business_invoice_canary_confirmed=on` sind deshalb zwei Nachweise nö
 
 Das Setup prüft Punkt 1 beim Speichern erneut. Dry-Run, Remote-Health-Check und Worker prüfen dieselbe Fähigkeit vor Create. Fehlt sie trotz gesetztem Wert, lautet der Fehler `invoice_rule11_tenant_scope_unsupported`. Ist der Canary nicht bestätigt, lautet er `small_business_invoice_canary_not_confirmed`. Ein Item nach einem möglichen Write bleibt ohne weiteren Remote-Aufruf `ambiguous`.
 
-Der Rabatt-Canary darf erst danach bestätigt werden. Beide Checkboxen sind Teil der geschützten Übergangsinventur; aktive oder ungeklärte Exportjobs sperren eine Änderung.
+Der Rule-11-Rabatt-Canary darf erst danach bestätigt werden. Beide Rule-11-Checkboxen sind Teil der geschützten Übergangsinventur; aktive oder ungeklärte Exportjobs sperren eine Änderung.
+
+## Rabatt-Canaries für normale Invoices
+
+Ein Rabatt-Canary gilt immer nur für eine Capability. Alle vier Schalter sind bei Installation und Upgrade aus:
+
+| Capability | Setup-Gate |
+| --- | --- |
+| Rule 11 mit 0 % | `invoice_discount_canary_confirmed`; zusätzlich gelten der rabattfreie Rule-11-Invoice-Canary und die aktuelle `REVENUE`-Guidance |
+| Rule 1 mit 19 % | `invoice_discount_rule1_19_canary_confirmed` |
+| Rule 17 mit 0 % | `invoice_discount_rule17_0_canary_confirmed` |
+| Rule 19 mit positivem, einheitlichem Zielsteuersatz | `invoice_discount_rule19_canary_confirmed` |
+
+Jeder Test verwendet `invoice_only`, EUR, eine positive `Hosting`-Position und genau einen über `relid` und `taxed` passenden `PromoHosting`-Rabatt. E-Rechnung bleibt aus. Positionen und Rabatt müssen denselben Netto-/Bruttomodus und Steuersatz tragen; beim Rule-19-Test muss die Rate außerdem der bestätigten Zielbesteuerung entsprechen. Der Rabatt wird als negative `InvoicePos` übertragen. `discountSave` bleibt leer.
+
+Vor der Freigabe sind Create, Capability-Key, `[WHMCS-DISCOUNT:<sha256>]`, die positive und negative Position, `discountSave=null`, `sumNet`, `sumTax`, `sumGross`, `sumDiscounts=0`, finale PDF und read-only Recovery zu prüfen. Der Summenvergleich ist exakt in Minor Units. Für den Rule-1-Bruttocanary gilt zusätzlich die bestätigte Referenz: 4,94 Euro Leistung minus 2,47 Euro Rabatt ergeben 2,07 Euro netto, 0,40 Euro Umsatzsteuer und 2,47 Euro brutto. Dieser Canary muss genau zwei Remote-Positionen liefern. Der globale sevDesk-Rabatt ist für diese Capability ungeeignet, weil er im Live-Test 2,08 Euro netto und 0,39 Euro Umsatzsteuer ergab. Beim Speichern schreibt das Setup für Rules 1/17/19 den Schlüssel des aktuell aktiven WHMCS-Steuermodus in das jeweilige Setting. Bei Rule 19 ist zusätzlich der im Canary verwendete Zielsteuersatz einzutragen. Ein alter Wahrheitswert, ein anderer Satz oder ein Wechsel zwischen `Inclusive` und `Exclusive` gilt nicht als Freigabe. Ein bestandener Rule-1-Test schaltet weder Rule 17 noch Rule 19 frei. Ein bestandener Rule-11-Rabatt-Test ersetzt nicht den vorgelagerten Rule-11-Invoice-Canary.
+
+Das Canary-Protokoll bleibt außerhalb des Repositorys. Im Setup wird nur der Schalter der tatsächlich bestandenen Capability gesetzt. `LateFee`, mehrere Rabatte, andere negative Positionen und Rabatte auf E-Rechnungen lassen sich mit diesen Schaltern nicht freigeben.
 
 ## ZUGFeRD-Canary
 
@@ -449,6 +473,7 @@ Für den Nachlauf zählt nur der aktuelle Datenbestand. Deshalb beginnt er mit e
 - bestätigte Rule-19-Invoice-Kandidaten sowie Rule-18/20-, gemischte, Nullsummen-, Fremdwährungs- und sonstige manuelle Fälle;
 - reine WHMCS-Sammelzahlungsbelege und die exakt mit ihnen verknüpften Originalrechnungen;
 - sonstige Guthabenfälle, unvollständige Sammelzahlungsketten und widersprüchliche Beträge;
+- Rechnungen mit Positionen vom WHMCS-Typ `LateFee`;
 - eindeutig zugeordnete `PromoHosting`-Rabatte sowie alle übrigen negativen Positionen.
 
 Ein vollständig stimmiger Sammelzahlungsbeleg ist kein eigener Umsatz und wird übersprungen. Bei den Originalrechnungen gilt centgenau `subtotal + tax + tax2 = total + credit`. Der Dokumentbrutto beträgt `total + credit`; `total` ist der direkt gezahlte Anteil und muss der Summe positiver `tblaccounts`-Zahlungen entsprechen. Bei Vollguthaben steht `total = 0`. Nach PDF- und Kontaktverarbeitung prüft der Worker den vollständigen Zahlungsgraphen ein letztes Mal, bevor er den Dokument-Write vormerkt. Die gemeinsame Banktransaktion wird nicht automatisch auf mehrere sevDesk-Belege verteilt und bleibt eine manuelle Zahlungszuordnung.
@@ -463,7 +488,14 @@ Die Parent-ID aus dieser Hook-Prüfung ist Teil des Zieljobs. Ein späterer Wech
 
 Andere Guthabenfälle bleiben aus Bulk-Jobs ausgeschlossen. Beim Voucher-Einzelexport zeigt das Modul Brutto, Guthaben und Zahlbetrag an und verlangt weiterhin die Bestätigung „voller Rechnungsbrutto-Voucher; Guthaben separat klären“. Ohne diese Bestätigung gibt es keinen Write. Eine proportionale Umsatzkürzung ist nicht vorgesehen.
 
-Ein `PromoHosting`-Rabatt ist nur in `invoice_only` mit Rule 11, 0 %, EUR und eigenem Rabatt-Canary zulässig. Der Canary muss Create, den Marker `[WHMCS-DISCOUNT:<sha256>]`, `sumDiscounts`, Positionen, Gesamtsumme, PDF und eine rein lesende Recovery prüfen. Backfills bleiben auch für diesen Fall mailfrei. Andere negative Positionen werden nicht automatisch übertragen.
+Rechnungen mit einer `LateFee`-Position bleiben auch bei 0 % und innerhalb des
+Kleinunternehmerzeitraums aus dem automatischen Nachlauf ausgeschlossen. Der
+stabile Code `late_fee_tax_treatment_requires_review` bedeutet, dass die Mahn-
+oder Verzugsgebühr einen eigenen steuerlichen Grund und eine separat bestätigte
+Erfassung braucht. Der Betreiber darf diesen Fall nicht durch die Auswahl einer
+anderen Rule oder eines anderen Dokumentmodus umgehen.
+
+Ein `PromoHosting`-Rabatt ist nur in `invoice_only`, in EUR, ohne E-Rechnung und mit der passenden Rule-/Rate-Capability zulässig. Freigegeben sind Rule 11/0 %, Rule 1/19 %, Rule 17/0 % und Rule 19 mit positivem, einheitlichem Zielsteuersatz. Der jeweilige Canary muss Create, Capability-Key, den Marker `[WHMCS-DISCOUNT:<sha256>]`, die negative Rabattposition, `discountSave=null`, `sumNet`, `sumTax`, `sumGross`, `sumDiscounts=0`, alle Positionen, PDF und eine rein lesende Recovery prüfen. Backfills bleiben auch für diesen Fall mailfrei. `LateFee` und andere negative Positionen werden nicht automatisch übertragen.
 
 Ist das ZUGFeRD-Kundenprofil gesetzt und enthält die Rechnung angewendetes Guthaben, bleibt sie blockiert. Das gilt auch bei einer exakt erkannten Sammelzahlung. Es gibt keinen stillen Rückfall auf eine normale PDF-Invoice.
 
@@ -481,7 +513,7 @@ Der Dry-Run lädt die WHMCS-Daten, prüft Eligibility, klassifiziert Steuerfall 
 
 Zunächst nur wenige repräsentative WHMCS-Rechnungen pro freigegebener Steuerklasse exportieren. Für Voucher prüft die Buchhaltung WHMCS-PDF, Konto, Rule, Rate und Summen. Für Invoice prüft sie zusätzlich unveränderte Nummer, `RE`, SevUser, Unity, Landsteuersatz, fehlendes benutzerdefiniertes `accountDatev`, Öffnung/Versand und die finale sevDesk-PDF. Der allgemeine Invoice-API-Canary muss bereits vorher bestanden sein.
 
-Enthält der Bestand den freigegebenen `PromoHosting`-Fall, folgt vor dem Bulk ein eigener synthetischer Rabatt-Canary. Solange dessen Setup-Gate aus ist, dürfen betroffene Rechnungen nur als blockierte Vorschaufälle erscheinen.
+Enthält der Bestand einen der freigegebenen `PromoHosting`-Fälle, folgt vor dem Bulk je tatsächlich verwendeter Rule-/Rate-Capability ein eigener synthetischer Rabatt-Canary. Solange das passende Setup-Gate aus ist, dürfen betroffene Rechnungen nur als blockierte Vorschaufälle erscheinen.
 
 ### 5. Abschnittsweise exportieren
 

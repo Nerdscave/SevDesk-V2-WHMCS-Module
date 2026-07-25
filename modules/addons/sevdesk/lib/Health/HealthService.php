@@ -11,7 +11,9 @@ use WHMCS\Module\Addon\SevDesk\Api\ApiException;
 use WHMCS\Module\Addon\SevDesk\Application;
 use WHMCS\Module\Addon\SevDesk\Config;
 use WHMCS\Module\Addon\SevDesk\Database\Migrator;
+use WHMCS\Module\Addon\SevDesk\Domain\Decimal;
 use WHMCS\Module\Addon\SevDesk\Service\DocumentTargetResolver;
+use WHMCS\Module\Addon\SevDesk\Service\InvoiceDiscountCapabilityPolicy;
 
 final class HealthService
 {
@@ -232,6 +234,55 @@ final class HealthService
                 'addonmodules.php?module=sevdesk&a=setup',
                 'Rabatt-Gate prüfen',
             );
+            $taxType = strtolower(trim((string) ($GLOBALS['CONFIG']['TaxType'] ?? 'Exclusive')));
+            foreach (
+                [
+                    'Rule 1 / 19 %' => [
+                        'invoice_discount_rule1_19_canary_confirmed', 'domestic', '1', '19',
+                    ],
+                    'Rule 17 / 0 %' => [
+                        'invoice_discount_rule17_0_canary_confirmed', 'third_country', '17', '0',
+                    ],
+                    'Rule 19 / Zielsteuersatz' => [
+                        'invoice_discount_rule19_canary_confirmed',
+                        'eu_b2c_rule19',
+                        '19',
+                        (string) $this->application->config->get(
+                            'invoice_discount_rule19_canary_rate',
+                            '',
+                        ),
+                    ],
+                ] as $label => [$setting, $profile, $rule, $rate]
+            ) {
+                $storedKey = trim((string) $this->application->config->get($setting, ''));
+                $expectedKey = null;
+                try {
+                    if (in_array($taxType, ['exclusive', 'inclusive'], true)) {
+                        $expectedKey = InvoiceDiscountCapabilityPolicy::capabilityKey(
+                            $profile,
+                            $rule,
+                            Decimal::toMinorUnits($rate),
+                            $taxType,
+                        );
+                    }
+                } catch (\InvalidArgumentException) {
+                    $expectedKey = null;
+                }
+                $confirmed = $expectedKey !== null
+                    && $storedKey !== ''
+                    && hash_equals($storedKey, $expectedKey);
+                $this->add(
+                    $checks,
+                    'Invoice-Rabatt: ' . $label,
+                    $confirmed,
+                    $confirmed
+                        ? 'Der separate Rabatt-Canary ist für diese Capability bestätigt.'
+                        : 'Diese Rabatt-Capability bleibt bis zu ihrem eigenen vollständigen Canary gesperrt.',
+                    $confirmed ? 'healthy' : 'warning',
+                    'addonmodules.php?module=sevdesk&a=setup',
+                    'Rabatt-Gate prüfen',
+                );
+            }
         }
 
         $eInvoiceConfigurationReady = $eInvoiceMode === 'off';
@@ -545,7 +596,7 @@ final class HealthService
             'stats' => [
                 'health_status' => $hasError ? 'error' : ($hasWarning ? 'warning' : 'healthy'),
                 'healthy' => $healthy,
-                'module_version' => '2.1.0-rc.5',
+                'module_version' => '2.1.0-rc.6',
                 'whmcs_version' => $whmcsVersion,
                 'php_version' => PHP_VERSION,
                 'bookkeeping_version' => $bookkeepingVersion,

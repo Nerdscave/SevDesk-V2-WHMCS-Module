@@ -20,7 +20,7 @@ Die Tests verwenden ausschließlich synthetische Kunden, Invoices und API-Fixtur
 
 MariaDB und PHP 8.3 bleiben eigene Release-Gates. Ein übersprungener Datenbanktest oder ein Lauf unter einer anderen PHP-Version ersetzt diese Nachweise nicht.
 
-Der Invoice-API-Canary und der davon getrennte ZUGFeRD-Canary sind eigene externe Gates. Mocks, OpenAPI-Fixtures und gesetzte Konfigurationswerte beweisen nicht, dass sie stattgefunden haben. Mit synthetischen Daten bestätigt sind inzwischen Rule 19, ZUGFeRD-Create und -Readback, `getXml`, `getPdf`, `sendBy`, der direkte sevDesk-Versand, die externe EN-16931-Prüfung und echte Kundensitzungen. Der eigene Kunde erhielt beim Download exakt die geprüften PDF-Bytes; ein fremder Kunde und ein delegierter Benutzer ohne `invoices`-Recht erhielten keinen Dokumentzugriff. Im aktiven Custom Theme blieb außerdem kein normaler WHMCS-PDF-Link sichtbar. Beide WHMCS-Mailtests lieferten dagegen die WHMCS-Core-PDF. Der zweite Lauf verbrauchte den In-Memory-Kontext korrekt und bewies damit den eigentlichen Kompatibilitätsfehler: WHMCS 8.13 ignoriert aus `EmailPreSend` zurückgegebene Binäranhänge. Setup, Health Check und Worker sperren `whmcs_template` deshalb auf der Zielplattform. Invoice-`bookAmount`, der rabattfreie Rule-11-Invoice-Canary, der anschließende Rabatt-Canary, die Voucher-Canaries der tatsächlich verwendeten Steuerfälle und die fachliche Abnahme sind weiterhin offen. Die Setup-Gates bleiben deshalb aus.
+Der Invoice-API-Canary und der davon getrennte ZUGFeRD-Canary sind eigene externe Gates. Mocks, OpenAPI-Fixtures und gesetzte Konfigurationswerte beweisen nicht, dass sie stattgefunden haben. Mit synthetischen Daten bestätigt sind inzwischen Rule 19, ZUGFeRD-Create und -Readback, `getXml`, `getPdf`, `sendBy`, der direkte sevDesk-Versand, die externe EN-16931-Prüfung und echte Kundensitzungen. Der eigene Kunde erhielt beim Download exakt die geprüften PDF-Bytes; ein fremder Kunde und ein delegierter Benutzer ohne `invoices`-Recht erhielten keinen Dokumentzugriff. Im aktiven Custom Theme blieb außerdem kein normaler WHMCS-PDF-Link sichtbar. Beide WHMCS-Mailtests lieferten dagegen die WHMCS-Core-PDF. Der zweite Lauf verbrauchte den In-Memory-Kontext korrekt und bewies damit den eigentlichen Kompatibilitätsfehler: WHMCS 8.13 ignoriert aus `EmailPreSend` zurückgegebene Binäranhänge. Setup, Health Check und Worker sperren `whmcs_template` deshalb auf der Zielplattform. Invoice-`bookAmount`, der rabattfreie Rule-11-Invoice-Canary, die vier getrennten Rabatt-Canaries, die Voucher-Canaries der tatsächlich verwendeten Steuerfälle und die fachliche Abnahme sind weiterhin offen. Die Setup-Gates bleiben deshalb aus.
 
 ## Testebenen
 
@@ -76,7 +76,12 @@ Schnelle Tests ohne WHMCS-Datenbank oder Netzwerk für:
 - Kleinunternehmer aus, unbegrenzt sowie mit Stichtag: Ein Rechnungsdatum am
   31.12.2025 verwendet Rule 11, ein Datum ab 01.01.2026 nicht mehr. Ungültige
   gespeicherte Stichtage blockieren Worker und Dry-run nur bei aktivem Profil.
+- deutsche Rule-1-Fälle außerhalb des Kleinunternehmerzeitraums: 0 % blockiert
+  für Voucher und Invoice, während 7 % und 19 % unverändert zulässig bleiben;
 - der aktive Kleinunternehmerzeitraum gewinnt bei gültigem Ländercode vor deutscher, EU-B2C-, EU-B2B-, Drittland- und AddFunds-Klassifikation; Voucher und Invoice verwenden Rule 11 mit 0 %, wobei AddFunds den Invoice-Canary und die Guidance-Prüfung nicht umgehen darf;
+- `LateFee` blockiert Worker und Dry-run vor Steuerklassifikation, Kontakt,
+  PDF und Beleg-Write; nach einem möglichen Write bleibt derselbe stabile Code
+  mit dem vorhandenen Checkpoint `ambiguous`;
 - reine Sammelzahlungscontainer, Voll- und Teilguthaben an exakt verknüpften Originalrechnungen sowie fehlende, doppelte oder widersprüchliche Elternbelege;
 - Änderung von Parent, Fingerprint, Guthaben oder Dokumentbrutto vor der Dokumententscheidung sowie während PDF-, Kontakt- oder E-Rechnungs-I/O: unmittelbar vor dem Beleg-POST dauerhaft blockiert; nach einem möglichen Write `ambiguous`, jeweils ohne zweiten Remote-Write;
 - ein Hook-Job darf seine bestätigte Parent-ID weder verlieren noch zu einem später passenden Parent oder einer gewöhnlichen Rechnung wechseln. Trifft ein Paid-Hook auf einen wartenden Hybridjob, wird dieselbe Parent-ID übernommen; eine abweichende ID setzt einen nicht überschreibbaren Konflikt;
@@ -89,8 +94,11 @@ Schnelle Tests ohne WHMCS-Datenbank oder Netzwerk für:
 - der Paid-Hook darf Container-Mail und Zieljobs erst nach der vollständigen lokalen Prüfung freigeben. Reine `Invoice`-Positionen mit fremdem Kunden, falschem Betrag, fehlendem Ziel oder unbezahltem Elternbeleg bleiben unter dem normalen Authority-Guard;
 - ein großer, exakt bestätigter Sammelzahlungsgraph wird im selben Hook-Request nur einmal vollständig gelesen. Die anschließenden Zielereignisse verwenden den request-lokalen Nachweis; ein normaler Worker-Aufruf muss Änderungen trotzdem sofort erkennen;
 - ein eindeutig inaktiver alter Sammelzahlungsversuch darf genau eine später vollständig passende Kette nicht blockieren. Ein Elternbeleg mit Zahlung, Mapping oder mehreren passenden Nachfolgern bleibt ein Klärfall;
-- `PromoHosting` nur anhand Typ, `relid` und `taxed`: ein eindeutiger Rabatt wird normalisiert, Beschreibungen klassifizieren nichts, mehrere oder fremde negative Positionen bleiben blockiert;
+- `PromoHosting` nur anhand Typ, `relid` und `taxed`: ein eindeutiger Rabatt wird als zusätzliche negative `InvoicePos` normalisiert, Beschreibungen klassifizieren nichts, mehrere oder fremde negative Positionen bleiben blockiert; `discountSave` bleibt `null`;
+- Rabatt-Capability-Matrix: ausschließlich `invoice_only`, EUR, genau ein struktureller Rabatt und keine E-Rechnung. Rule 11/0 %, Rule 1/19 %, Rule 17/0 % und Rule 19 mit positivem, einheitlichem Zielsteuersatz benötigen jeweils ihr eigenes Gate; uneinheitliche Netto-/Bruttomodi, Steuersätze oder nicht bestätigte Kombinationen blockieren;
+- der gespeicherte Rabatt-Capability-Key enthält Profil, Länderklasse, Rule, Rate, Netto-/Bruttomodus und Vertragsversion. Die neuen Settings akzeptieren weder ein altes `on` noch einen Key des anderen WHMCS-Steuermodus. Eine Änderung vor dem Write blockiert; nach einem möglichen Write wird sie `ambiguous`. Ein sicherer alter Rule-11-Job darf den deterministisch gleichen fehlenden Key nur vor dem Write ergänzen;
 - Rabatt-Fingerprint und Marker: Text-, Relations-, Steuer- oder Betragsdrift nach `invoice_write_requested` wird `ambiguous`; gleiche Rabattsumme mit falschem Marker darf kein Mapping wiederherstellen;
+- Rabatt-Readback und Recovery prüfen positive und negative Positionen sowie `sumNet`, `sumTax` und `sumGross` exakt in Minor Units. `sumDiscounts` muss numerisch 0 sein. Fehlende Felder oder eine Abweichung von einem Cent sind Vertragsfehler;
 
 Diese Logik darf nicht von globalem WHMCS-Zustand abhängen. Tabellengetriebene Tests bilden die fachliche Matrix lesbar ab.
 
@@ -186,8 +194,9 @@ In einer Testinstallation mit WHMCS 8.13.4 und PHP 8.3:
 - prüfen, dass `sevdesk_config()` keine operativen Standardfelder veröffentlicht und Änderungen nur über die geschützte Setupseite möglich sind;
 - Setupvalidierung für Exportmodus, Hoheit, OSS-Profil, Canary, SevUser, Unity, Proforma, Theme-Manifest, den unter WHMCS 8.13 gesperrten Mailvorlagenkanal und die widerrufbare Bestätigung zur Kontakt-Neuanlage mit interner WHMCS-Client-ID;
 - ZUGFeRD-Setup mit Modus, vorhandenem Admin-Tickbox-Feld, PaymentMethod, Aktivierungsdatum, eigenem Canary und PHP XMLReader;
-- Übergangsinventur und Fingerprint vor Änderungen an Modus, Hoheit, OSS-, E-Rechnungs-, Rabatt-Canary- oder Kleinunternehmerprofil; das Speichern allein darf keinen Job anlegen;
+- Übergangsinventur und Fingerprint vor Änderungen an Modus, Hoheit, OSS-, E-Rechnungs-, einem der vier Rabatt-Canaries oder Kleinunternehmerprofil; das Speichern allein darf keinen Job anlegen;
 - Moduswechsel bei aktiven oder ungeklärten Exportitems blockieren und bestehende Mappings unverändert lassen;
+- gelöschte Testbelege nur nach erneutem 400/404 an Voucher- und Invoice-by-ID abschließen; Mapping, Remote-ID, eingefrorener Typ und Dokumentcheckpoint müssen zusammenpassen. Bereits entfernte Mappings dürfen ausschließlich über die gleichwertig abgesicherte Klärfallaktion nachbereinigt werden;
 - Invoice und Client über die vorgesehenen WHMCS-Schnittstellen laden;
 - WHMCS-PDF mit synthetischen Rechnungsdaten erzeugen;
 - sevDesk-PDF über die authentifizierte Addon-Route als Eigentümer mit Benutzerrecht `invoices` streamen und fremde Invoice-/Remote-IDs sowie delegierte Benutzer ohne dieses Recht vor Mapping- und Remote-I/O ablehnen;
@@ -255,7 +264,9 @@ Der getrennte ZUGFeRD-Canary prüft zusätzlich:
 
 Vor dem Rabatt-Canary läuft ein eigener, rabattfreier Rule-11-Invoice-Canary. Die aktuelle `ReceiptGuidance` muss mindestens ein `REVENUE`-Konto mit Rule 11 und 0 % anbieten. Danach werden Create, exakter Readback, `sendBy`, finale PDF und eine absichtlich unterbrochene Recovery geprüft. Ein bloß erstellter Draft reicht nicht: Der frühere Live-Lauf scheiterte erst beim Öffnen mit Code 7100. Der Canary bleibt deshalb aus, bis der vollständige Lifecycle im aktuell verbundenen Mandanten funktioniert.
 
-Erst danach folgt der Rule-11-Rabatt-Canary mit genau einer positiven `Hosting`-Position und genau einem strukturell passenden `PromoHosting`-Rabatt. Er prüft `discountSave`, den vollständigen Rabattmarker, `sumDiscounts`, Positionen, Gesamtsumme, finale PDF und die Recovery nach einem absichtlich unterbrochenen Create. Ein gleicher Betrag mit verändertem Text, anderer Relation oder falschem Marker darf nicht als Treffer gelten.
+Erst danach folgt der Rule-11-Rabatt-Canary mit genau einer positiven `Hosting`-Position und genau einem strukturell passenden `PromoHosting`-Rabatt. Er prüft die negative `InvoicePos`, `discountSave=null`, den vollständigen Capability-Key und Rabattmarker, `sumNet`, `sumTax`, `sumGross`, `sumDiscounts=0`, alle Positionen, finale PDF und die Recovery nach einem absichtlich unterbrochenen Create. Ein gleicher Betrag mit verändertem Text, anderer Relation oder falschem Marker darf nicht als Treffer gelten.
+
+Rule 1 mit 19 %, Rule 17 mit 0 % und Rule 19 mit positivem Zielsteuersatz erhalten jeweils einen getrennten Rabatt-Canary. Jeder Lauf verwendet dieselbe Struktur, prüft aber seine eigene Rule-/Rate-Semantik, den tatsächlich eingesetzten Netto- oder Bruttomodus, den exakten Capability-Key, die positive und negative Position, `discountSave=null`, die drei Dokumentsummen und `sumDiscounts=0`, PDF und read-only Recovery. Soll dieselbe Capability in beiden WHMCS-Steuermodi eingesetzt werden, sind zwei getrennte Canaries nötig. Der Rule-1-Bruttotest muss die bestätigte Centverteilung pinnen: 4,94 Euro Leistung minus 2,47 Euro Rabatt ergeben 2,07 Euro netto, 0,40 Euro Umsatzsteuer und 2,47 Euro brutto. Für dieses synthetische Paar werden genau zwei Remote-Positionen erwartet. Der Rule-19-Lauf muss zusätzlich beweisen, dass Positionen und Rabatt denselben, in der Tax-Entscheidung erlaubten Zielsteuersatz tragen. Ein bestandener Lauf schaltet keine andere Capability frei.
 
 Das vollständige Canary-Protokoll mit Mandant, Zeitpunkt, Testobjekten und Ergebnis bleibt außerhalb von Git. Im Repository wird nur das pseudonymisierte Gate-Ergebnis festgehalten. Token und Kundendaten werden dort nicht abgelegt.
 
@@ -267,6 +278,7 @@ Scheitern Rule 19, Marker oder ID-Eindeutigkeit, sind Hybrid- und gegebenenfalls
 | --- | --- |
 | DE, 19 %, brutto | Rule 1 und Guidance-kompatibles Inlandskonto |
 | DE, 7 %, netto | Rule 1, korrekter Netto-/Steuerbetrag |
+| DE, 0 %, nicht tax-exempt, Kleinunternehmerzeitraum abgelaufen | blockiert vor Voucher-/Invoice-Write |
 | EU B2C, keine Firma/USt-ID, nicht tax-exempt | niemals Rule 3; Rule 1 oder klar blockiert |
 | EU B2B als Organisation mit USt-ID, `taxexempt` und bestätigter innergemeinschaftlicher Warenlieferung | Rule 3 ausschließlich mit Guidance-kompatiblem Konto |
 | EU-Land mit `taxexempt`, aber fehlendem Nachweis | `permanent_failed` mit Review-Fehlercode |
@@ -289,11 +301,16 @@ Scheitern Rule 19, Marker oder ID-Eindeutigkeit, sind Hybrid- und gegebenenfalls
 | exakt verknüpfte Originalrechnung mit Voll- oder Teilguthaben | `subtotal + tax + tax2 = total + credit`; Dokumentbrutto `total + credit`, direkter Zahlteil und positive `tblaccounts` jeweils `total`; gemeinsame Banktransaktion bleibt manuell |
 | gewöhnliches Guthaben ohne `Invoice`-Verknüpfung | nur im bestätigten Voucher-Einzelexport über den vollständigen Dokumentbruttobetrag |
 | unvollständige Sammelzahlung oder anderer Guthabenfall | blockiert, kein Remote-Write |
-| genau ein passender `PromoHosting`-Rabatt, Rule 11/0 %, Canary bestätigt | `invoice_only` mit festem `discountSave`, exaktem Marker- und Summenabgleich |
+| Position vom Typ `LateFee`, auch im Kleinunternehmerzeitraum | `late_fee_tax_treatment_requires_review`, kein Remote-Write |
+| genau ein passender `PromoHosting`-Rabatt, Rule 11/0 %, alle Rule-11-Gates bestätigt | `invoice_only` mit negativer `InvoicePos`, `discountSave=null`, Capability-Key, exaktem Positions-/Summenabgleich und `sumDiscounts=0` |
+| genau ein passender `PromoHosting`-Rabatt, Rule 1/19 %, eigener Canary bestätigt | `invoice_only` mit `promo_discount_rule1_19`-Capability |
+| genau ein passender `PromoHosting`-Rabatt, Rule 17/0 %, eigener Canary bestätigt | `invoice_only` mit `promo_discount_rule17_0`-Capability |
+| genau ein passender `PromoHosting`-Rabatt, Rule 19, positiver einheitlicher Zielsteuersatz und eigener Canary bestätigt | `invoice_only`; Rabattsteuersatz entspricht der bestätigten Zielbesteuerung |
+| `PromoHosting` in E-Rechnung, mit gemischtem Steuersatz oder ohne passenden Canary | blockiert, kein Remote-Write |
 | PromoHosting-Drift nach möglichem Create | `ambiguous`, nur read-only Recovery |
 | ZUGFeRD-Opt-in mit angewendetem Guthaben | blockiert, kein normaler PDF-Fallback |
 | Credit Note/Refund/Storno/AddFunds | manuelle Prüfung oder eigener bestätigter Sonderflow |
-| Nullsumme oder negative Position | manuelle Prüfung |
+| Nullsumme oder nicht ausdrücklich freigegebene negative Position | manuelle Prüfung |
 | mehrere fachliche Steuerfälle | manuelle Prüfung |
 | Fremdwährung ohne freigegebenen Flow | manuelle Prüfung |
 
@@ -546,9 +563,9 @@ Ein Release darf erst freigegeben werden, wenn:
 11. der getrennte ZUGFeRD-Canary Create, Readback, `getXml`, externe EN-16931-Prüfung, stabile PDF-/XML-Hashes, `sendBy`, `sendViaEmail(sendXml=false)` und den Kundendownload bestätigt hat. PHP XMLReader muss in Web und Cron vorhanden sein.
 12. Übergangsinventur, Legacy-Sammeltypisierung, sicheres Unlink, alter Voucher-Requeue und mailfreier Altbestands-Backfill in der Zielumgebung geprüft wurden.
 13. für einen Drop-in-Wechsel die Funktionsmatrix gegen den realen Altbetrieb geprüft und ein Dateirückwechsel sowohl vor als auch nach einem synthetischen Invoice-Mapping geprobt beziehungsweise nach Invoice-Beginn nachweislich blockiert wurde.
-14. bei Verwendung fester Rule-11-Rabatte der separate Canary `discountSave`, vollständigen Rabattmarker, `sumDiscounts`, Positionen, Gesamtsumme, PDF und read-only Recovery bestätigt hat.
+14. bei Verwendung fester `PromoHosting`-Rabatte für jede tatsächlich genutzte Rule-/Rate-Capability der separate Canary die negative `InvoicePos`, `discountSave=null`, Capability-Key, vollständigen Rabattmarker, exakte positive und negative Positionen, `sumNet`, `sumTax`, `sumGross`, `sumDiscounts=0`, PDF und read-only Recovery bestätigt hat. Rule 11 benötigt zusätzlich seinen rabattfreien Invoice-Canary und die aktuelle `REVENUE`-Guidance.
 15. das Positivlisten-Releasearchiv die eigenständige `UPGRADE.md` und die GPL-Lizenz enthält, aber weder Tests, `vendor/` noch lokale Arbeitsdaten. Die Release Notes werden separat am GitHub-Pre-Release veröffentlicht.
 
-`2.1.0-rc.5` darf als klar gekennzeichnete GitHub-Vorabversion veröffentlicht werden, sobald die automatisierten Repository-Checks und der Archivscan grün sind. Das ist keine Produktivfreigabe. Die finale `2.1.0` und jeder Einsatz mit echten Buchhaltungsdaten bleiben bis zu allen oben genannten Zielumgebungs- und Canary-Nachweisen gesperrt.
+`2.1.0-rc.6` darf als klar gekennzeichnete GitHub-Vorabversion veröffentlicht werden, sobald die automatisierten Repository-Checks und der Archivscan grün sind. Das ist keine Produktivfreigabe. Die finale `2.1.0` und jeder Einsatz mit echten Buchhaltungsdaten bleiben bis zu allen oben genannten Zielumgebungs- und Canary-Nachweisen gesperrt.
 
 Offene Punkte in Steuerlogik, Idempotenz oder Mappingmigration blockieren auch eine Vorabversion.

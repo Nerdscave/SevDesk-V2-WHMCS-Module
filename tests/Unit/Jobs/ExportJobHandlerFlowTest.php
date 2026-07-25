@@ -807,11 +807,11 @@ final class ExportJobHandlerFlowTest extends TestCase
                         'invoicenum' => 'RE-10',
                         'currencycode' => 'EUR',
                         'subtotal' => '80.00',
-                        'tax' => '0.00',
+                        'tax' => '15.20',
                         'tax2' => '0.00',
-                        'total' => '80.00',
+                        'total' => '95.20',
                         'credit' => '0.00',
-                        'taxrate' => '0',
+                        'taxrate' => '19',
                         'taxrate2' => '0',
                         'items' => ['item' => [
                             [
@@ -820,7 +820,7 @@ final class ExportJobHandlerFlowTest extends TestCase
                                 'relid' => 42,
                                 'description' => 'Synthetic hosting item',
                                 'amount' => '100.00',
-                                'taxed' => 0,
+                                'taxed' => 1,
                             ],
                             [
                                 'id' => 2,
@@ -828,7 +828,7 @@ final class ExportJobHandlerFlowTest extends TestCase
                                 'relid' => 42,
                                 'description' => 'Synthetic promotion',
                                 'amount' => '-20.00',
-                                'taxed' => 0,
+                                'taxed' => 1,
                             ],
                         ]],
                     ];
@@ -902,7 +902,7 @@ final class ExportJobHandlerFlowTest extends TestCase
         );
 
         self::assertSame('permanent_failed', $outcome->status);
-        self::assertSame('invoice_discount_tax_rule_not_supported', $outcome->errorCode);
+        self::assertSame('invoice_discount_rule1_19_canary_not_confirmed', $outcome->errorCode);
         self::assertSame(0, $contactCheckpointCalls);
         self::assertNotContains('contact_write_requested', $checkpoints);
         self::assertSame([], $history);
@@ -1009,22 +1009,38 @@ final class ExportJobHandlerFlowTest extends TestCase
                 'addressCountry' => ['id' => '1', 'objectName' => 'StaticCountry', 'code' => 'DE'],
                 'customerInternalNote' => InvoiceExporter::documentMarker($expectedInvoice),
                 'sumGross' => '80.00',
-                'sumDiscounts' => '20.00',
+                'sumNet' => '80.00',
+                'sumTax' => '0.00',
+                'sumDiscounts' => '0.00',
             ]]], JSON_THROW_ON_ERROR));
         };
         $remotePositions = static fn (): Response => new Response(200, [], json_encode([
-            'objects' => [[
-                'id' => '901',
-                'objectName' => 'InvoicePos',
-                'invoice' => ['id' => '99', 'objectName' => 'Invoice'],
-                'unity' => ['id' => '8', 'objectName' => 'Unity'],
-                'positionNumber' => '1',
-                'quantity' => '1',
-                'name' => 'Synthetic hosting item',
-                'text' => 'Synthetic hosting item',
-                'price' => '100.00',
-                'taxRate' => '0',
-            ]],
+            'objects' => [
+                [
+                    'id' => '901',
+                    'objectName' => 'InvoicePos',
+                    'invoice' => ['id' => '99', 'objectName' => 'Invoice'],
+                    'unity' => ['id' => '8', 'objectName' => 'Unity'],
+                    'positionNumber' => '1',
+                    'quantity' => '1',
+                    'name' => 'Synthetic hosting item',
+                    'text' => 'Synthetic hosting item',
+                    'price' => '100.00',
+                    'taxRate' => '0',
+                ],
+                [
+                    'id' => '902',
+                    'objectName' => 'InvoicePos',
+                    'invoice' => ['id' => '99', 'objectName' => 'Invoice'],
+                    'unity' => ['id' => '8', 'objectName' => 'Unity'],
+                    'positionNumber' => '2',
+                    'quantity' => '1',
+                    'name' => 'Synthetic promotion',
+                    'text' => 'Synthetic promotion',
+                    'price' => '-20.00',
+                    'taxRate' => '0',
+                ],
+            ],
         ], JSON_THROW_ON_ERROR));
         $history = [];
         $client = $this->client([
@@ -1211,7 +1227,10 @@ final class ExportJobHandlerFlowTest extends TestCase
                 &$checkpointContexts,
             ): bool {
                 $checkpoints[] = $checkpoint;
-                $checkpointContexts[$checkpoint] = $context;
+                $checkpointContexts[$checkpoint] = array_merge(
+                    $checkpointContexts[$checkpoint] ?? [],
+                    $context,
+                );
 
                 return true;
             },
@@ -1239,6 +1258,14 @@ final class ExportJobHandlerFlowTest extends TestCase
             $expectedInvoice->discountFingerprint(),
             $checkpointContexts['invoice_write_requested']['invoiceDiscountFingerprint'] ?? null,
         );
+        self::assertSame(
+            'promo_discount_rule11_0_net_v1',
+            $checkpointContexts['document_type_selected']['invoiceDiscountCapabilityKey'] ?? null,
+        );
+        self::assertSame(
+            'promo_discount_rule11_0_net_v1',
+            $checkpointContexts['invoice_write_requested']['invoiceDiscountCapabilityKey'] ?? null,
+        );
         $payload = json_decode(
             (string) $history[1]['request']->getBody(),
             true,
@@ -1247,7 +1274,9 @@ final class ExportJobHandlerFlowTest extends TestCase
         );
         self::assertSame(11, $payload['invoice']['taxRule']['id'] ?? null);
         self::assertSame(100.0, $payload['invoicePosSave'][0]['price'] ?? null);
-        self::assertSame(20.0, $payload['discountSave'][0]['value'] ?? null);
+        self::assertSame(-20.0, $payload['invoicePosSave'][1]['price'] ?? null);
+        self::assertSame('Synthetic promotion', $payload['invoicePosSave'][1]['text'] ?? null);
+        self::assertNull($payload['discountSave'] ?? null);
         self::assertSame(
             InvoiceExporter::documentMarker($expectedInvoice),
             $payload['invoice']['customerInternalNote'] ?? null,

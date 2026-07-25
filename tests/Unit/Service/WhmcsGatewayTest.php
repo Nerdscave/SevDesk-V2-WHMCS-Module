@@ -107,7 +107,7 @@ final class WhmcsGatewayTest extends TestCase
         );
     }
 
-    public function testInvoiceSnapshotNormalizesMatchedPromoHostingIntoADiscount(): void
+    public function testInvoiceSnapshotSeparatesMatchedPromoHostingForANegativeRemotePosition(): void
     {
         $gateway = new WhmcsGateway(
             new Config(),
@@ -156,6 +156,8 @@ final class WhmcsGatewayTest extends TestCase
 
         self::assertCount(1, $snapshot->lineItems);
         self::assertCount(1, $snapshot->discounts);
+        self::assertSame('-20.00', $snapshot->discounts[0]->negativeAmount());
+        self::assertSame(2, $snapshot->remotePositionCount());
         self::assertSame(8_000, $snapshot->calculatedDocumentGrossMinorUnits());
         self::assertSame(8_000, $snapshot->totalMinorUnits());
     }

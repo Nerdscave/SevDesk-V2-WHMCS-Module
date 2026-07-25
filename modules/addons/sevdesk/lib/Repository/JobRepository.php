@@ -42,6 +42,22 @@ final class JobRepository
         'correction_mapping_persisted',
     ];
 
+    /**
+     * These checkpoints describe only the remote document represented by the
+     * mapping. Contact, booking and delivery side effects cannot be disproved
+     * by a missing Voucher or Invoice and therefore remain manual cases.
+     */
+    private const REMOTE_ABSENCE_RESOLVABLE_EXPORT_CHECKPOINTS = [
+        'voucher_write_requested',
+        'voucher_created',
+        'invoice_write_requested',
+        'invoice_created',
+        'invoice_xml_verified',
+        'mapping_persisted',
+        'invoice_open_write_requested',
+        'invoice_opened',
+    ];
+
     private const DEDUPE_SKIPPED_MESSAGE = 'Die Rechnung ist bereits in einem anderen aktiven Job eingeplant.';
 
     private const UNRESOLVED_HISTORY_SKIPPED_MESSAGE =
@@ -892,12 +908,12 @@ final class JobRepository
     {
         $query = Capsule::table(Migrator::ITEMS_TABLE . ' as item')
             ->leftJoin('tblinvoices as invoice', 'item.invoice_id', '=', 'invoice.id')
-            ->whereIn('item.status', ['permanent_failed', 'ambiguous'])
+            ->whereIn('item.status', ['permanent_failed', 'ambiguous', 'cancelled'])
             ->select(['item.*', 'invoice.invoicenum']);
         if ($jobId !== null && $jobId > 0) {
             $query->where('item.job_id', $jobId);
         }
-        if (in_array($status, ['permanent_failed', 'ambiguous'], true)) {
+        if (in_array($status, ['permanent_failed', 'ambiguous', 'cancelled'], true)) {
             $query->where('item.status', $status);
         }
         $queryText = trim($queryText);
@@ -1042,6 +1058,303 @@ final class JobRepository
         return in_array($checkpoint, self::VERIFIED_SIDE_EFFECT_CHECKPOINTS, true);
     }
 
+    public static function isRemoteAbsenceResolvableExportCheckpoint(string $checkpoint): bool
+    {
+        return in_array($checkpoint, self::REMOTE_ABSENCE_RESOLVABLE_EXPORT_CHECKPOINTS, true);
+    }
+
+    /**
+     * Close terminal export histories together with a mapping whose remote
+     * absence was proven immediately beforehand. No remote request or export is
+     * performed here. Every unresolved risky history must name the same remote
+     * ID and document type; otherwise mapping and histories remain untouched.
+     *
+     * @return null|array{resolvedItems:int,jobIds:list<int>}
+     */
+    public function resolveAbsentRemoteMapping(
+        int $mappingId,
+        int $invoiceId,
+        string $remoteId,
+        ?string $documentType,
+    ): ?array {
+        $remoteId = trim($remoteId);
+        $documentType = trim((string) $documentType);
+        if (
+            $mappingId < 1
+            || $invoiceId < 1
+            || preg_match('/^[1-9]\d*$/', $remoteId) !== 1
+            || !in_array($documentType, [
+                MappingRepository::DOCUMENT_TYPE_VOUCHER,
+                MappingRepository::DOCUMENT_TYPE_INVOICE,
+                '',
+            ], true)
+        ) {
+            return null;
+        }
+
+        $result = Capsule::connection()->transaction(function () use (
+            $mappingId,
+            $invoiceId,
+            $remoteId,
+            $documentType,
+        ): ?array {
+            $mapping = Capsule::table(Migrator::MAPPING_TABLE)
+                ->where('id', $mappingId)
+                ->lockForUpdate()
+                ->first();
+            if (
+                $mapping === null
+                || (int) ($mapping->invoice_id ?? 0) !== $invoiceId
+                || trim((string) ($mapping->sevdesk_id ?? '')) !== $remoteId
+                || trim((string) ($mapping->document_type ?? '')) !== $documentType
+            ) {
+                return null;
+            }
+
+            $accountingActions = [
+                'export_voucher',
+                'export_document',
+                'reconcile_voucher',
+                'book_payment',
+                'correction_voucher',
+            ];
+            $exportActions = ['export_voucher', 'export_document', 'reconcile_voucher'];
+            $items = Capsule::table(Migrator::ITEMS_TABLE)
+                ->where('invoice_id', $invoiceId)
+                ->whereIn('action', $accountingActions)
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->get([
+                    'id',
+                    'job_id',
+                    'action',
+                    'status',
+                    'checkpoint',
+                    'dedupe_key',
+                    'sevdesk_id',
+                    'candidate_json',
+                ]);
+
+            $resolvable = [];
+            $jobIds = [];
+            foreach ($items as $item) {
+                $status = (string) ($item->status ?? '');
+                $action = (string) ($item->action ?? '');
+                $checkpoint = (string) ($item->checkpoint ?? '');
+                if (in_array($status, ['pending', 'running', 'retry_wait'], true)) {
+                    return null;
+                }
+                if (
+                    !in_array($status, ['permanent_failed', 'cancelled', 'ambiguous'], true)
+                    || !self::isRiskyCheckpoint($checkpoint)
+                ) {
+                    if ($status === 'ambiguous') {
+                        return null;
+                    }
+                    continue;
+                }
+                if (
+                    !in_array($action, $exportActions, true)
+                    || !in_array($checkpoint, self::REMOTE_ABSENCE_RESOLVABLE_EXPORT_CHECKPOINTS, true)
+                    || !self::absentRemoteHistoryMatchesMapping($item, $remoteId, $documentType)
+                ) {
+                    return null;
+                }
+
+                $resolvable[] = $item;
+                $jobIds[(int) $item->job_id] = true;
+            }
+
+            $now = $this->now();
+            foreach ($resolvable as $item) {
+                $updated = Capsule::table(Migrator::ITEMS_TABLE)
+                    ->where('id', (int) $item->id)
+                    ->where('status', (string) $item->status)
+                    ->where('checkpoint', (string) $item->checkpoint)
+                    ->where('sevdesk_id', $remoteId)
+                    ->update([
+                        'status' => 'skipped',
+                        'checkpoint' => 'remote_absence_confirmed',
+                        'dedupe_key' => null,
+                        'lease_token' => null,
+                        'leased_until' => null,
+                        'error_code' => 'remote_document_absence_confirmed',
+                        'message' => 'Voucher und Invoice fehlen unter der gespeicherten ID; '
+                            . 'der frühere Exportcheckpoint wurde nach Adminprüfung lokal abgeschlossen.',
+                        'finished_at' => $now,
+                        'updated_at' => $now,
+                    ]);
+                if ($updated !== 1) {
+                    throw new \RuntimeException(
+                        'The export history changed during remote-absence resolution.',
+                    );
+                }
+            }
+
+            $delete = Capsule::table(Migrator::MAPPING_TABLE)
+                ->where('id', $mappingId)
+                ->where('invoice_id', $invoiceId)
+                ->where('sevdesk_id', $remoteId);
+            if ($documentType === '') {
+                $delete->where(static function ($query): void {
+                    $query->whereNull('document_type')->orWhereRaw("TRIM(document_type) = ''");
+                });
+            } else {
+                $delete->where('document_type', $documentType);
+            }
+            if ($delete->delete() !== 1) {
+                throw new \RuntimeException(
+                    'The mapping changed during remote-absence resolution.',
+                );
+            }
+
+            return [
+                'resolvedItems' => count($resolvable),
+                'jobIds' => array_values(array_map('intval', array_keys($jobIds))),
+            ];
+        });
+        if ($result === null) {
+            return null;
+        }
+        foreach ($result['jobIds'] as $jobId) {
+            $this->refreshJob($jobId);
+        }
+
+        return $result;
+    }
+
+    /**
+     * Return the immutable identity that may be checked remotely for a terminal
+     * history whose mapping was already removed by an earlier absence check.
+     *
+     * @return null|array{itemId:int,invoiceId:int,remoteId:string,documentType:string}
+     */
+    public function absentRemoteHistoryCandidate(int $itemId): ?array
+    {
+        $item = Capsule::table(Migrator::ITEMS_TABLE)->where('id', $itemId)->first();
+        $identity = self::absentRemoteHistoryIdentity($item);
+        if ($identity === null) {
+            return null;
+        }
+        if (
+            Capsule::table(Migrator::MAPPING_TABLE)
+                ->where('invoice_id', $identity['invoiceId'])
+                ->exists()
+        ) {
+            return null;
+        }
+
+        $items = $this->accountingItemsForInvoice($identity['invoiceId']);
+        if (
+            self::collectResolvableAbsentRemoteHistories(
+                $items,
+                $identity['remoteId'],
+                $identity['documentType'],
+                $itemId,
+            ) === null
+        ) {
+            return null;
+        }
+
+        return $identity;
+    }
+
+    /**
+     * Complete only the already-unmapped histories whose exact remote identity
+     * was rechecked immediately beforehand. This never creates a job or calls a
+     * sevdesk write endpoint.
+     *
+     * @return null|array{resolvedItems:int,jobIds:list<int>}
+     */
+    public function resolveAbsentRemoteHistory(
+        int $itemId,
+        int $invoiceId,
+        string $remoteId,
+        string $documentType,
+    ): ?array {
+        $remoteId = trim($remoteId);
+        $documentType = trim($documentType);
+        if (
+            $itemId < 1
+            || $invoiceId < 1
+            || preg_match('/^[1-9]\d*$/', $remoteId) !== 1
+            || !in_array($documentType, [
+                MappingRepository::DOCUMENT_TYPE_VOUCHER,
+                MappingRepository::DOCUMENT_TYPE_INVOICE,
+            ], true)
+        ) {
+            return null;
+        }
+
+        $result = Capsule::connection()->transaction(function () use (
+            $itemId,
+            $invoiceId,
+            $remoteId,
+            $documentType,
+        ): ?array {
+            if (
+                Capsule::table(Migrator::MAPPING_TABLE)
+                    ->where('invoice_id', $invoiceId)
+                    ->lockForUpdate()
+                    ->first() !== null
+            ) {
+                return null;
+            }
+
+            $items = $this->accountingItemsForInvoice($invoiceId, true);
+            $resolvable = self::collectResolvableAbsentRemoteHistories(
+                $items,
+                $remoteId,
+                $documentType,
+                $itemId,
+            );
+            if ($resolvable === null) {
+                return null;
+            }
+
+            $now = $this->now();
+            $jobIds = [];
+            foreach ($resolvable as $item) {
+                $updated = Capsule::table(Migrator::ITEMS_TABLE)
+                    ->where('id', (int) $item->id)
+                    ->where('status', (string) $item->status)
+                    ->where('checkpoint', (string) $item->checkpoint)
+                    ->where('sevdesk_id', $remoteId)
+                    ->update([
+                        'status' => 'skipped',
+                        'checkpoint' => 'remote_absence_confirmed',
+                        'dedupe_key' => null,
+                        'lease_token' => null,
+                        'leased_until' => null,
+                        'error_code' => 'remote_document_absence_confirmed',
+                        'message' => 'Voucher und Invoice fehlen unter der gespeicherten ID; '
+                            . 'der frühere Exportcheckpoint wurde nach Adminprüfung lokal abgeschlossen.',
+                        'finished_at' => $now,
+                        'updated_at' => $now,
+                    ]);
+                if ($updated !== 1) {
+                    throw new \RuntimeException(
+                        'The export history changed during remote-absence resolution.',
+                    );
+                }
+                $jobIds[(int) $item->job_id] = true;
+            }
+
+            return [
+                'resolvedItems' => count($resolvable),
+                'jobIds' => array_values(array_map('intval', array_keys($jobIds))),
+            ];
+        });
+        if ($result === null) {
+            return null;
+        }
+        foreach ($result['jobIds'] as $jobId) {
+            $this->refreshJob($jobId);
+        }
+
+        return $result;
+    }
+
     private function lockUnresolvedRiskyExportHistory(int $invoiceId): ?object
     {
         return Capsule::table(Migrator::ITEMS_TABLE)
@@ -1051,6 +1364,159 @@ final class JobRepository
             ->whereIn('checkpoint', self::riskyCheckpoints())
             ->lockForUpdate()
             ->first(['id']);
+    }
+
+    private static function absentRemoteHistoryMatchesMapping(
+        object $item,
+        string $remoteId,
+        string $documentType,
+    ): bool {
+        if (
+            $documentType === ''
+            || trim((string) ($item->sevdesk_id ?? '')) !== $remoteId
+        ) {
+            return false;
+        }
+
+        $action = (string) ($item->action ?? '');
+        if (in_array($action, ['export_voucher', 'reconcile_voucher'], true)) {
+            return $documentType === MappingRepository::DOCUMENT_TYPE_VOUCHER;
+        }
+        if ($action !== 'export_document') {
+            return false;
+        }
+
+        $candidate = self::decodeCandidate($item->candidate_json ?? null);
+
+        return trim((string) ($candidate['targetDocumentType'] ?? '')) === $documentType;
+    }
+
+    /**
+     * @return list<object>
+     */
+    private function accountingItemsForInvoice(int $invoiceId, bool $lock = false): array
+    {
+        $query = Capsule::table(Migrator::ITEMS_TABLE)
+            ->where('invoice_id', $invoiceId)
+            ->whereIn('action', [
+                'export_voucher',
+                'export_document',
+                'reconcile_voucher',
+                'book_payment',
+                'correction_voucher',
+            ])
+            ->orderBy('id');
+        if ($lock) {
+            $query->lockForUpdate();
+        }
+
+        return $query->get([
+            'id',
+            'job_id',
+            'invoice_id',
+            'action',
+            'status',
+            'checkpoint',
+            'dedupe_key',
+            'sevdesk_id',
+            'candidate_json',
+        ])->all();
+    }
+
+    /**
+     * @return null|array{itemId:int,invoiceId:int,remoteId:string,documentType:string}
+     */
+    private static function absentRemoteHistoryIdentity(?object $item): ?array
+    {
+        if (
+            $item === null
+            || !in_array((string) ($item->status ?? ''), [
+                'permanent_failed',
+                'cancelled',
+                'ambiguous',
+            ], true)
+            || !self::isRemoteAbsenceResolvableExportCheckpoint(
+                (string) ($item->checkpoint ?? ''),
+            )
+        ) {
+            return null;
+        }
+        $itemId = (int) ($item->id ?? 0);
+        $invoiceId = (int) ($item->invoice_id ?? 0);
+        $remoteId = trim((string) ($item->sevdesk_id ?? ''));
+        $action = (string) ($item->action ?? '');
+        if (
+            $itemId < 1
+            || $invoiceId < 1
+            || preg_match('/^[1-9]\d*$/', $remoteId) !== 1
+            || !in_array($action, ['export_voucher', 'export_document', 'reconcile_voucher'], true)
+        ) {
+            return null;
+        }
+
+        if (in_array($action, ['export_voucher', 'reconcile_voucher'], true)) {
+            $documentType = MappingRepository::DOCUMENT_TYPE_VOUCHER;
+        } else {
+            $candidate = self::decodeCandidate($item->candidate_json ?? null);
+            $documentType = trim((string) ($candidate['targetDocumentType'] ?? ''));
+        }
+        if (
+            !in_array($documentType, [
+                MappingRepository::DOCUMENT_TYPE_VOUCHER,
+                MappingRepository::DOCUMENT_TYPE_INVOICE,
+            ], true)
+        ) {
+            return null;
+        }
+
+        return [
+            'itemId' => $itemId,
+            'invoiceId' => $invoiceId,
+            'remoteId' => $remoteId,
+            'documentType' => $documentType,
+        ];
+    }
+
+    /**
+     * @param iterable<object> $items
+     * @return null|list<object>
+     */
+    private static function collectResolvableAbsentRemoteHistories(
+        iterable $items,
+        string $remoteId,
+        string $documentType,
+        int $requiredItemId,
+    ): ?array {
+        $resolvable = [];
+        $requiredFound = false;
+        foreach ($items as $item) {
+            $status = (string) ($item->status ?? '');
+            if (in_array($status, ['pending', 'running', 'retry_wait'], true)) {
+                return null;
+            }
+            if (
+                !in_array($status, ['permanent_failed', 'cancelled', 'ambiguous'], true)
+                || !self::isRiskyCheckpoint((string) ($item->checkpoint ?? ''))
+            ) {
+                if ($status === 'ambiguous') {
+                    return null;
+                }
+                continue;
+            }
+
+            $identity = self::absentRemoteHistoryIdentity($item);
+            if (
+                $identity === null
+                || $identity['remoteId'] !== $remoteId
+                || $identity['documentType'] !== $documentType
+            ) {
+                return null;
+            }
+            $resolvable[] = $item;
+            $requiredFound = $requiredFound || $identity['itemId'] === $requiredItemId;
+        }
+
+        return $requiredFound ? $resolvable : null;
     }
 
     /**

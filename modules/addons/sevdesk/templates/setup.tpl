@@ -139,6 +139,27 @@
                         </label>
                         <small class="help-block">Die Rabattfreigabe setzt den allgemeinen Rule-11-Invoice-Canary zusätzlich voraus. Sie gilt nur für eindeutig zugeordnete Hosting-Rabatte aus dem Kleinunternehmerzeitraum. Andere negative Positionen bleiben gesperrt.</small>
                     </div>
+                    <div class="checkbox">
+                        <label for="invoice-discount-rule1-canary-confirmed">
+                            <input type="checkbox" id="invoice-discount-rule1-canary-confirmed" name="invoice_discount_rule1_19_canary_confirmed" value="on"{if $settings.invoice_discount_rule1_19_canary_confirmed !== ''} checked{/if}>
+                            Der separate Canary für einen festen <code>PromoHosting</code>-Rabatt mit Rule 1 und 19&nbsp;% wurde bestanden.
+                        </label>
+                    </div>
+                    <div class="checkbox">
+                        <label for="invoice-discount-rule17-canary-confirmed">
+                            <input type="checkbox" id="invoice-discount-rule17-canary-confirmed" name="invoice_discount_rule17_0_canary_confirmed" value="on"{if $settings.invoice_discount_rule17_0_canary_confirmed !== ''} checked{/if}>
+                            Der separate Canary für einen festen <code>PromoHosting</code>-Rabatt mit Rule 17 und 0&nbsp;% wurde bestanden.
+                        </label>
+                    </div>
+                    <div class="checkbox">
+                        <label for="invoice-discount-rule19-canary-confirmed">
+                            <input type="checkbox" id="invoice-discount-rule19-canary-confirmed" name="invoice_discount_rule19_canary_confirmed" value="on"{if $settings.invoice_discount_rule19_canary_confirmed !== ''} checked{/if}>
+                            Der separate Canary für einen festen <code>PromoHosting</code>-Rabatt mit Rule 19 und Zielsteuersatz wurde bestanden.
+                        </label>
+                        <label for="invoice-discount-rule19-canary-rate">Im Canary geprüfter Zielsteuersatz</label>
+                        <input class="form-control" type="number" min="0.01" max="100" step="0.01" id="invoice-discount-rule19-canary-rate" name="invoice_discount_rule19_canary_rate" value="{$settings.invoice_discount_rule19_canary_rate|escape}">
+                        <small class="help-block">Die drei neuen Freigaben werden an Steuerprofil, Länderklasse, Steuersatz und den aktuell verwendeten WHMCS-Netto-/Bruttomodus gebunden. Ändert sich einer dieser Werte, bleibt der Export bis zu einem neuen Canary gesperrt. ZUGFeRD mit Rabatt bleibt gesperrt.</small>
+                    </div>
                 </div>
             </div>
 

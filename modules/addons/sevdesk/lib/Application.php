@@ -20,6 +20,7 @@ use WHMCS\Module\Addon\SevDesk\Service\BookingService;
 use WHMCS\Module\Addon\SevDesk\Service\CorrectionService;
 use WHMCS\Module\Addon\SevDesk\Service\DocumentTargetResolver;
 use WHMCS\Module\Addon\SevDesk\Service\EInvoiceEligibilityService;
+use WHMCS\Module\Addon\SevDesk\Service\InvoiceDiscountCapabilityPolicy;
 use WHMCS\Module\Addon\SevDesk\Service\InvoiceExporter;
 use WHMCS\Module\Addon\SevDesk\Service\InvoicePdf;
 use WHMCS\Module\Addon\SevDesk\Service\InvoiceReconciliationService;
@@ -114,7 +115,7 @@ final class Application
             new Client(),
             $token,
             'https://my.sevdesk.de/api/v1',
-            'WHMCS-sevdesk/2.1.0-rc.5',
+            'WHMCS-sevdesk/2.1.0-rc.6',
         );
     }
 
@@ -185,6 +186,27 @@ final class Application
             fn (string $sevUserId, string $unityId): bool =>
                 $this->referenceData()->hasSevUser($sevUserId)
                 && $this->referenceData()->hasUnity($unityId),
+            $this->invoiceDiscountPolicy(),
+        );
+    }
+
+    public function invoiceDiscountPolicy(): InvoiceDiscountCapabilityPolicy
+    {
+        return new InvoiceDiscountCapabilityPolicy(
+            ruleElevenZeroConfirmed: $this->config->bool('invoice_discount_canary_confirmed')
+                && $this->config->bool('small_business_invoice_canary_confirmed'),
+            ruleOneNineteenCapabilityKey: (string) $this->config->get(
+                'invoice_discount_rule1_19_canary_confirmed',
+                '',
+            ),
+            ruleSeventeenZeroCapabilityKey: (string) $this->config->get(
+                'invoice_discount_rule17_0_canary_confirmed',
+                '',
+            ),
+            ruleNineteenDestinationCapabilityKey: (string) $this->config->get(
+                'invoice_discount_rule19_canary_confirmed',
+                '',
+            ),
         );
     }
 
@@ -473,6 +495,7 @@ final class Application
             fn (): DocumentTargetResolver => $this->documentTargetResolver(),
             $this->eInvoiceEligibility(),
             $this->paymentStructure(),
+            $this->invoiceDiscountPolicy(),
         );
     }
 

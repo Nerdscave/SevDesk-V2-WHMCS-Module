@@ -47,22 +47,4 @@ final class InvoiceItemNormalization
     {
         return new self(false, $code, $message, [], [], null);
     }
-
-    /**
-     * @return list<array{
-     *     discount: true,
-     *     text: string,
-     *     percentage: false,
-     *     value: float,
-     *     objectName: 'Discounts',
-     *     mapAll: true
-     * }>
-     */
-    public function discountSavePayload(): array
-    {
-        return array_map(
-            static fn (InvoiceDiscount $discount): array => $discount->toSevdeskPayload(),
-            $this->discounts,
-        );
-    }
 }

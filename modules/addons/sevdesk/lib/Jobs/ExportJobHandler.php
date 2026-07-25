@@ -24,7 +24,9 @@ use WHMCS\Module\Addon\SevDesk\Repository\MappingRepository;
 use WHMCS\Module\Addon\SevDesk\Service\ContactService;
 use WHMCS\Module\Addon\SevDesk\Service\DocumentTargetResolver;
 use WHMCS\Module\Addon\SevDesk\Service\EInvoiceEligibilityService;
+use WHMCS\Module\Addon\SevDesk\Service\InvoiceDiscountCapabilityPolicy;
 use WHMCS\Module\Addon\SevDesk\Service\InvoiceExporter;
+use WHMCS\Module\Addon\SevDesk\Service\InvoiceItemExportPolicy;
 use WHMCS\Module\Addon\SevDesk\Service\InvoicePdf;
 use WHMCS\Module\Addon\SevDesk\Service\InvoiceReconciliationService;
 use WHMCS\Module\Addon\SevDesk\Service\PdfRenderer;
@@ -43,6 +45,8 @@ final class ExportJobHandler
 
     /** @var Closure(): DocumentTargetResolver */
     private readonly Closure $targetResolver;
+
+    private readonly InvoiceDiscountCapabilityPolicy $discountPolicy;
 
     /**
      * The first nine arguments intentionally keep the 2.0 Voucher constructor
@@ -68,6 +72,7 @@ final class ExportJobHandler
         ?callable $targetResolver = null,
         private readonly ?EInvoiceEligibilityService $eInvoiceEligibility = null,
         private readonly ?WhmcsPaymentStructureService $paymentStructure = null,
+        ?InvoiceDiscountCapabilityPolicy $discountPolicy = null,
     ) {
         $this->taxPolicy = Closure::fromCallable($taxPolicy);
         $this->targetResolver = Closure::fromCallable($targetResolver ?? static fn (): DocumentTargetResolver =>
@@ -76,6 +81,22 @@ final class ExportJobHandler
                 (string) $config->get('document_authority', DocumentTargetResolver::AUTHORITY_WHMCS),
                 (string) $config->get('oss_profile', DocumentTargetResolver::OSS_BLOCKED),
             ));
+        $this->discountPolicy = $discountPolicy ?? new InvoiceDiscountCapabilityPolicy(
+            ruleElevenZeroConfirmed: $config->bool('invoice_discount_canary_confirmed')
+                && $config->bool('small_business_invoice_canary_confirmed'),
+            ruleOneNineteenCapabilityKey: (string) $config->get(
+                'invoice_discount_rule1_19_canary_confirmed',
+                '',
+            ),
+            ruleSeventeenZeroCapabilityKey: (string) $config->get(
+                'invoice_discount_rule17_0_canary_confirmed',
+                '',
+            ),
+            ruleNineteenDestinationCapabilityKey: (string) $config->get(
+                'invoice_discount_rule19_canary_confirmed',
+                '',
+            ),
+        );
     }
 
     /** @param callable(string, array<string, scalar|null>): bool $checkpoint */
@@ -238,6 +259,13 @@ final class ExportJobHandler
             $ordinaryVoucherCreditConfirmed = false;
             $fullGrossVoucherConfirmation = $this->creditTreatmentConfirmed($candidate, $item);
             $rawItemTypes = self::rawInvoiceItemTypes($rawInvoice);
+            if (InvoiceItemExportPolicy::containsLateFee($rawItemTypes)) {
+                return $this->runtimePreflightFailure(
+                    $item,
+                    InvoiceItemExportPolicy::LATE_FEE_MESSAGE,
+                    InvoiceItemExportPolicy::LATE_FEE_REQUIRES_REVIEW,
+                );
+            }
             $hookParentPresent = array_key_exists('massPaymentContainerInvoiceId', $candidate);
             $hookParentValue = $candidate['massPaymentContainerInvoiceId'] ?? null;
             $hookParentValid = !$hookParentPresent
@@ -474,13 +502,6 @@ final class ExportJobHandler
                 // before Receipt Guidance, contact lookups, PDF rendering or any
                 // remote accounting write.
                 if ($invoice->discounts !== []) {
-                    if (!$this->config->bool('invoice_discount_canary_confirmed')) {
-                        return $this->discountPreflightFailure(
-                            $item,
-                            'Der separate sevdesk-Canary für feste Invoice-Rabatte ist noch nicht bestätigt.',
-                            'invoice_discount_canary_not_confirmed',
-                        );
-                    }
                     if (
                         $invoice->appliedCreditMinorUnits() > 0
                         && !$massPaymentCreditConfirmed
@@ -656,6 +677,7 @@ final class ExportJobHandler
                 $target,
                 $candidate,
                 $item,
+                $persistCheckpoint,
             );
             if ($discountPreflight !== null) {
                 return $discountPreflight;
@@ -3257,98 +3279,99 @@ final class ExportJobHandler
         DocumentTargetDecision $target,
         array $candidate,
         object $item,
+        Closure $persistCheckpoint,
     ): ?JobOutcome {
         if ($invoice->discounts === []) {
             return null;
         }
-        if (
-            $target->documentType !== DocumentTargetDecision::DOCUMENT_INVOICE
-            || count($invoice->discounts) !== 1
-        ) {
-            return $this->discountPreflightFailure(
-                $item,
-                'Der bestätigte Rabattpfad unterstützt genau einen strukturellen PromoHosting-Rabatt '
-                    . 'auf einer sevdesk-Invoice.',
-                'invoice_discount_structure_not_supported',
-            );
-        }
-        if ($tax->taxRuleId !== '11') {
-            return $this->discountPreflightFailure(
-                $item,
-                'Feste PromoHosting-Rabatte sind ausschließlich für bestätigte '
-                    . 'Kleinunternehmer-Rechnungen mit Rule 11 freigegeben.',
-                'invoice_discount_tax_rule_not_supported',
-            );
-        }
-        foreach ($invoice->lineItems as $lineItem) {
-            if (Decimal::toMinorUnits($lineItem->taxRate) !== 0) {
-                return $this->discountPreflightFailure(
-                    $item,
-                    'Der bestätigte PromoHosting-Rabattpfad setzt durchgehend 0 % Steuer voraus.',
-                    'invoice_discount_tax_rate_not_supported',
-                );
-            }
-        }
-        if (Decimal::toMinorUnits($invoice->discounts[0]->taxRate) !== 0) {
-            return $this->discountPreflightFailure(
-                $item,
-                'Der bestätigte PromoHosting-Rabattpfad setzt durchgehend 0 % Steuer voraus.',
-                'invoice_discount_tax_rate_not_supported',
-            );
-        }
-
-        if (self::truthy($candidate['targetIsEInvoice'] ?? false)) {
-            return $this->discountPreflightFailure(
-                $item,
-                'Eine native E-Rechnung mit WHMCS-Rabatt ist in diesem Release nicht freigegeben.',
-                'e_invoice_discount_not_supported',
-            );
-        }
-        if (
-            array_key_exists('targetIsEInvoice', $candidate)
-            || self::truthy($candidate['historicalBackfill'] ?? false)
-        ) {
-            return null;
-        }
-
-        $requestedMode = trim((string) ($candidate['targetEInvoiceMode']
-            ?? $candidate['requestedEInvoiceMode']
-            ?? EInvoiceEligibilityService::MODE_OFF));
-        if ($requestedMode === EInvoiceEligibilityService::MODE_OFF) {
-            return null;
-        }
-        if ($requestedMode !== EInvoiceEligibilityService::MODE_ZUGFERD_DOMESTIC_B2B) {
-            return $this->discountPreflightFailure(
-                $item,
-                'Das eingefrorene E-Rechnungsprofil ist ungültig.',
-                'e_invoice_context_invalid',
-            );
-        }
-
-        $activeFrom = DateTimeImmutable::createFromFormat(
-            '!Y-m-d',
-            trim((string) ($candidate['requestedEInvoiceActiveFrom'] ?? '')),
+        $eInvoiceSelection = EInvoiceEligibilityService::selectionIntent(
+            $this->config,
+            $this->whmcs,
+            $invoice,
+            $tax,
+            $target,
+            $candidate,
         );
-        $dateErrors = DateTimeImmutable::getLastErrors();
-        if (
-            !$activeFrom instanceof DateTimeImmutable
-            || ($dateErrors !== false && ($dateErrors['warning_count'] > 0 || $dateErrors['error_count'] > 0))
-        ) {
+        if ($eInvoiceSelection->isFailure()) {
             return $this->discountPreflightFailure(
                 $item,
-                'Das eingefrorene Aktivierungsdatum für E-Rechnungen ist ungültig.',
-                'e_invoice_context_invalid',
+                $eInvoiceSelection->errorMessage() ?? 'Die E-Rechnungsentscheidung ist fehlgeschlagen.',
+                $eInvoiceSelection->errorCode() ?? 'e_invoice_selection_failed',
+            );
+        }
+        $capability = $this->discountPolicy->evaluate(
+            $invoice,
+            $tax,
+            $target,
+            $eInvoiceSelection->valueOrNull() === true,
+        );
+        if (!$capability['allowed']) {
+            return $this->discountPreflightFailure(
+                $item,
+                $capability['message'],
+                $capability['code'],
             );
         }
         if (
-            $invoice->invoiceDate >= $activeFrom
-            && $this->whmcs->eInvoiceOptedIn($invoice->clientId)
+            $invoice->expectedNetMinorUnits() === null
+            || $invoice->expectedTaxMinorUnits() === null
         ) {
             return $this->discountPreflightFailure(
                 $item,
-                'Der Kunde ist für eine native E-Rechnung ausgewählt; Rechnungen mit '
-                    . 'WHMCS-Rabatt werden dafür nicht still auf eine normale PDF-Invoice zurückgestuft.',
-                'e_invoice_discount_not_supported',
+                'Für den Rabatt fehlen die unveränderlichen WHMCS-Netto- und Steuersummen.',
+                'invoice_discount_tax_totals_unavailable',
+            );
+        }
+
+        $capabilityKey = $capability['capabilityKey'];
+        if (!is_string($capabilityKey) || $capabilityKey === '') {
+            return $this->discountPreflightFailure(
+                $item,
+                'Die bestätigte Rabatt-Capability besitzt keinen unveränderlichen Schlüssel.',
+                'invoice_discount_capability_invalid',
+            );
+        }
+        $storedCapability = $candidate['invoiceDiscountCapabilityKey'] ?? null;
+        $checkpoint = (string) ($item->checkpoint ?? '');
+        $riskyCheckpoint = JobRepository::isRiskyCheckpoint($checkpoint);
+        if (is_string($storedCapability) && $storedCapability !== '') {
+            if (!hash_equals($storedCapability, $capabilityKey)) {
+                return $riskyCheckpoint
+                    ? JobOutcome::ambiguous(
+                        'Die Rabatt-Capability unterscheidet sich nach einem möglichen Invoice-Write '
+                            . 'vom eingefrorenen Zustand.',
+                        $checkpoint,
+                        isset($item->sevdesk_id) ? (string) $item->sevdesk_id : null,
+                        errorCode: 'invoice_discount_capability_changed_after_write',
+                    )
+                    : JobOutcome::permanentFailure(
+                        'Die Rabatt-Capability unterscheidet sich vom gespeicherten Exportkontext.',
+                        errorCode: 'invoice_discount_capability_changed',
+                    );
+            }
+
+            return null;
+        }
+        if ($riskyCheckpoint) {
+            // Rule-11 jobs from the previous RC did not persist a capability
+            // key. The separate representation fingerprint below still rejects
+            // the former global-discount contract before any recovery write.
+            if ($tax->taxRuleId === '11') {
+                return null;
+            }
+
+            return JobOutcome::ambiguous(
+                'Nach einem möglichen Invoice-Write fehlt die eingefrorene Rabatt-Capability.',
+                $checkpoint,
+                isset($item->sevdesk_id) ? (string) $item->sevdesk_id : null,
+                errorCode: 'invoice_discount_capability_missing_after_write',
+            );
+        }
+        $checkpointName = $checkpoint !== '' ? $checkpoint : 'document_type_selected';
+        if (!$persistCheckpoint($checkpointName, ['invoiceDiscountCapabilityKey' => $capabilityKey])) {
+            return JobOutcome::permanentFailure(
+                'Die Rabatt-Capability konnte vor dem Invoice-Write nicht eingefroren werden.',
+                errorCode: 'invoice_discount_capability_persist_failed',
             );
         }
 

@@ -311,6 +311,13 @@ final class WhmcsGateway
             (string) ($invoice['credit'] ?? '0'),
             $lineItems,
             $discounts,
+            (string) ($invoice['subtotal'] ?? '0'),
+            Decimal::fromMinorUnits(
+                self::addMinorUnits(
+                    Decimal::toMinorUnits((string) ($invoice['tax'] ?? '0')),
+                    Decimal::toMinorUnits((string) ($invoice['tax2'] ?? '0')),
+                ),
+            ),
         );
     }
 

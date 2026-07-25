@@ -82,7 +82,7 @@ final class AdminInvoiceQuickExportContractTest extends TestCase
 
         $dryRun = $this->methodSource(
             $controller,
-            'private function decorateDryRun(array $rows): array',
+            'private function decorateDryRun(array $rows, bool $historicalBackfill = false): array',
             'private function dryRunTaxReason(',
         );
         self::assertStringContainsString('$activeExportOwners', $dryRun);

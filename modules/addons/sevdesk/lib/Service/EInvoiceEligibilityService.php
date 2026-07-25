@@ -51,53 +51,11 @@ final class EInvoiceEligibilityService
             );
         }
 
-        $requestedMode = trim((string) ($candidate['requestedEInvoiceMode'] ?? self::MODE_OFF));
-        if ($requestedMode === self::MODE_OFF || self::truthy($candidate['historicalBackfill'] ?? false)) {
-            return Result::success(null);
+        $selection = self::selectionIntent($this->config, $this->whmcs, $invoice, $tax, $target, $candidate);
+        if ($selection->isFailure()) {
+            return $selection;
         }
-        if ($requestedMode !== self::MODE_ZUGFERD_DOMESTIC_B2B) {
-            return Result::failure(
-                'e_invoice_context_invalid',
-                'The requested E-Invoice profile is invalid.',
-            );
-        }
-        if ($tax->taxRuleId === '19' && $target->taxRuleId === '19') {
-            // OSS Rule 19 deliberately remains a normal Invoice even when the
-            // customer has opted into the separate domestic ZUGFeRD profile.
-            return Result::success(null);
-        }
-
-        $activeFrom = DateTimeImmutable::createFromFormat(
-            '!Y-m-d',
-            trim((string) ($candidate['requestedEInvoiceActiveFrom'] ?? '')),
-        );
-        $dateErrors = DateTimeImmutable::getLastErrors();
-        if (
-            !$activeFrom instanceof DateTimeImmutable
-            || ($dateErrors !== false && ($dateErrors['warning_count'] > 0 || $dateErrors['error_count'] > 0))
-        ) {
-            return Result::failure(
-                'e_invoice_context_invalid',
-                'The requested E-Invoice activation date is invalid.',
-            );
-        }
-        if ($invoice->invoiceDate < $activeFrom) {
-            return Result::success(null);
-        }
-
-        $requestedFieldId = (int) ($candidate['requestedEInvoiceClientFieldId'] ?? 0);
-        $configuredFieldId = $this->config->int('e_invoice_client_field_id');
-        if (
-            $requestedFieldId < 1
-            || $requestedFieldId !== $configuredFieldId
-            || !$this->whmcs->isEInvoiceOptInField($requestedFieldId)
-        ) {
-            return Result::failure(
-                'e_invoice_opt_in_field_invalid',
-                'The frozen E-Invoice opt-in field is no longer a valid admin-only client tickbox.',
-            );
-        }
-        if (!$this->whmcs->eInvoiceOptedIn($invoice->clientId)) {
+        if ($selection->valueOrNull() !== true) {
             return Result::success(null);
         }
 
@@ -221,6 +179,74 @@ final class EInvoiceEligibilityService
                 'The explicitly selected E-Invoice recipient data exceeds the supported native sevdesk contract.',
             );
         }
+    }
+
+    /**
+     * Resolve the WHMCS-side E-Invoice selection before contact or document
+     * writes. Worker and admin dry-run use this exact same decision.
+     *
+     * @param array<string,mixed> $candidate
+     * @return Result Success contains bool.
+     */
+    public static function selectionIntent(
+        Config $config,
+        WhmcsGateway $whmcs,
+        InvoiceSnapshot $invoice,
+        TaxDecision $tax,
+        DocumentTargetDecision $target,
+        array $candidate,
+    ): Result {
+        if (array_key_exists('targetIsEInvoice', $candidate)) {
+            return Result::success(self::truthy($candidate['targetIsEInvoice']));
+        }
+
+        $requestedMode = self::truthy($candidate['historicalBackfill'] ?? false)
+            ? self::MODE_OFF
+            : trim((string) ($candidate['requestedEInvoiceMode'] ?? self::MODE_OFF));
+        if ($requestedMode === self::MODE_OFF) {
+            return Result::success(false);
+        }
+        if ($requestedMode !== self::MODE_ZUGFERD_DOMESTIC_B2B) {
+            return Result::failure(
+                'e_invoice_context_invalid',
+                'The requested E-Invoice profile is invalid.',
+            );
+        }
+        if ($tax->taxRuleId === '19' && $target->taxRuleId === '19') {
+            return Result::success(false);
+        }
+
+        $activeFrom = DateTimeImmutable::createFromFormat(
+            '!Y-m-d',
+            trim((string) ($candidate['requestedEInvoiceActiveFrom'] ?? '')),
+        );
+        $dateErrors = DateTimeImmutable::getLastErrors();
+        if (
+            !$activeFrom instanceof DateTimeImmutable
+            || ($dateErrors !== false && ($dateErrors['warning_count'] > 0 || $dateErrors['error_count'] > 0))
+        ) {
+            return Result::failure(
+                'e_invoice_context_invalid',
+                'The requested E-Invoice activation date is invalid.',
+            );
+        }
+        if ($invoice->invoiceDate < $activeFrom) {
+            return Result::success(false);
+        }
+
+        $requestedFieldId = (int) ($candidate['requestedEInvoiceClientFieldId'] ?? 0);
+        if (
+            $requestedFieldId < 1
+            || $requestedFieldId !== $config->int('e_invoice_client_field_id')
+            || !$whmcs->isEInvoiceOptInField($requestedFieldId)
+        ) {
+            return Result::failure(
+                'e_invoice_opt_in_field_invalid',
+                'The frozen E-Invoice opt-in field is no longer a valid admin-only client tickbox.',
+            );
+        }
+
+        return Result::success($whmcs->eInvoiceOptedIn($invoice->clientId));
     }
 
     /** @param array<string,mixed> $candidate */
