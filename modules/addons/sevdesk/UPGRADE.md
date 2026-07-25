@@ -1,6 +1,6 @@
 # Sicherer Ersatz eines bestehenden WHMCS-sevDesk-Moduls
 
-Diese Anleitung gehört zu `2.1.0-rc.6`. Der RC ist eine Vorabversion für Testinstallationen. Die technischen Invoice- und ZUGFeRD-Läufe unter WHMCS 8.13.4 sind weitgehend abgeschlossen. Zwei Postfachtests haben bestätigt, dass WHMCS 8.13 Binäranhänge aus `EmailPreSend` nicht übernimmt. Der Versandweg `whmcs_template` ist deshalb gesperrt; bei sevDesk-Dokumenthoheit steht der direkte sevDesk-Versand zur Verfügung. Für echte Buchhaltungsdaten fehlen außerdem Invoice-`bookAmount`, der rabattfreie Rule-11-Invoice-Canary, die vier getrennten Rabatt-Canaries, die produktiven Voucher-Steuerfälle und die fachliche Abnahme.
+Diese Anleitung gehört zu `2.1.0-rc.7`. Der RC ist eine Vorabversion für kontrollierte Test- und Nachlaufinstallationen. Die technischen Invoice- und ZUGFeRD-Läufe unter WHMCS 8.13.4 sind weitgehend abgeschlossen. Zwei Postfachtests haben bestätigt, dass WHMCS 8.13 Binäranhänge aus `EmailPreSend` nicht übernimmt. Der Versandweg `whmcs_template` ist deshalb gesperrt; bei sevDesk-Dokumenthoheit steht der direkte sevDesk-Versand zur Verfügung. Für die vollständige Freigabe fehlen außerdem Invoice-`bookAmount`, der rabattfreie Rule-11-Invoice-Canary, die fünf getrennten Rabatt-Canaries, die produktiven Voucher-Steuerfälle und die fachliche Abnahme.
 
 Diese Version verwendet weiterhin den Addon-Namen und Ordner `sevdesk` sowie
 die Mappingtabelle `mod_sevdesk`. Der Austausch erhält vorhandene Zuordnungen
@@ -61,6 +61,7 @@ und Remote-fähige Adminaktionen bleiben bis zur bestätigten Setup-Prüfung ges
    Rabatt-Gates müssen ebenfalls aus sein:
    `invoice_discount_canary_confirmed`,
    `invoice_discount_rule1_19_canary_confirmed`,
+   `invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed`,
    `invoice_discount_rule17_0_canary_confirmed` und
    `invoice_discount_rule19_canary_confirmed`. Unbekannte
    Altsettings bleiben gespeichert, werden aber nicht als kompatible Aliase geraten.
@@ -77,7 +78,8 @@ und Remote-fähige Adminaktionen bleiben bis zur bestätigten Setup-Prüfung ges
    oder seine Lease muss ablaufen; Pause/Abbruch lösen es nicht unmittelbar auf.
 7. Im Setup die Bestandsprüfung ausdrücklich bestätigen und speichern. Die
    Bestätigung ist an den aktuellen Inventur-Fingerprint gebunden. Ändert sich
-   der Bestand, muss die Seite neu geladen werden. Nur nach
+   der Bestand oder der globale WHMCS-Netto-/Bruttomodus, muss die Seite neu
+   geladen werden. Nur nach
    erfolgreicher read-only Mandantenprüfung wird `runtime_review_required`
    gelöscht. Erst danach einen kleinen Voucher-Canary ausführen und optional
    `sync_enabled` aktivieren. Invoice-Modi benötigen zusätzlich den

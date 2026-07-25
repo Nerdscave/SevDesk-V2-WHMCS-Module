@@ -37,6 +37,7 @@ final class Config
         'small_business_invoice_canary_confirmed' => '',
         'invoice_discount_canary_confirmed' => '',
         'invoice_discount_rule1_19_canary_confirmed' => '',
+        'invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed' => '',
         'invoice_discount_rule17_0_canary_confirmed' => '',
         'invoice_discount_rule19_canary_confirmed' => '',
         'invoice_discount_rule19_canary_rate' => '',

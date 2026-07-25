@@ -118,11 +118,12 @@ Diese Form ist eine bewusst enge Architekturkorrektur. Im Rule-1-Live-Canary bes
 | Capability | Gate |
 | --- | --- |
 | Rule 11, 0 % | `small_business_invoice_canary_confirmed`, aktuelle Rule-11-`REVENUE`-Guidance und `invoice_discount_canary_confirmed` |
-| Rule 1, 19 % | `invoice_discount_rule1_19_canary_confirmed` |
+| Rule 1, 19 %, deutscher Kunde | `invoice_discount_rule1_19_canary_confirmed` |
+| Rule 1, 19 %, EU-B2C mit bestätigter Inlandsbesteuerung | `invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed` |
 | Rule 17, 0 % | `invoice_discount_rule17_0_canary_confirmed` |
 | Rule 19, positiver einheitlicher Zielsteuersatz | `invoice_discount_rule19_canary_confirmed`; der Positions- und Rabattsteuersatz muss in der bestätigten Zielbesteuerung enthalten sein |
 
-Alle vier Rabatt-Gates sind bei Installation und Upgrade aus. Die drei neuen Settings für Rules 1/17/19 enthalten nach der Bestätigung den exakten Capability-Key statt eines einfachen `on`; Rule 19 speichert den geprüften Zielsteuersatz zusätzlich. Die Capability enthält Profil, Länderklasse, Rule, Steuersatz in Minor Units, Netto-/Bruttomodus und Vertragsversion. Ein Wechsel des WHMCS-Steuermodus macht den gespeicherten Schlüssel ungültig. Der Worker friert diesen Capability-Key und einen SHA-256 über Anzahl, Text, Betrag, Typ, Relation, Steuerkennzeichen, Netto-/Bruttomodus und Steuersatz vor `invoice_write_requested` ein. Ein älterer Rule-11-Job ohne Capability-Key darf nur vor einem möglichen Write um den deterministisch gleichen Schlüssel ergänzt werden. Nach einem möglichen Write führt ein fehlender oder abweichender Schlüssel zu `ambiguous`.
+Alle fünf Rabatt-Gates sind bei Installation und Upgrade aus. Die Settings für Rules 1, 17 und 19 enthalten nach der Bestätigung den exakten Capability-Key statt eines einfachen `on`; Rule 19 speichert den geprüften Zielsteuersatz zusätzlich. Der deutsche Rule-1-Fall und die bestätigte EU-B2C-Inlandsbesteuerung besitzen getrennte Settings. Gleiche Rule und gleicher Steuersatz reichen nicht aus, weil auch Steuerprofil und Länderklasse zum Vertrag gehören. Ein Wechsel des WHMCS-Steuermodus macht den gespeicherten Schlüssel ungültig. Der Worker friert diesen Capability-Key und einen SHA-256 über Anzahl, Text, Betrag, Typ, Relation, Steuerkennzeichen, Netto-/Bruttomodus und Steuersatz vor `invoice_write_requested` ein. Ein älterer Rule-11-Job ohne Capability-Key darf nur vor einem möglichen Write um den deterministisch gleichen Schlüssel ergänzt werden. Nach einem möglichen Write führt ein fehlender oder abweichender Schlüssel zu `ambiguous`.
 
 Der Rabatt-Fingerprint steht außerdem als `[WHMCS-DISCOUNT:<sha256>]` neben dem normalen Invoice-Marker. Readback und Recovery verlangen Marker, Capability-Key, alle positiven und negativen Positionen sowie `sumNet`, `sumTax` und `sumGross` exakt in Minor Units. `sumDiscounts` muss numerisch 0 sein, weil der Rabatt vollständig in den Positionen steckt. Eine Drift führt nach einem möglichen Write zu `ambiguous`. Mehrere Rabatte, andere negative Positionen, `LateFee` und E-Rechnungen mit Rabatt bleiben blockiert.
 
@@ -377,6 +378,7 @@ Funktionale Legacy-Einstellungen bleiben erhalten. Hinzu kommen insbesondere:
 - `small_business_invoice_canary_confirmed`;
 - `invoice_discount_canary_confirmed`;
 - `invoice_discount_rule1_19_canary_confirmed`;
+- `invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed`;
 - `invoice_discount_rule17_0_canary_confirmed`;
 - `invoice_discount_rule19_canary_confirmed`;
 - `invoice_sev_user_id`, `invoice_unity_id`;
@@ -399,7 +401,7 @@ Der Dedupe-Key bleibt absichtlich `export_voucher:<invoiceId>` für beide neuen 
 
 Das globale Kleinunternehmerprofil kann optional mit `small_business_until` begrenzt werden. Die Steuerentscheidung vergleicht diesen Stichtag mit dem unveränderlichen Rechnungsdatum; Korrekturen verwenden das Datum der Originalrechnung. Ein leeres Feld erhält die bisherige unbegrenzte Semantik. Bei aktivem Kleinunternehmerprofil führt ein syntaktisch oder kalendarisch ungültiger Altwert vor jedem Write zu einem Fehler.
 
-Vor einer Änderung von Modus, Hoheit, OSS-, E-Invoice-, Rule-11-Invoice-, Rabatt-Canary- oder Kleinunternehmerprofil zeigt das Setup eine rein lokale Übergangsinventur. Sie zählt typisierte und untypisierte Mappings, `NULL`- und verwaiste Zeilen, aktive, fehlgeschlagene und unklare Exportjobs sowie bezahlte ungemappte Rechnungen. Ein Fingerprint verhindert die Freigabe einer inzwischen veralteten Ansicht. Aktive oder unklare Exportjobs sperren außerdem Änderungen am Kleinunternehmerschalter, seinem Stichtag, Rule-11-Konto, dem Rule-11-Invoice-Gate und allen vier Rabatt-Gates.
+Vor einer Änderung von Modus, Hoheit, OSS-, E-Invoice-, Rule-11-Invoice-, Rabatt-Canary- oder Kleinunternehmerprofil zeigt das Setup eine rein lokale Übergangsinventur. Sie zählt typisierte und untypisierte Mappings, `NULL`- und verwaiste Zeilen, aktive, fehlgeschlagene und unklare Exportjobs sowie bezahlte ungemappte Rechnungen. Ein Fingerprint verhindert die Freigabe einer inzwischen veralteten Ansicht. Darin ist auch der globale WHMCS-Steuermodus enthalten, weil er Bestandteil der Rabatt-Capability ist. Wechselt `TaxType` zwischen Seitenaufruf und Speichern, muss die Bestandsaufnahme neu geladen und bestätigt werden. Aktive oder unklare Exportjobs sperren außerdem Änderungen am Kleinunternehmerschalter, seinem Stichtag, Rule-11-Konto, dem Rule-11-Invoice-Gate und allen fünf Rabatt-Gates.
 
 Ein Moduswechsel startet keinen Nachlauf. Alte fehlgeschlagene Exportitems behalten ihren historischen Zielpfad. Sichere Zustände vor einem Dokument-Write können nach neuer Vorschau als eigenes mailfreies `export_document`-Item eingereiht werden; riskante Zustände bleiben Reconciliation-Fälle. Der Sammelexport markiert seinen Job als historischen Backfill, schaltet E-Invoice aus und prüft vor jedem Create Invoice-Nummer, Datum/Kontakt/Betrag sowie markerlose und markertragende Voucher-Kandidaten.
 

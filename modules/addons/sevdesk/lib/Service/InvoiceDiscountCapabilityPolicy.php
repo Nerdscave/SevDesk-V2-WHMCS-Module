@@ -29,6 +29,7 @@ final class InvoiceDiscountCapabilityPolicy
         private readonly string $ruleOneNineteenCapabilityKey = '',
         private readonly string $ruleSeventeenZeroCapabilityKey = '',
         private readonly string $ruleNineteenDestinationCapabilityKey = '',
+        private readonly string $ruleOneNineteenEuB2cDomesticCapabilityKey = '',
     ) {
     }
 
@@ -124,6 +125,19 @@ final class InvoiceDiscountCapabilityPolicy
             );
         }
         if (
+            $taxDecision->taxRuleId === '1'
+            && $taxDecision->profile === 'eu_b2c_domestic'
+            && $rateMinor === 1900
+        ) {
+            return self::requireExactKey(
+                $this->ruleOneNineteenEuB2cDomesticCapabilityKey,
+                self::capabilityKey('eu_b2c_domestic', '1', $rateMinor, $mode),
+                'invoice_discount_rule1_19_eu_b2c_domestic_canary_not_confirmed',
+                'Der separate Rabatt-Canary für EU-B2C mit deutscher Rule 1 und 19 % ist nicht '
+                    . 'für diesen exakten Steuer- und WHMCS-Modus bestätigt.',
+            );
+        }
+        if (
             $taxDecision->taxRuleId === '17'
             && $taxDecision->profile === 'third_country'
             && $rateMinor === 0
@@ -205,7 +219,7 @@ final class InvoiceDiscountCapabilityPolicy
         $countryClass = match ($taxProfile) {
             'domestic' => 'domestic',
             'third_country' => 'third_country',
-            'eu_b2c_rule19' => 'eu_b2c',
+            'eu_b2c_domestic', 'eu_b2c_rule19' => 'eu_b2c',
             default => throw new \InvalidArgumentException('Unsupported Invoice discount tax profile.'),
         };
         if (
@@ -224,6 +238,16 @@ final class InvoiceDiscountCapabilityPolicy
             . '_whmcs_' . $whmcsMode;
     }
 
+    public static function storedCapabilityMatches(string $storedKey, string $expectedKey): bool
+    {
+        $storedKey = trim($storedKey);
+        $expectedKey = trim($expectedKey);
+
+        return $storedKey !== ''
+            && $expectedKey !== ''
+            && hash_equals($storedKey, $expectedKey);
+    }
+
     /**
      * @return array{allowed:bool,code:string,message:string,capabilityKey:?string}
      */
@@ -233,8 +257,7 @@ final class InvoiceDiscountCapabilityPolicy
         string $code,
         string $message,
     ): array {
-        $storedKey = trim($storedKey);
-        if ($storedKey === '' || !hash_equals($storedKey, $expectedKey)) {
+        if (!self::storedCapabilityMatches($storedKey, $expectedKey)) {
             return self::block($code, $message);
         }
 

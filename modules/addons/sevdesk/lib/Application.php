@@ -115,7 +115,7 @@ final class Application
             new Client(),
             $token,
             'https://my.sevdesk.de/api/v1',
-            'WHMCS-sevdesk/2.1.0-rc.6',
+            'WHMCS-sevdesk/2.1.0-rc.7',
         );
     }
 
@@ -197,6 +197,10 @@ final class Application
                 && $this->config->bool('small_business_invoice_canary_confirmed'),
             ruleOneNineteenCapabilityKey: (string) $this->config->get(
                 'invoice_discount_rule1_19_canary_confirmed',
+                '',
+            ),
+            ruleOneNineteenEuB2cDomesticCapabilityKey: (string) $this->config->get(
+                'invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed',
                 '',
             ),
             ruleSeventeenZeroCapabilityKey: (string) $this->config->get(

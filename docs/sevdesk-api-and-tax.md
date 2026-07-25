@@ -216,15 +216,16 @@ Ein negativer `PromoHosting`-Eintrag wird nur akzeptiert, wenn genau ein positiv
 | Tax Rule und Rate | Capability-Basis | Zusätzliches Gate |
 | --- | --- | --- |
 | Rule 11, 0 % | `promo_discount_rule11_0` | `small_business_invoice_canary_confirmed`, aktuelle Rule-11-`REVENUE`-Guidance und `invoice_discount_canary_confirmed` |
-| Rule 1, 19 % | `promo_discount_rule1_19` | `invoice_discount_rule1_19_canary_confirmed` |
+| Rule 1, 19 %, deutscher Kunde | `promo_discount_rule1_19` | `invoice_discount_rule1_19_canary_confirmed` |
+| Rule 1, 19 %, EU-B2C mit bestätigter Inlandsbesteuerung | `promo_discount_rule1_19` | `invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed` |
 | Rule 17, 0 % | `promo_discount_rule17_0` | `invoice_discount_rule17_0_canary_confirmed` |
 | Rule 19, positiver einheitlicher Zielsteuersatz | `promo_discount_rule19_destination` | `invoice_discount_rule19_canary_confirmed`; die Rate muss in der bestätigten Zielbesteuerung enthalten sein |
 
-Profil, Länderklasse, Netto-/Bruttomodus, tatsächliche Rate und Vertragsversion gehören zum gespeicherten Capability-Key. Die Settings für Rules 1/17/19 enthalten diesen exakten Key; ein pauschales `on` gilt nicht als Freigabe. Rule 19 speichert den im Canary geprüften Zielsteuersatz separat in `invoice_discount_rule19_canary_rate`. Vor `invoice_write_requested` friert das Modul den Key und einen PII-freien SHA-256 des Rabattvertrags ein. Die Remote-Invoice trägt zusätzlich `[WHMCS-DISCOUNT:<sha256>]`.
+Profil, Länderklasse, Netto-/Bruttomodus, tatsächliche Rate und Vertragsversion gehören zum gespeicherten Capability-Key. Die Settings für Rules 1, 17 und 19 enthalten diesen exakten Key; ein pauschales `on` gilt nicht als Freigabe. Der deutsche Rule-1-Fall und die EU-B2C-Inlandsbesteuerung verwenden getrennte Keys und Gates. Rule 19 speichert den im Canary geprüften Zielsteuersatz separat in `invoice_discount_rule19_canary_rate`. Vor `invoice_write_requested` friert das Modul den Key und einen PII-freien SHA-256 des Rabattvertrags ein. Die Remote-Invoice trägt zusätzlich `[WHMCS-DISCOUNT:<sha256>]`.
 
 Für Rabattfälle ist der Payload-Vertrag absichtlich enger als ein allgemeiner sevDesk-Rabatt: `invoicePosSave` enthält die positiven Positionen und genau eine negative Rabattposition mit Menge 1, identischem Steuersatz und fortlaufender Positionsnummer. `discountSave` bleibt `null`. Ein Rule-1-Live-Canary mit 4,94 Euro Bruttoleistung und 2,47 Euro Bruttorabatt zeigte den Grund. Der globale Rabatt ergab 2,08 Euro netto und 0,39 Euro Umsatzsteuer; die negative `InvoicePos` erhielt die WHMCS-Verteilung von 2,07 Euro netto und 0,40 Euro Umsatzsteuer. Der synthetische Canary las genau zwei Remote-Positionen und `sumDiscounts=0` zurück.
 
-Readback und Recovery verlangen den Capability-Key, den Marker, die unveränderten positiven und negativen Positionen sowie exakte Werte für `sumNet`, `sumTax` und `sumGross`. `sumDiscounts` muss numerisch 0 sein. Deshalb benötigt jede der vier Semantiken ihren externen Canary. Ein fehlender oder geänderter Key, Marker, Positions- oder Summenwert blockiert vor dem Write beziehungsweise führt nach einem möglichen Write zu `ambiguous`. `LateFee`, mehrere Rabatte, andere negative Positionen und E-Rechnungen mit Rabatt bleiben gesperrt.
+Readback und Recovery verlangen den Capability-Key, den Marker, die unveränderten positiven und negativen Positionen sowie exakte Werte für `sumNet`, `sumTax` und `sumGross`. `sumDiscounts` muss numerisch 0 sein. Deshalb benötigt jede der fünf Semantiken ihren externen Canary. Ein fehlender oder geänderter Key, Marker, Positions- oder Summenwert blockiert vor dem Write beziehungsweise führt nach einem möglichen Write zu `ambiguous`. `LateFee`, mehrere Rabatte, andere negative Positionen und E-Rechnungen mit Rabatt bleiben gesperrt.
 
 ### Rule 11 bei normalen Invoices
 

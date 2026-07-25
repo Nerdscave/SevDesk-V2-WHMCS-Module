@@ -25,6 +25,11 @@ final class TemplateContractTest extends TestCase
         'e_invoice_canary_confirmed',
         'e_invoice_profile_acknowledged',
         'small_business_invoice_canary_confirmed',
+        'invoice_discount_rule1_19_canary_confirmed',
+        'invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed',
+        'invoice_discount_rule17_0_canary_confirmed',
+        'invoice_discount_rule19_canary_confirmed',
+        'invoice_discount_rule19_canary_rate',
         'import_after',
         'import_only_paid',
         'sync_enabled',
@@ -62,6 +67,10 @@ final class TemplateContractTest extends TestCase
         'e_invoice_canary_confirmed',
         'e_invoice_profile_acknowledged',
         'small_business_invoice_canary_confirmed',
+        'invoice_discount_rule1_19_canary_confirmed',
+        'invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed',
+        'invoice_discount_rule17_0_canary_confirmed',
+        'invoice_discount_rule19_canary_confirmed',
     ];
 
     private const TAX_PROFILES = [
@@ -208,6 +217,27 @@ final class TemplateContractTest extends TestCase
         self::assertStringContainsString('Token gespeichert – leer lassen zum Beibehalten', $controller);
         self::assertStringNotContainsString('sevdesk_api_key_masked', $setup . $controller);
         self::assertStringNotContainsString('substr($storedToken', $controller);
+    }
+
+    public function testDiscountCanaryCheckboxesUseExactCurrentCapabilityFlags(): void
+    {
+        $setup = $this->template('setup.tpl');
+
+        foreach (
+            [
+                'invoice_discount_rule1_19_canary_current',
+                'invoice_discount_rule1_19_eu_b2c_domestic_canary_current',
+                'invoice_discount_rule17_0_canary_current',
+                'invoice_discount_rule19_canary_current',
+            ] as $flag
+        ) {
+            self::assertStringContainsString('{if $settings.' . $flag . '} checked{/if}', $setup);
+        }
+        self::assertStringNotContainsString(
+            '$settings.invoice_discount_rule1_19_canary_confirmed !== \'\'',
+            $setup,
+        );
+        self::assertStringContainsString('invoice_discount_capability_stale', $setup);
     }
 
     public function testRule19AndDomesticEuB2cProfilesCannotBeSavedTogether(): void

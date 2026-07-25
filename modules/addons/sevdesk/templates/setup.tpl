@@ -139,26 +139,41 @@
                         </label>
                         <small class="help-block">Die Rabattfreigabe setzt den allgemeinen Rule-11-Invoice-Canary zusätzlich voraus. Sie gilt nur für eindeutig zugeordnete Hosting-Rabatte aus dem Kleinunternehmerzeitraum. Andere negative Positionen bleiben gesperrt.</small>
                     </div>
+                    {if $settings.invoice_discount_capability_stale}
+                        <div class="alert alert-warning">
+                            Mindestens eine gespeicherte Rabattfreigabe passt nicht mehr zum aktuellen
+                            WHMCS-Steuermodus oder zum hinterlegten Zielsteuersatz. Sie ist nicht aktiv
+                            und wird deshalb unten nicht vorausgewählt. Prüfen Sie den betroffenen Canary,
+                            bevor Sie die Einstellung erneut bestätigen.
+                        </div>
+                    {/if}
                     <div class="checkbox">
                         <label for="invoice-discount-rule1-canary-confirmed">
-                            <input type="checkbox" id="invoice-discount-rule1-canary-confirmed" name="invoice_discount_rule1_19_canary_confirmed" value="on"{if $settings.invoice_discount_rule1_19_canary_confirmed !== ''} checked{/if}>
-                            Der separate Canary für einen festen <code>PromoHosting</code>-Rabatt mit Rule 1 und 19&nbsp;% wurde bestanden.
+                            <input type="checkbox" id="invoice-discount-rule1-canary-confirmed" name="invoice_discount_rule1_19_canary_confirmed" value="on"{if $settings.invoice_discount_rule1_19_canary_current} checked{/if}>
+                            Der separate Canary für einen deutschen <code>PromoHosting</code>-Rabatt mit Rule 1 und 19&nbsp;% wurde bestanden.
                         </label>
                     </div>
                     <div class="checkbox">
+                        <label for="invoice-discount-rule1-eu-b2c-domestic-canary-confirmed">
+                            <input type="checkbox" id="invoice-discount-rule1-eu-b2c-domestic-canary-confirmed" name="invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed" value="on"{if $settings.invoice_discount_rule1_19_eu_b2c_domestic_canary_current} checked{/if}>
+                            Der separate Canary für einen EU-B2C-<code>PromoHosting</code>-Rabatt mit bestätigter deutscher Inlandsbesteuerung, Rule 1 und 19&nbsp;% wurde bestanden.
+                        </label>
+                        <small class="help-block">Diese Freigabe gilt nur für die ausdrücklich bestätigte EU-B2C-Inlandsbesteuerung. Sie ist kein OSS-Gate und verwendet nicht den deutschen Rule-1-Canary.</small>
+                    </div>
+                    <div class="checkbox">
                         <label for="invoice-discount-rule17-canary-confirmed">
-                            <input type="checkbox" id="invoice-discount-rule17-canary-confirmed" name="invoice_discount_rule17_0_canary_confirmed" value="on"{if $settings.invoice_discount_rule17_0_canary_confirmed !== ''} checked{/if}>
+                            <input type="checkbox" id="invoice-discount-rule17-canary-confirmed" name="invoice_discount_rule17_0_canary_confirmed" value="on"{if $settings.invoice_discount_rule17_0_canary_current} checked{/if}>
                             Der separate Canary für einen festen <code>PromoHosting</code>-Rabatt mit Rule 17 und 0&nbsp;% wurde bestanden.
                         </label>
                     </div>
                     <div class="checkbox">
                         <label for="invoice-discount-rule19-canary-confirmed">
-                            <input type="checkbox" id="invoice-discount-rule19-canary-confirmed" name="invoice_discount_rule19_canary_confirmed" value="on"{if $settings.invoice_discount_rule19_canary_confirmed !== ''} checked{/if}>
+                            <input type="checkbox" id="invoice-discount-rule19-canary-confirmed" name="invoice_discount_rule19_canary_confirmed" value="on"{if $settings.invoice_discount_rule19_canary_current} checked{/if}>
                             Der separate Canary für einen festen <code>PromoHosting</code>-Rabatt mit Rule 19 und Zielsteuersatz wurde bestanden.
                         </label>
                         <label for="invoice-discount-rule19-canary-rate">Im Canary geprüfter Zielsteuersatz</label>
                         <input class="form-control" type="number" min="0.01" max="100" step="0.01" id="invoice-discount-rule19-canary-rate" name="invoice_discount_rule19_canary_rate" value="{$settings.invoice_discount_rule19_canary_rate|escape}">
-                        <small class="help-block">Die drei neuen Freigaben werden an Steuerprofil, Länderklasse, Steuersatz und den aktuell verwendeten WHMCS-Netto-/Bruttomodus gebunden. Ändert sich einer dieser Werte, bleibt der Export bis zu einem neuen Canary gesperrt. ZUGFeRD mit Rabatt bleibt gesperrt.</small>
+                        <small class="help-block">Die Freigaben werden an Steuerprofil, Länderklasse, Steuersatz und den aktuell verwendeten WHMCS-Netto-/Bruttomodus gebunden. Ändert sich einer dieser Werte, bleibt der Export bis zu einem neuen Canary gesperrt. ZUGFeRD mit Rabatt bleibt gesperrt.</small>
                     </div>
                 </div>
             </div>

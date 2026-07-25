@@ -20,6 +20,7 @@ use WHMCS\Database\Capsule;
 use WHMCS\Module\Addon\SevDesk\Api\SevdeskClient;
 use WHMCS\Module\Addon\SevDesk\Config;
 use WHMCS\Module\Addon\SevDesk\Domain\ContactData;
+use WHMCS\Module\Addon\SevDesk\Domain\DocumentTargetDecision;
 use WHMCS\Module\Addon\SevDesk\Domain\InvoiceDiscount;
 use WHMCS\Module\Addon\SevDesk\Domain\InvoiceSnapshot;
 use WHMCS\Module\Addon\SevDesk\Domain\LineItem;
@@ -30,6 +31,7 @@ use WHMCS\Module\Addon\SevDesk\Repository\JobRepository;
 use WHMCS\Module\Addon\SevDesk\Repository\MappingRepository;
 use WHMCS\Module\Addon\SevDesk\Service\ContactService;
 use WHMCS\Module\Addon\SevDesk\Service\DocumentTargetResolver;
+use WHMCS\Module\Addon\SevDesk\Service\InvoiceDiscountCapabilityPolicy;
 use WHMCS\Module\Addon\SevDesk\Service\InvoiceExporter;
 use WHMCS\Module\Addon\SevDesk\Service\InvoicePdf;
 use WHMCS\Module\Addon\SevDesk\Service\InvoiceReconciliationService;
@@ -906,6 +908,506 @@ final class ExportJobHandlerFlowTest extends TestCase
         self::assertSame(0, $contactCheckpointCalls);
         self::assertNotContains('contact_write_requested', $checkpoints);
         self::assertSame([], $history);
+    }
+
+    public function testEuB2cDomesticInclusiveDiscountCompletesTheInvoiceFlowWithItsOwnCapability(): void
+    {
+        $taxTypeWasSet = array_key_exists('TaxType', $GLOBALS['CONFIG']);
+        $previousTaxType = $GLOBALS['CONFIG']['TaxType'] ?? null;
+        $GLOBALS['CONFIG']['TaxType'] = 'Inclusive';
+
+        try {
+            $this->runEuB2cDomesticInclusiveDiscountFlow();
+        } finally {
+            if ($taxTypeWasSet) {
+                $GLOBALS['CONFIG']['TaxType'] = $previousTaxType;
+            } else {
+                unset($GLOBALS['CONFIG']['TaxType']);
+            }
+        }
+    }
+
+    public function testMissingEuB2cDiscountGateAfterInvoiceWriteStopsWithoutRemoteIo(): void
+    {
+        $taxTypeWasSet = array_key_exists('TaxType', $GLOBALS['CONFIG']);
+        $previousTaxType = $GLOBALS['CONFIG']['TaxType'] ?? null;
+        $GLOBALS['CONFIG']['TaxType'] = 'Inclusive';
+
+        try {
+            $this->runMissingEuB2cDiscountGateAfterInvoiceWrite();
+        } finally {
+            if ($taxTypeWasSet) {
+                $GLOBALS['CONFIG']['TaxType'] = $previousTaxType;
+            } else {
+                unset($GLOBALS['CONFIG']['TaxType']);
+            }
+        }
+    }
+
+    private function runMissingEuB2cDiscountGateAfterInvoiceWrite(): void
+    {
+        $frozenCapabilityKey = InvoiceDiscountCapabilityPolicy::capabilityKey(
+            'eu_b2c_domestic',
+            '1',
+            1900,
+            'inclusive',
+        );
+        $history = [];
+        $client = $this->client([], $history);
+        $config = new Config();
+        $config->set('custom_field_id', 123);
+        $config->set('export_mode', DocumentTargetResolver::MODE_INVOICE_ONLY);
+        $config->set('document_authority', DocumentTargetResolver::AUTHORITY_WHMCS);
+        $config->set('oss_profile', DocumentTargetResolver::OSS_BLOCKED);
+        $config->set('eu_b2c_mode', TaxPolicy::EU_B2C_DOMESTIC_CONFIRMED);
+        $config->set('invoice_canary_confirmed', true);
+        $config->set('invoice_sev_user_id', '7');
+        $config->set('invoice_unity_id', '8');
+        $config->set('accountingTypeInterCommunityConsumer', '300');
+        $config->set('taxRuleInterCommunityConsumer', '1');
+        self::assertSame(
+            '',
+            $config->get('invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed'),
+        );
+        $localApi = static function (string $command, array $parameters): array {
+            if ($command === 'GetInvoice') {
+                self::assertSame(10, $parameters['invoiceid']);
+
+                return [
+                    'result' => 'success',
+                    'userid' => 20,
+                    'status' => 'Paid',
+                    'date' => '2026-07-01',
+                    'invoicenum' => 'RE-10',
+                    'currencycode' => 'EUR',
+                    'subtotal' => '50.00',
+                    'tax' => '9.50',
+                    'tax2' => '0.00',
+                    'total' => '59.50',
+                    'credit' => '0.00',
+                    'taxrate' => '19',
+                    'taxrate2' => '0',
+                    'items' => ['item' => [
+                        [
+                            'id' => 1,
+                            'type' => 'Hosting',
+                            'relid' => 42,
+                            'description' => 'Synthetic hosting item',
+                            'amount' => '119.00',
+                            'taxed' => 1,
+                        ],
+                        [
+                            'id' => 2,
+                            'type' => 'PromoHosting',
+                            'relid' => 42,
+                            'description' => 'Synthetic promotion',
+                            'amount' => '-59.50',
+                            'taxed' => 1,
+                        ],
+                    ]],
+                ];
+            }
+            if ($command === 'GetClientsDetails') {
+                self::assertSame(20, $parameters['clientid']);
+
+                return [
+                    'result' => 'success',
+                    'client' => [
+                        'id' => 20,
+                        'currency_code' => 'EUR',
+                        'companyname' => '',
+                        'firstname' => 'Synthetic',
+                        'lastname' => 'Customer',
+                        'email' => 'synthetic@example.invalid',
+                        'address1' => 'Example Street 1',
+                        'postcode' => '12345',
+                        'city' => 'Example City',
+                        'countrycode' => 'NL',
+                        'taxexempt' => false,
+                        'customfields' => ['customfield' => [[
+                            'id' => 123,
+                            'value' => '42',
+                        ]]],
+                    ],
+                ];
+            }
+
+            self::fail('Unexpected WHMCS local API command: ' . $command);
+        };
+        $whmcs = new WhmcsGateway($config, $localApi);
+        $contract = $whmcs->invoiceExportContract(10);
+        $discountFingerprint = $contract['snapshot']->discountFingerprint();
+        self::assertNotNull($discountFingerprint);
+        $mappings = new MappingRepository();
+        $handler = new ExportJobHandler(
+            $config,
+            $whmcs,
+            $mappings,
+            new JobRepository(),
+            new ContactService($client, static fn (): bool => true, static fn (): string => '1'),
+            new PdfRenderer(static fn (): string => "%PDF-1.7\nnot expected"),
+            new VoucherExporter($client, static fn (): null => null, static fn (): bool => true),
+            new ReconciliationService($client, $mappings),
+            static fn (): TaxPolicy => new TaxPolicy(
+                ['eu_b2c_domestic' => ['accountDatev' => '300', 'taxRule' => '1']],
+                TaxPolicy::EU_B2C_DOMESTIC_CONFIRMED,
+            ),
+        );
+        $candidate = [
+            'targetAllowed' => true,
+            'targetDocumentType' => DocumentTargetDecision::DOCUMENT_INVOICE,
+            'targetDocumentAuthority' => DocumentTargetResolver::AUTHORITY_WHMCS,
+            'targetExportMode' => DocumentTargetResolver::MODE_INVOICE_ONLY,
+            'targetOssProfile' => DocumentTargetResolver::OSS_BLOCKED,
+            'targetEuB2cMode' => TaxPolicy::EU_B2C_DOMESTIC_CONFIRMED,
+            'targetTaxRuleId' => '1',
+            'targetCode' => 'invoice_selected_global',
+            'targetMessage' => 'Synthetic frozen target.',
+            'selectedInvoiceNumber' => 'RE-10',
+            'targetSevUserId' => '7',
+            'targetUnityId' => '8',
+            'requestedEInvoiceMode' => 'off',
+            'whmcsInvoiceContractFingerprint' => $contract['fingerprint'],
+            'whmcsContactLinkId' => '42',
+            'invoiceDiscountCount' => 1,
+            'invoiceDiscountFingerprint' => $discountFingerprint,
+            'invoiceDiscountCapabilityKey' => $frozenCapabilityKey,
+        ];
+
+        $outcome = $handler(
+            (object) [
+                'invoice_id' => 10,
+                'job_id' => 1,
+                'action' => 'export_document',
+                'checkpoint' => 'invoice_write_requested',
+                'attempts' => 1,
+                'candidate_json' => json_encode($candidate, JSON_THROW_ON_ERROR),
+            ],
+            static fn (): bool => true,
+        );
+
+        self::assertSame('ambiguous', $outcome->status);
+        self::assertSame('invoice_write_requested', $outcome->checkpoint);
+        self::assertSame('invoice_discount_changed_after_write', $outcome->errorCode);
+        self::assertSame(
+            'invoice_discount_rule1_19_eu_b2c_domestic_canary_not_confirmed',
+            $outcome->candidate['detectedDiscountError'] ?? null,
+        );
+        self::assertSame([], $history);
+    }
+
+    private function runEuB2cDomesticInclusiveDiscountFlow(): void
+    {
+        $capabilityKey = InvoiceDiscountCapabilityPolicy::capabilityKey(
+            'eu_b2c_domestic',
+            '1',
+            1900,
+            'inclusive',
+        );
+        $expectedInvoice = new InvoiceSnapshot(
+            10,
+            20,
+            'RE-10',
+            new \DateTimeImmutable('2026-07-01'),
+            'EUR',
+            '59.50',
+            '0.00',
+            [new LineItem('Synthetic hosting item', '119.00', '19', false)],
+            [new InvoiceDiscount('Synthetic promotion', '59.50', '19', false, 42, true)],
+            '50.00',
+            '9.50',
+        );
+        $remoteInvoice = static function (int $status) use ($expectedInvoice): Response {
+            return new Response(200, [], json_encode(['objects' => [[
+                'id' => '99',
+                'objectName' => 'Invoice',
+                'invoiceType' => 'RE',
+                'invoiceNumber' => 'RE-10',
+                'invoiceDate' => '01.07.2026',
+                'currency' => 'EUR',
+                'status' => (string) $status,
+                'taxRule' => ['id' => '1', 'objectName' => 'TaxRule'],
+                'contact' => ['id' => '42', 'objectName' => 'Contact'],
+                'contactPerson' => ['id' => '7', 'objectName' => 'SevUser'],
+                'showNet' => false,
+                'deliveryAddressCountry' => 'NL',
+                'addressName' => 'Synthetic Customer',
+                'addressStreet' => 'Example Street 1',
+                'addressZip' => '12345',
+                'addressCity' => 'Example City',
+                'addressCountry' => ['id' => '2', 'objectName' => 'StaticCountry', 'code' => 'NL'],
+                'customerInternalNote' => InvoiceExporter::documentMarker($expectedInvoice),
+                'sumGross' => '59.50',
+                'sumNet' => '50.00',
+                'sumTax' => '9.50',
+                'sumDiscounts' => '0.00',
+            ]]], JSON_THROW_ON_ERROR));
+        };
+        $remotePositions = static fn (): Response => new Response(200, [], json_encode([
+            'objects' => [
+                [
+                    'id' => '901',
+                    'objectName' => 'InvoicePos',
+                    'invoice' => ['id' => '99', 'objectName' => 'Invoice'],
+                    'unity' => ['id' => '8', 'objectName' => 'Unity'],
+                    'positionNumber' => '1',
+                    'quantity' => '1',
+                    'name' => 'Synthetic hosting item',
+                    'text' => 'Synthetic hosting item',
+                    'price' => '119.00',
+                    'taxRate' => '19',
+                ],
+                [
+                    'id' => '902',
+                    'objectName' => 'InvoicePos',
+                    'invoice' => ['id' => '99', 'objectName' => 'Invoice'],
+                    'unity' => ['id' => '8', 'objectName' => 'Unity'],
+                    'positionNumber' => '2',
+                    'quantity' => '1',
+                    'name' => 'Synthetic promotion',
+                    'text' => 'Synthetic promotion',
+                    'price' => '-59.50',
+                    'taxRate' => '19',
+                ],
+            ],
+        ], JSON_THROW_ON_ERROR));
+        $history = [];
+        $client = $this->client([
+            new Response(200, [], '{"objects":[{"id":"42","objectName":"Contact"}]}'),
+            new Response(201, [], '{"objects":{"invoice":{"id":"99"}}}'),
+            $remoteInvoice(100),
+            $remotePositions(),
+            $remoteInvoice(100),
+            $remotePositions(),
+            new Response(200, [], '{"objects":{"id":"501","objectName":"InvoiceLog"}}'),
+            $remoteInvoice(200),
+            $remotePositions(),
+        ], $history);
+        $config = new Config();
+        $config->set('custom_field_id', 123);
+        $config->set('export_mode', DocumentTargetResolver::MODE_INVOICE_ONLY);
+        $config->set('document_authority', DocumentTargetResolver::AUTHORITY_WHMCS);
+        $config->set('oss_profile', DocumentTargetResolver::OSS_BLOCKED);
+        $config->set('eu_b2c_mode', TaxPolicy::EU_B2C_DOMESTIC_CONFIRMED);
+        $config->set('invoice_canary_confirmed', true);
+        $config->set('invoice_sev_user_id', '7');
+        $config->set('invoice_unity_id', '8');
+        $config->set('accountingTypeInterCommunityConsumer', '300');
+        $config->set('taxRuleInterCommunityConsumer', '1');
+        $config->set(
+            'invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed',
+            $capabilityKey,
+        );
+        $mappings = new MappingRepository();
+        $mappingId = static fn (int $invoiceId): ?string =>
+            ($mapping = $mappings->findCompleteByInvoice($invoiceId)) === null
+                ? null
+                : (string) $mapping->sevdesk_id;
+        $persistMapping = static function (
+            int $invoiceId,
+            string $remoteId,
+            string $type,
+            string $number,
+        ) use ($mappings): void {
+            $mappings->linkDocument($invoiceId, $remoteId, $type, $number);
+        };
+        $discountPolicy = new InvoiceDiscountCapabilityPolicy(
+            ruleOneNineteenEuB2cDomesticCapabilityKey: $capabilityKey,
+        );
+        $invoiceExporter = new InvoiceExporter(
+            $client,
+            $mappingId,
+            $persistMapping,
+            '7',
+            '8',
+            static function (string $countryCode): string {
+                self::assertSame('NL', $countryCode);
+
+                return '2';
+            },
+            discountPolicy: $discountPolicy,
+        );
+        $whmcs = new WhmcsGateway(
+            $config,
+            static function (string $command, array $parameters): array {
+                if ($command === 'GetInvoice') {
+                    self::assertSame(10, $parameters['invoiceid']);
+
+                    return [
+                        'result' => 'success',
+                        'userid' => 20,
+                        'status' => 'Paid',
+                        'date' => '2026-07-01',
+                        'invoicenum' => 'RE-10',
+                        'currencycode' => 'EUR',
+                        'subtotal' => '50.00',
+                        'tax' => '9.50',
+                        'tax2' => '0.00',
+                        'total' => '59.50',
+                        'credit' => '0.00',
+                        'taxrate' => '19',
+                        'taxrate2' => '0',
+                        'items' => ['item' => [
+                            [
+                                'id' => 1,
+                                'type' => 'Hosting',
+                                'relid' => 42,
+                                'description' => 'Synthetic hosting item',
+                                'amount' => '119.00',
+                                'taxed' => 1,
+                            ],
+                            [
+                                'id' => 2,
+                                'type' => 'PromoHosting',
+                                'relid' => 42,
+                                'description' => 'Synthetic promotion',
+                                'amount' => '-59.50',
+                                'taxed' => 1,
+                            ],
+                        ]],
+                    ];
+                }
+                if ($command === 'GetClientsDetails') {
+                    self::assertSame(20, $parameters['clientid']);
+
+                    return [
+                        'result' => 'success',
+                        'client' => [
+                            'id' => 20,
+                            'currency_code' => 'EUR',
+                            'companyname' => '',
+                            'firstname' => 'Synthetic',
+                            'lastname' => 'Customer',
+                            'email' => 'synthetic@example.invalid',
+                            'address1' => 'Example Street 1',
+                            'postcode' => '12345',
+                            'city' => 'Example City',
+                            'countrycode' => 'NL',
+                            'taxexempt' => false,
+                            'customfields' => ['customfield' => [[
+                                'id' => 123,
+                                'value' => '42',
+                            ]]],
+                        ],
+                    ];
+                }
+
+                self::fail('Unexpected WHMCS local API command: ' . $command);
+            },
+        );
+        $handler = new ExportJobHandler(
+            $config,
+            $whmcs,
+            $mappings,
+            new JobRepository(),
+            new ContactService($client, static fn (): bool => true, static fn (): string => '1'),
+            new PdfRenderer(static fn (): string => "%PDF-1.7\nnot expected"),
+            new VoucherExporter($client, static fn (): null => null, static fn (): bool => true),
+            new ReconciliationService($client, $mappings),
+            static fn (): TaxPolicy => new TaxPolicy(
+                ['eu_b2c_domestic' => ['accountDatev' => '300', 'taxRule' => '1']],
+                TaxPolicy::EU_B2C_DOMESTIC_CONFIRMED,
+            ),
+            $invoiceExporter,
+            new InvoiceReconciliationService($client, $mappingId, $persistMapping, '7', '8'),
+            new InvoicePdf($client),
+            static fn (): DocumentTargetResolver => new DocumentTargetResolver(
+                DocumentTargetResolver::MODE_INVOICE_ONLY,
+                DocumentTargetResolver::AUTHORITY_WHMCS,
+                DocumentTargetResolver::OSS_BLOCKED,
+            ),
+        );
+        $checkpoints = [];
+        $checkpointContexts = [];
+
+        $outcome = $handler(
+            (object) [
+                'invoice_id' => 10,
+                'job_id' => 1,
+                'action' => 'export_document',
+                'checkpoint' => 'queued',
+                'attempts' => 1,
+                'candidate_json' => json_encode([
+                    'delivery_requested' => false,
+                    'requestedExportMode' => DocumentTargetResolver::MODE_INVOICE_ONLY,
+                    'requestedDocumentAuthority' => DocumentTargetResolver::AUTHORITY_WHMCS,
+                    'requestedOssProfile' => DocumentTargetResolver::OSS_BLOCKED,
+                    'requestedEuB2cMode' => TaxPolicy::EU_B2C_DOMESTIC_CONFIRMED,
+                    'requestedEInvoiceMode' => 'off',
+                    'requestedDeliveryChannel' => null,
+                ], JSON_THROW_ON_ERROR),
+            ],
+            static function (
+                string $checkpoint,
+                array $context = [],
+            ) use (
+                &$checkpoints,
+                &$checkpointContexts,
+            ): bool {
+                $checkpoints[] = $checkpoint;
+                $checkpointContexts[$checkpoint] = array_merge(
+                    $checkpointContexts[$checkpoint] ?? [],
+                    $context,
+                );
+
+                return true;
+            },
+        );
+
+        self::assertSame('succeeded', $outcome->status, (string) $outcome->errorCode);
+        self::assertSame('99', $outcome->sevdeskId);
+        self::assertSame(
+            ['GET', 'POST', 'GET', 'GET', 'GET', 'GET', 'PUT', 'GET', 'GET'],
+            array_map(static fn (array $entry): string => $entry['request']->getMethod(), $history),
+        );
+        self::assertSame('1', $checkpointContexts['document_type_selected']['targetTaxRuleId'] ?? null);
+        self::assertSame(
+            TaxPolicy::EU_B2C_DOMESTIC_CONFIRMED,
+            $checkpointContexts['document_type_selected']['targetEuB2cMode'] ?? null,
+        );
+        self::assertSame(
+            $capabilityKey,
+            $checkpointContexts['document_type_selected']['invoiceDiscountCapabilityKey'] ?? null,
+        );
+        self::assertSame(
+            $capabilityKey,
+            $checkpointContexts['invoice_write_requested']['invoiceDiscountCapabilityKey'] ?? null,
+        );
+        self::assertSame(
+            $expectedInvoice->discountFingerprint(),
+            $checkpointContexts['invoice_write_requested']['invoiceDiscountFingerprint'] ?? null,
+        );
+        self::assertContains('invoice_created', $checkpoints);
+        self::assertContains('mapping_persisted', $checkpoints);
+        self::assertContains('invoice_opened', $checkpoints);
+        $payload = json_decode(
+            (string) $history[1]['request']->getBody(),
+            true,
+            64,
+            JSON_THROW_ON_ERROR,
+        );
+        self::assertSame(1, $payload['invoice']['taxRule']['id'] ?? null);
+        self::assertFalse($payload['invoice']['showNet'] ?? true);
+        self::assertSame('NL', $payload['invoice']['deliveryAddressCountry'] ?? null);
+        self::assertSame(
+            ['id' => 2, 'objectName' => 'StaticCountry'],
+            $payload['invoice']['addressCountry'] ?? null,
+        );
+        self::assertSame(119.0, $payload['invoicePosSave'][0]['price'] ?? null);
+        self::assertSame(-59.5, $payload['invoicePosSave'][1]['price'] ?? null);
+        self::assertSame(19.0, $payload['invoicePosSave'][1]['taxRate'] ?? null);
+        self::assertNull($payload['discountSave'] ?? null);
+        self::assertSame(
+            InvoiceExporter::documentMarker($expectedInvoice),
+            $payload['invoice']['customerInternalNote'] ?? null,
+        );
+        $mapping = $mappings->findCompleteByInvoice(10);
+        self::assertNotNull($mapping);
+        self::assertSame(MappingRepository::DOCUMENT_TYPE_INVOICE, $mapping->document_type);
+        self::assertSame(MappingRepository::DOCUMENT_AUTHORITY_WHMCS, $mapping->document_authority);
+        self::assertSame('RE-10', $mapping->document_number);
+        self::assertNotNull($mapping->document_ready_at);
+        self::assertNull($mapping->delivered_at);
     }
 
     public function testExactMassPaymentAllowsOneConfirmedPromoDiscountAndCredit(): void

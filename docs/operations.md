@@ -2,9 +2,9 @@
 
 ## Freigabestatus
 
-Dieses Runbook gilt für den Arbeitsstand `2.1.0-rc.6`. Der RC ist für Testinstallationen gedacht, nicht für Produktivdaten. Die automatisierten Prüfungen unter PHP 8.3 mit XMLReader und MariaDB sowie die technischen Live-Läufe für normale Invoices, Rule 19 und ZUGFeRD wurden mit synthetischen Daten ausgeführt. Der direkte sevDesk-Versand, echte Kundensitzungen und die Rechteprüfung waren erfolgreich. Zwei WHMCS-Postfachläufe enthielten dagegen die WHMCS-Core-PDF. WHMCS 8.13 führt den Hook zwar aus, kann dessen Binäranhang aber nicht übernehmen. Der Kanal `whmcs_template` ist auf der Zielplattform daher gesperrt. Vor der Freigabe stehen noch Invoice-`bookAmount`, der rabattfreie Rule-11-Invoice-Canary, die vier getrennten Rabatt-Canaries, die Voucher-Canaries der produktiv verwendeten Steuerfälle und die fachliche Abnahme aus.
+Dieses Runbook gilt für den Arbeitsstand `2.1.0-rc.7`. Der RC ist für kontrollierte Test- und Nachlaufinstallationen gedacht. Die automatisierten Prüfungen unter PHP 8.3 mit XMLReader und MariaDB sowie die technischen Live-Läufe für normale Invoices, Rule 19 und ZUGFeRD wurden mit synthetischen Daten ausgeführt. Der direkte sevDesk-Versand, echte Kundensitzungen und die Rechteprüfung waren erfolgreich. Zwei WHMCS-Postfachläufe enthielten dagegen die WHMCS-Core-PDF. WHMCS 8.13 führt den Hook zwar aus, kann dessen Binäranhang aber nicht übernehmen. Der Kanal `whmcs_template` ist auf der Zielplattform daher gesperrt. Vor der vollständigen Freigabe stehen noch Invoice-`bookAmount`, der rabattfreie Rule-11-Invoice-Canary, die fünf getrennten Rabatt-Canaries, die Voucher-Canaries der produktiv verwendeten Steuerfälle und die fachliche Abnahme aus.
 
-Bis dahin bleiben `invoice_canary_confirmed`, `small_business_invoice_canary_confirmed`, `e_invoice_canary_confirmed`, `invoice_discount_canary_confirmed`, `invoice_discount_rule1_19_canary_confirmed`, `invoice_discount_rule17_0_canary_confirmed`, `invoice_discount_rule19_canary_confirmed` und bei neuen Rollouts auch `sync_enabled` deaktiviert. Ein 2.0-Bestand behält beim Upgrade den Modus `voucher_only` und erhält `runtime_review_required=on`. Diese Quarantäne stoppt automatische und manuelle Verarbeitung. Sie endet erst nach einer erfolgreichen read-only Prüfung und der Bestätigung im Setup.
+Bis zum jeweiligen Einzelnachweis bleiben `invoice_canary_confirmed`, `small_business_invoice_canary_confirmed`, `e_invoice_canary_confirmed`, `invoice_discount_canary_confirmed`, `invoice_discount_rule1_19_canary_confirmed`, `invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed`, `invoice_discount_rule17_0_canary_confirmed`, `invoice_discount_rule19_canary_confirmed` und bei neuen Rollouts auch `sync_enabled` deaktiviert. Ein 2.0-Bestand behält beim Upgrade den Modus `voucher_only` und erhält `runtime_review_required=on`. Diese Quarantäne stoppt automatische und manuelle Verarbeitung. Sie endet erst nach einer erfolgreichen read-only Prüfung und der Bestätigung im Setup.
 
 ## Unterstützte Umgebung
 
@@ -130,6 +130,7 @@ invoice_canary_confirmed=off
 small_business_invoice_canary_confirmed=off
 invoice_discount_canary_confirmed=off
 invoice_discount_rule1_19_canary_confirmed=
+invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed=
 invoice_discount_rule17_0_canary_confirmed=
 invoice_discount_rule19_canary_confirmed=
 invoice_discount_rule19_canary_rate=
@@ -147,7 +148,7 @@ Ein widersprüchlicher Marker oder eine ID, die an beiden Endpoints existiert, b
 
 ### Übergangsinventur und Moduswechsel
 
-Vor einer Änderung an Exportmodus, Dokumenthoheit, OSS-, E-Rechnungs-, Rule-11-Invoice-, einem der vier Rabatt-Canaries oder Kleinunternehmerprofil zeigt das Setup eine rein lokale Bestandsaufnahme. Sie zählt:
+Vor einer Änderung an Exportmodus, Dokumenthoheit, OSS-, E-Rechnungs-, Rule-11-Invoice-, einem der fünf Rabatt-Canaries oder Kleinunternehmerprofil zeigt das Setup eine rein lokale Bestandsaufnahme. Sie zählt:
 
 - typisierte Voucher und Invoices;
 - vollständige Mappings ohne Dokumenttyp;
@@ -304,18 +305,19 @@ Der Rule-11-Rabatt-Canary darf erst danach bestätigt werden. Beide Rule-11-Chec
 
 ## Rabatt-Canaries für normale Invoices
 
-Ein Rabatt-Canary gilt immer nur für eine Capability. Alle vier Schalter sind bei Installation und Upgrade aus:
+Ein Rabatt-Canary gilt immer nur für eine Capability. Alle fünf Schalter sind bei Installation und Upgrade aus:
 
 | Capability | Setup-Gate |
 | --- | --- |
 | Rule 11 mit 0 % | `invoice_discount_canary_confirmed`; zusätzlich gelten der rabattfreie Rule-11-Invoice-Canary und die aktuelle `REVENUE`-Guidance |
-| Rule 1 mit 19 % | `invoice_discount_rule1_19_canary_confirmed` |
+| Rule 1 mit 19 %, deutscher Kunde | `invoice_discount_rule1_19_canary_confirmed` |
+| Rule 1 mit 19 %, EU-B2C mit bestätigter Inlandsbesteuerung | `invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed` |
 | Rule 17 mit 0 % | `invoice_discount_rule17_0_canary_confirmed` |
 | Rule 19 mit positivem, einheitlichem Zielsteuersatz | `invoice_discount_rule19_canary_confirmed` |
 
 Jeder Test verwendet `invoice_only`, EUR, eine positive `Hosting`-Position und genau einen über `relid` und `taxed` passenden `PromoHosting`-Rabatt. E-Rechnung bleibt aus. Positionen und Rabatt müssen denselben Netto-/Bruttomodus und Steuersatz tragen; beim Rule-19-Test muss die Rate außerdem der bestätigten Zielbesteuerung entsprechen. Der Rabatt wird als negative `InvoicePos` übertragen. `discountSave` bleibt leer.
 
-Vor der Freigabe sind Create, Capability-Key, `[WHMCS-DISCOUNT:<sha256>]`, die positive und negative Position, `discountSave=null`, `sumNet`, `sumTax`, `sumGross`, `sumDiscounts=0`, finale PDF und read-only Recovery zu prüfen. Der Summenvergleich ist exakt in Minor Units. Für den Rule-1-Bruttocanary gilt zusätzlich die bestätigte Referenz: 4,94 Euro Leistung minus 2,47 Euro Rabatt ergeben 2,07 Euro netto, 0,40 Euro Umsatzsteuer und 2,47 Euro brutto. Dieser Canary muss genau zwei Remote-Positionen liefern. Der globale sevDesk-Rabatt ist für diese Capability ungeeignet, weil er im Live-Test 2,08 Euro netto und 0,39 Euro Umsatzsteuer ergab. Beim Speichern schreibt das Setup für Rules 1/17/19 den Schlüssel des aktuell aktiven WHMCS-Steuermodus in das jeweilige Setting. Bei Rule 19 ist zusätzlich der im Canary verwendete Zielsteuersatz einzutragen. Ein alter Wahrheitswert, ein anderer Satz oder ein Wechsel zwischen `Inclusive` und `Exclusive` gilt nicht als Freigabe. Ein bestandener Rule-1-Test schaltet weder Rule 17 noch Rule 19 frei. Ein bestandener Rule-11-Rabatt-Test ersetzt nicht den vorgelagerten Rule-11-Invoice-Canary.
+Vor der Freigabe sind Create, Capability-Key, `[WHMCS-DISCOUNT:<sha256>]`, die positive und negative Position, `discountSave=null`, `sumNet`, `sumTax`, `sumGross`, `sumDiscounts=0`, finale PDF und read-only Recovery zu prüfen. Der Summenvergleich ist exakt in Minor Units. Für den Rule-1-Bruttocanary gilt zusätzlich die bestätigte Referenz: 4,94 Euro Leistung minus 2,47 Euro Rabatt ergeben 2,07 Euro netto, 0,40 Euro Umsatzsteuer und 2,47 Euro brutto. Dieser Canary muss genau zwei Remote-Positionen liefern. Der globale sevDesk-Rabatt ist für diese Capability ungeeignet, weil er im Live-Test 2,08 Euro netto und 0,39 Euro Umsatzsteuer ergab. Der EU-B2C-Inlandsfall wird mit einem gewöhnlichen EU-Land außerhalb Deutschlands, ausländischer Rechnungsadresse, Rule 1 und 19 % separat geprüft; `sendBy` öffnet die Rechnung mailfrei. Beim Speichern schreibt das Setup für Rules 1, 17 und 19 den Schlüssel des aktuell aktiven WHMCS-Steuermodus in das jeweilige Setting. `TaxType` ist Teil des bestätigten Inventur-Fingerprints. Ändert sich der WHMCS-Steuermodus bei geöffnetem Setup, wird das Speichern abgelehnt und die Seite muss neu geladen werden. Bei Rule 19 ist zusätzlich der im Canary verwendete Zielsteuersatz einzutragen. Ein alter Wahrheitswert, ein anderer Satz oder ein Wechsel zwischen `Inclusive` und `Exclusive` gilt nicht als Freigabe. Der deutsche Rule-1-Test schaltet den EU-B2C-Inlandsfall nicht frei und umgekehrt. Ein bestandener Rule-11-Rabatt-Test ersetzt nicht den vorgelagerten Rule-11-Invoice-Canary.
 
 Das Canary-Protokoll bleibt außerhalb des Repositorys. Im Setup wird nur der Schalter der tatsächlich bestandenen Capability gesetzt. `LateFee`, mehrere Rabatte, andere negative Positionen und Rabatte auf E-Rechnungen lassen sich mit diesen Schaltern nicht freigeben.
 

@@ -216,6 +216,10 @@ final class MigrationTest extends MariaDbTestCase
         self::assertSame('whmcs', $config->get('document_authority'));
         self::assertSame('blocked', $config->get('oss_profile'));
         self::assertFalse($config->bool('invoice_canary_confirmed'));
+        self::assertSame(
+            '',
+            $config->get('invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed'),
+        );
         self::assertSame('', $config->get('invoice_sev_user_id'));
         self::assertSame('', $config->get('invoice_unity_id'));
         self::assertSame('sevdesk', $config->get('invoice_delivery_channel'));
@@ -228,6 +232,29 @@ final class MigrationTest extends MariaDbTestCase
         self::assertFalse($config->bool('theme_adapter_confirmed'));
         self::assertFalse($config->bool('customer_number_contact_creation_confirmed'));
         self::assertSame('preserve-me', $config->stored()['future_unknown_setting']);
+    }
+
+    public function testRcSixRuleOneDiscountCapabilitySurvivesWhileEuB2cGateDefaultsEmpty(): void
+    {
+        $capability = 'promo_discount_v2_profile_domestic_country_domestic'
+            . '_rule_1_rate_1900_whmcs_inclusive';
+        Capsule::table('tbladdonmodules')->insert([
+            'module' => 'sevdesk',
+            'setting' => 'invoice_discount_rule1_19_canary_confirmed',
+            'value' => $capability,
+        ]);
+
+        Migrator::up();
+        Migrator::up();
+
+        self::assertSame(
+            $capability,
+            (new Config())->get('invoice_discount_rule1_19_canary_confirmed'),
+        );
+        self::assertSame(
+            '',
+            (new Config())->get('invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed'),
+        );
     }
 
     public function testDuplicateLegacyMappingsAbortWithoutDeletingRows(): void

@@ -105,7 +105,7 @@ final class InvoiceDiscountCapabilityPolicyTest extends TestCase
         }
     }
 
-    public function testSameRuleAndRateFromAnotherTaxProfileRemainBlocked(): void
+    public function testDomesticRuleOneCanaryDoesNotUnlockEuB2cDomesticProfile(): void
     {
         $decision = (new InvoiceDiscountCapabilityPolicy(
             ruleOneNineteenCapabilityKey: InvoiceDiscountCapabilityPolicy::capabilityKey(
@@ -121,7 +121,74 @@ final class InvoiceDiscountCapabilityPolicyTest extends TestCase
         );
 
         self::assertFalse($decision['allowed']);
-        self::assertSame('invoice_discount_tax_rule_not_supported', $decision['code']);
+        self::assertSame(
+            'invoice_discount_rule1_19_eu_b2c_domestic_canary_not_confirmed',
+            $decision['code'],
+        );
+    }
+
+    public function testEuB2cDomesticRuleOneRequiresItsOwnExactCapabilityKey(): void
+    {
+        $expectedKey = InvoiceDiscountCapabilityPolicy::capabilityKey(
+            'eu_b2c_domestic',
+            '1',
+            1900,
+            'exclusive',
+        );
+        $decision = (new InvoiceDiscountCapabilityPolicy(
+            ruleOneNineteenEuB2cDomesticCapabilityKey: $expectedKey,
+        ))->evaluate(
+            $this->invoice('19', true),
+            TaxDecision::allowInvoice('eu_b2c_domestic', '1', 'EU B2C mit deutscher USt.', ['19']),
+            $this->target('1'),
+        );
+
+        self::assertTrue($decision['allowed'], $decision['message']);
+        self::assertSame($expectedKey, $decision['capabilityKey']);
+    }
+
+    public function testEuB2cDomesticCanaryDoesNotUnlockDomesticRuleOneProfile(): void
+    {
+        $decision = (new InvoiceDiscountCapabilityPolicy(
+            ruleOneNineteenEuB2cDomesticCapabilityKey: InvoiceDiscountCapabilityPolicy::capabilityKey(
+                'eu_b2c_domestic',
+                '1',
+                1900,
+                'exclusive',
+            ),
+        ))->evaluate(
+            $this->invoice('19', true),
+            TaxDecision::allowInvoice('domestic', '1', 'Inland.', ['19']),
+            $this->target('1'),
+        );
+
+        self::assertFalse($decision['allowed']);
+        self::assertSame('invoice_discount_rule1_19_canary_not_confirmed', $decision['code']);
+    }
+
+    public function testStoredCapabilityComparisonIsTrimmedAndExact(): void
+    {
+        $expectedKey = InvoiceDiscountCapabilityPolicy::capabilityKey(
+            'eu_b2c_domestic',
+            '1',
+            1900,
+            'exclusive',
+        );
+
+        self::assertTrue(InvoiceDiscountCapabilityPolicy::storedCapabilityMatches(
+            " \n" . $expectedKey . "\t",
+            $expectedKey,
+        ));
+        self::assertFalse(InvoiceDiscountCapabilityPolicy::storedCapabilityMatches('', $expectedKey));
+        self::assertFalse(InvoiceDiscountCapabilityPolicy::storedCapabilityMatches(
+            InvoiceDiscountCapabilityPolicy::capabilityKey(
+                'eu_b2c_domestic',
+                '1',
+                1900,
+                'inclusive',
+            ),
+            $expectedKey,
+        ));
     }
 
     /**

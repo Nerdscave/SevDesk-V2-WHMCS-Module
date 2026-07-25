@@ -109,6 +109,49 @@ final class AdminController
             $settings['small_business_until_iso'] = '';
             $settings['small_business_until_invalid'] = true;
         }
+        $discountCapabilityDefinitions = [
+            'invoice_discount_rule1_19_canary_current' => [
+                'setting' => 'invoice_discount_rule1_19_canary_confirmed',
+                'profile' => 'domestic',
+                'rule' => '1',
+                'rate' => '19',
+            ],
+            'invoice_discount_rule1_19_eu_b2c_domestic_canary_current' => [
+                'setting' => 'invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed',
+                'profile' => 'eu_b2c_domestic',
+                'rule' => '1',
+                'rate' => '19',
+            ],
+            'invoice_discount_rule17_0_canary_current' => [
+                'setting' => 'invoice_discount_rule17_0_canary_confirmed',
+                'profile' => 'third_country',
+                'rule' => '17',
+                'rate' => '0',
+            ],
+            'invoice_discount_rule19_canary_current' => [
+                'setting' => 'invoice_discount_rule19_canary_confirmed',
+                'profile' => 'eu_b2c_rule19',
+                'rule' => '19',
+                'rate' => (string) ($settings['invoice_discount_rule19_canary_rate'] ?? ''),
+            ],
+        ];
+        $settings['invoice_discount_capability_stale'] = false;
+        foreach ($discountCapabilityDefinitions as $flag => $definition) {
+            $storedCapability = trim((string) ($settings[$definition['setting']] ?? ''));
+            $expectedCapability = self::expectedDiscountCapabilityKey(
+                $definition['profile'],
+                $definition['rule'],
+                $definition['rate'],
+            );
+            $settings[$flag] = $expectedCapability !== null
+                && InvoiceDiscountCapabilityPolicy::storedCapabilityMatches(
+                    $storedCapability,
+                    $expectedCapability,
+                );
+            if ($storedCapability !== '' && !$settings[$flag]) {
+                $settings['invoice_discount_capability_stale'] = true;
+            }
+        }
 
         $accountOptions = [];
         $sevUsers = [];
@@ -1747,6 +1790,7 @@ final class AdminController
             'small_business_invoice_canary_confirmed',
             'invoice_discount_canary_confirmed',
             'invoice_discount_rule1_19_canary_confirmed',
+            'invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed',
             'invoice_discount_rule17_0_canary_confirmed',
             'invoice_discount_rule19_canary_confirmed',
             'invoice_discount_rule19_canary_rate',
@@ -1767,6 +1811,13 @@ final class AdminController
         foreach ($protectedSettings as $setting) {
             $protectedProfile[$setting] = (string) $this->application->config->get($setting, '');
         }
+        // Discount capability keys include WHMCS' global net/gross tax mode.
+        // Bind that external setting to the reviewed inventory as well, so a
+        // concurrent WHMCS configuration change cannot authorize a different
+        // key through an already opened setup form.
+        $protectedProfile['whmcs_tax_type'] = strtolower(
+            trim((string) ($GLOBALS['CONFIG']['TaxType'] ?? 'Exclusive')),
+        );
         $inventory['protected_profile_fingerprint'] = hash(
             'sha256',
             json_encode($protectedProfile, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES),
@@ -1968,6 +2019,9 @@ final class AdminController
         $invoiceDiscountRuleOneCanaryConfirmed = isset(
             $_POST['invoice_discount_rule1_19_canary_confirmed'],
         );
+        $invoiceDiscountRuleOneEuB2cDomesticCanaryConfirmed = isset(
+            $_POST['invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed'],
+        );
         $invoiceDiscountRuleSeventeenCanaryConfirmed = isset(
             $_POST['invoice_discount_rule17_0_canary_confirmed'],
         );
@@ -1980,6 +2034,12 @@ final class AdminController
         $invoiceDiscountRuleOneCapabilityKey = self::requestedDiscountCapabilityKey(
             $invoiceDiscountRuleOneCanaryConfirmed,
             'domestic',
+            '1',
+            '19',
+        );
+        $invoiceDiscountRuleOneEuB2cDomesticCapabilityKey = self::requestedDiscountCapabilityKey(
+            $invoiceDiscountRuleOneEuB2cDomesticCanaryConfirmed,
+            'eu_b2c_domestic',
             '1',
             '19',
         );
@@ -2016,6 +2076,7 @@ final class AdminController
         if (
             (
                 $invoiceDiscountRuleOneCanaryConfirmed
+                || $invoiceDiscountRuleOneEuB2cDomesticCanaryConfirmed
                 || $invoiceDiscountRuleSeventeenCanaryConfirmed
                 || $invoiceDiscountRuleNineteenCanaryConfirmed
             )
@@ -2178,6 +2239,18 @@ final class AdminController
         if ($mode === 'domestic_confirmed' && (string) ($_POST['eu_b2c_acknowledged'] ?? '') !== '1') {
             throw new RuntimeException('Die deutsche Besteuerung für EU-B2C muss ausdrücklich bestätigt werden.');
         }
+        if (
+            $invoiceDiscountRuleOneEuB2cDomesticCanaryConfirmed
+            && (
+                $mode !== TaxPolicy::EU_B2C_DOMESTIC_CONFIRMED
+                || trim((string) ($_POST['taxRuleInterCommunityConsumer'] ?? '')) !== '1'
+            )
+        ) {
+            throw new RuntimeException(
+                'Der Rabatt-Canary für EU-B2C mit Rule 1 und 19 % benötigt die bestätigte '
+                    . 'Inlandsbesteuerung und Rule 1 im EU-B2C-Steuerprofil.',
+            );
+        }
         if ($ossProfile === 'rule19_digital_services_confirmed' && $mode !== 'blocked') {
             throw new RuntimeException(
                 'Das Rule-19-OSS-Profil und die bisherige deutsche EU-B2C-Besteuerung dürfen nicht gleichzeitig '
@@ -2220,6 +2293,11 @@ final class AdminController
             || $invoiceDiscountRuleOneCapabilityKey
                 !== (string) $this->application->config->get(
                     'invoice_discount_rule1_19_canary_confirmed',
+                    '',
+                )
+            || $invoiceDiscountRuleOneEuB2cDomesticCapabilityKey
+                !== (string) $this->application->config->get(
+                    'invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed',
                     '',
                 )
             || $invoiceDiscountRuleSeventeenCapabilityKey
@@ -2318,6 +2396,10 @@ final class AdminController
         $this->application->config->set(
             'invoice_discount_rule1_19_canary_confirmed',
             $invoiceDiscountRuleOneCapabilityKey,
+        );
+        $this->application->config->set(
+            'invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed',
+            $invoiceDiscountRuleOneEuB2cDomesticCapabilityKey,
         );
         $this->application->config->set(
             'invoice_discount_rule17_0_canary_confirmed',
@@ -2500,6 +2582,18 @@ final class AdminController
         );
     }
 
+    private static function expectedDiscountCapabilityKey(
+        string $profile,
+        string $taxRule,
+        string $taxRate,
+    ): ?string {
+        try {
+            return self::requestedDiscountCapabilityKey(true, $profile, $taxRule, $taxRate);
+        } catch (RuntimeException) {
+            return null;
+        }
+    }
+
     private function operationalSettingsChanged(): bool
     {
         $date = $this->parseIsoDate((string) ($_POST['import_after'] ?? ''));
@@ -2524,6 +2618,13 @@ final class AdminController
                 '1',
                 '19',
             ),
+            'invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed' =>
+                self::requestedDiscountCapabilityKey(
+                    isset($_POST['invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed']),
+                    'eu_b2c_domestic',
+                    '1',
+                    '19',
+                ),
             'invoice_discount_rule17_0_canary_confirmed' => self::requestedDiscountCapabilityKey(
                 isset($_POST['invoice_discount_rule17_0_canary_confirmed']),
                 'third_country',

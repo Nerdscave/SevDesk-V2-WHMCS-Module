@@ -240,6 +240,12 @@ final class HealthService
                     'Rule 1 / 19 %' => [
                         'invoice_discount_rule1_19_canary_confirmed', 'domestic', '1', '19',
                     ],
+                    'Rule 1 / 19 % / EU-B2C-Inlandsbesteuerung' => [
+                        'invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed',
+                        'eu_b2c_domestic',
+                        '1',
+                        '19',
+                    ],
                     'Rule 17 / 0 %' => [
                         'invoice_discount_rule17_0_canary_confirmed', 'third_country', '17', '0',
                     ],
@@ -269,8 +275,10 @@ final class HealthService
                     $expectedKey = null;
                 }
                 $confirmed = $expectedKey !== null
-                    && $storedKey !== ''
-                    && hash_equals($storedKey, $expectedKey);
+                    && InvoiceDiscountCapabilityPolicy::storedCapabilityMatches(
+                        $storedKey,
+                        $expectedKey,
+                    );
                 $this->add(
                     $checks,
                     'Invoice-Rabatt: ' . $label,
@@ -596,7 +604,7 @@ final class HealthService
             'stats' => [
                 'health_status' => $hasError ? 'error' : ($hasWarning ? 'warning' : 'healthy'),
                 'healthy' => $healthy,
-                'module_version' => '2.1.0-rc.6',
+                'module_version' => '2.1.0-rc.7',
                 'whmcs_version' => $whmcsVersion,
                 'php_version' => PHP_VERSION,
                 'bookkeeping_version' => $bookkeepingVersion,

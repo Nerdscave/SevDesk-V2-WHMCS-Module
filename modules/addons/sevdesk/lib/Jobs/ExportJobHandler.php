@@ -88,6 +88,10 @@ final class ExportJobHandler
                 'invoice_discount_rule1_19_canary_confirmed',
                 '',
             ),
+            ruleOneNineteenEuB2cDomesticCapabilityKey: (string) $config->get(
+                'invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed',
+                '',
+            ),
             ruleSeventeenZeroCapabilityKey: (string) $config->get(
                 'invoice_discount_rule17_0_canary_confirmed',
                 '',

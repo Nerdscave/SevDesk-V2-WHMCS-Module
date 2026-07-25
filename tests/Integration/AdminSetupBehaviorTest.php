@@ -310,6 +310,124 @@ final class AdminSetupBehaviorTest extends MariaDbTestCase
         self::assertFalse($application->config->bool('invoice_discount_canary_confirmed'));
     }
 
+    public function testDomesticAndEuB2cRuleOneDiscountCanariesAreStoredIndependently(): void
+    {
+        $previousTaxType = $GLOBALS['CONFIG']['TaxType'] ?? null;
+        $GLOBALS['CONFIG']['TaxType'] = 'Inclusive';
+        try {
+            $application = $this->applicationWithInvoiceReferences();
+            $_POST['export_mode'] = 'invoice_only';
+            $_POST['invoice_canary_confirmed'] = 'on';
+            $_POST['invoice_sev_user_id'] = '7';
+            $_POST['invoice_unity_id'] = '8';
+            $_POST['eu_b2c_mode'] = 'domestic_confirmed';
+            $_POST['eu_b2c_acknowledged'] = '1';
+            $_POST['invoice_discount_rule1_19_canary_confirmed'] = 'on';
+            $_POST['invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed'] = 'on';
+            $_POST['transition_inventory_confirmed'] = '1';
+            $_POST['transition_inventory_fingerprint'] = $this->transitionInventoryFingerprint(
+                $application,
+            );
+
+            $this->invokeSaveSetup($application);
+
+            self::assertSame(
+                'promo_discount_v2_profile_domestic_country_domestic_rule_1_rate_1900_whmcs_inclusive',
+                $application->config->get('invoice_discount_rule1_19_canary_confirmed'),
+            );
+            self::assertSame(
+                'promo_discount_v2_profile_eu_b2c_domestic_country_eu_b2c'
+                    . '_rule_1_rate_1900_whmcs_inclusive',
+                $application->config->get(
+                    'invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed',
+                ),
+            );
+        } finally {
+            if ($previousTaxType === null) {
+                unset($GLOBALS['CONFIG']['TaxType']);
+            } else {
+                $GLOBALS['CONFIG']['TaxType'] = $previousTaxType;
+            }
+        }
+    }
+
+    public function testStaleInventoryCannotAuthorizeDiscountCapabilityAfterTaxTypeChange(): void
+    {
+        $previousTaxType = $GLOBALS['CONFIG']['TaxType'] ?? null;
+        $GLOBALS['CONFIG']['TaxType'] = 'Exclusive';
+        try {
+            $application = $this->applicationWithInvoiceReferences();
+            $_POST['export_mode'] = 'invoice_only';
+            $_POST['invoice_canary_confirmed'] = 'on';
+            $_POST['invoice_sev_user_id'] = '7';
+            $_POST['invoice_unity_id'] = '8';
+            $_POST['eu_b2c_mode'] = 'domestic_confirmed';
+            $_POST['eu_b2c_acknowledged'] = '1';
+            $_POST['invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed'] = 'on';
+            $_POST['transition_inventory_confirmed'] = '1';
+            $_POST['transition_inventory_fingerprint'] = $this->transitionInventoryFingerprint(
+                $application,
+            );
+
+            $GLOBALS['CONFIG']['TaxType'] = 'Inclusive';
+
+            $this->expectSetupFailure($application, 'aktuelle Übergangsinventur');
+
+            self::assertSame(
+                '',
+                $application->config->get(
+                    'invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed',
+                ),
+            );
+            self::assertSame('voucher_only', $application->config->get('export_mode'));
+        } finally {
+            if ($previousTaxType === null) {
+                unset($GLOBALS['CONFIG']['TaxType']);
+            } else {
+                $GLOBALS['CONFIG']['TaxType'] = $previousTaxType;
+            }
+        }
+    }
+
+    public function testEuB2cDiscountCanaryRequiresTheConfirmedDomesticProfile(): void
+    {
+        $application = $this->application();
+        $_POST['invoice_canary_confirmed'] = 'on';
+        $_POST['invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed'] = 'on';
+
+        $this->expectSetupFailure($application, 'bestätigte Inlandsbesteuerung');
+
+        self::assertSame(
+            '',
+            $application->config->get(
+                'invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed',
+            ),
+        );
+    }
+
+    public function testAmbiguousExportBlocksEuB2cDiscountCapabilityChange(): void
+    {
+        $application = $this->application();
+        $this->insertItem('completed', 'ambiguous', 'export_document');
+        $_POST['invoice_canary_confirmed'] = 'on';
+        $_POST['eu_b2c_mode'] = 'domestic_confirmed';
+        $_POST['eu_b2c_acknowledged'] = '1';
+        $_POST['invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed'] = 'on';
+        $_POST['transition_inventory_confirmed'] = '1';
+        $_POST['transition_inventory_fingerprint'] = $this->transitionInventoryFingerprint(
+            $application,
+        );
+
+        $this->expectSetupFailure($application, 'ungeklärte Exportjobs');
+
+        self::assertSame(
+            '',
+            $application->config->get(
+                'invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed',
+            ),
+        );
+    }
+
     public function testPublicClientTickboxCannotBeStoredAsEInvoiceOptIn(): void
     {
         $application = $this->application();
@@ -604,6 +722,25 @@ final class AdminSetupBehaviorTest extends MariaDbTestCase
             new Client(['handler' => HandlerStack::create(new MockHandler([
                 new Response(200, [], $guidanceBody),
                 new Response(200, [], $guidanceBody),
+            ]))]),
+            'synthetic-token',
+            'http://127.0.0.1/api/v1',
+            'WHMCS-sevdesk-test',
+        );
+        (new ReflectionProperty(Application::class, 'client'))->setValue($application, $client);
+
+        return $application;
+    }
+
+    private function applicationWithInvoiceReferences(): Application
+    {
+        $application = $this->application();
+        $application->config->set('sevdesk_api_key', 'synthetic-token');
+        $client = new SevdeskClient(
+            new Client(['handler' => HandlerStack::create(new MockHandler([
+                new Response(200, [], '{"version":"2.0"}'),
+                new Response(200, [], '{"objects":[{"id":7,"name":"Synthetic user"}]}'),
+                new Response(200, [], '{"objects":[{"id":8,"name":"Synthetic unity"}]}'),
             ]))]),
             'synthetic-token',
             'http://127.0.0.1/api/v1',
