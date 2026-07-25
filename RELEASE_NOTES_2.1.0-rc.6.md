@@ -17,15 +17,13 @@
 
 Der Dateitausch startet keinen Export. Vorhandene Voucher und Invoices werden weder konvertiert noch erneut angelegt. Bestehende Kontakt-IDs und Mappingzeilen bleiben erhalten; eine vorhandene sevDesk-Kontakt-ID wird wiederverwendet und nicht automatisch geändert.
 
-Historische Exporte bleiben mailfrei. Bei WHMCS-Dokumenthoheit öffnet das Modul die sevDesk-Invoice über `sendBy`, damit die PDF erzeugt wird, versendet aber keine Nachricht an den Kunden. Die in WHMCS gespeicherte Rechnungsnummer wird unverändert übernommen, auch wenn sie noch ein altes `PRO`-Präfix trägt.
-
 ## Weiterhin gesperrt
 
 - Rule-11-Invoices, solange der verbundene sevDesk-Mandant keinen passenden `REVENUE`-Scope ausweist;
 - EU-B2B-Hosting ohne separat bestätigten Dienstleistungs- und Reverse-Charge-Pfad;
 - `LateFee`, andere negative Positionen, mehrere Rabatte und ZUGFeRD mit Rabatt;
 - Rule 18 und 20, Invoice-CreditNotes sowie automatische Sammelzahlungsbuchungen;
-- historische EU-B2C-Exporte, solange Beginn und Umfang der OSS-Anwendung sowie die Zielsteuersätze nicht bestätigt sind.
+- historische EU-B2C-Exporte, solange die für den jeweiligen Zeitraum geltende Inlands- oder Bestimmungslandbesteuerung nicht bestätigt ist.
 
 ## Installation
 
