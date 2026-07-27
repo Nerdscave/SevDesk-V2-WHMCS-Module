@@ -377,6 +377,35 @@ final class ContactServiceTest extends TestCase
         self::assertSame('GET', $history[1]['request']->getMethod());
     }
 
+    public function testMalformedMemberAlongsideAnExactContactStillBlocksLinking(): void
+    {
+        $history = [];
+        $persistCalls = 0;
+        $service = new ContactService(
+            $this->client([
+                new Response(200, [], json_encode([
+                    'objects' => [[
+                        'id' => '55',
+                        'objectName' => 'Contact',
+                        'customerNumber' => '7',
+                    ], 'malformed'],
+                ], JSON_THROW_ON_ERROR)),
+            ], $history),
+            static function () use (&$persistCalls): void {
+                ++$persistCalls;
+            },
+            static fn (): int => 1,
+        );
+
+        $result = $service->resolve($this->contact());
+
+        self::assertTrue($result->isFailure());
+        self::assertSame('contact_search_unverifiable', $result->errorCode());
+        self::assertSame(1, $result->context()['unverifiableCount']);
+        self::assertSame(0, $persistCalls);
+        self::assertCount(1, $history);
+    }
+
     public function testUnconfirmedCustomerNumberPolicySearchesButDoesNotCreate(): void
     {
         $history = [];

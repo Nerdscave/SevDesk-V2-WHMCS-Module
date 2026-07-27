@@ -20,6 +20,7 @@ use WHMCS\Module\Addon\SevDesk\Config;
 use WHMCS\Module\Addon\SevDesk\Controllers\AdminController;
 use WHMCS\Module\Addon\SevDesk\Database\Migrator;
 use WHMCS\Module\Addon\SevDesk\Repository\JobRepository;
+use WHMCS\Module\Addon\SevDesk\Support\AdvisoryLockName;
 use WHMCS\Module\Addon\SevDesk\Support\Csrf;
 use WHMCS\Module\Addon\SevDesk\Tests\Integration\Support\MariaDbTestCase;
 use WHMCS\Module\Addon\SevDesk\View;
@@ -547,7 +548,7 @@ final class AdminSetupBehaviorTest extends MariaDbTestCase
         $connection = $holder->getConnection();
         $acquired = $connection->selectOne(
             'SELECT GET_LOCK(?, 0) AS acquired',
-            ['whmcs_sevdesk_job_runner'],
+            [AdvisoryLockName::jobRunner()],
         );
         self::assertSame(1, (int) ($acquired->acquired ?? 0));
 
@@ -557,7 +558,7 @@ final class AdminSetupBehaviorTest extends MariaDbTestCase
         } finally {
             $connection->selectOne(
                 'SELECT RELEASE_LOCK(?) AS released',
-                ['whmcs_sevdesk_job_runner'],
+                [AdvisoryLockName::jobRunner()],
             );
         }
 
@@ -869,7 +870,7 @@ final class AdminSetupBehaviorTest extends MariaDbTestCase
     {
         $result = Capsule::selectOne(
             'SELECT IS_FREE_LOCK(?) AS lock_is_free',
-            ['whmcs_sevdesk_job_runner'],
+            [AdvisoryLockName::jobRunner()],
         );
         self::assertSame(1, (int) ($result->lock_is_free ?? 0));
     }

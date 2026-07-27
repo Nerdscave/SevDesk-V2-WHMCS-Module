@@ -1115,7 +1115,38 @@ final class JobRepositoryTest extends MariaDbTestCase
         self::assertNull($this->jobs->claimNext());
     }
 
-    public function testCancelledJobsRejectRetryAndReconciliation(): void
+    public function testCancellingARiskyRetryKeepsItAmbiguousAndReserved(): void
+    {
+        $jobId = $this->jobs->create('single', [[
+            'invoice_id' => 483,
+            'action' => 'export_document',
+        ]]);
+        $claim = $this->jobs->claimNext();
+        self::assertNotNull($claim);
+        self::assertTrue($this->jobs->checkpoint(
+            (int) $claim->id,
+            (string) $claim->lease_token,
+            'invoice_created',
+            ['remoteId' => '900483'],
+        ));
+        $this->jobs->finish($claim, JobOutcome::retry(
+            'Synthetic read failure after create.',
+            300,
+            503,
+            errorCode: 'invoice_read_failed',
+            checkpoint: 'invoice_created',
+        ));
+
+        $this->jobs->cancel($jobId);
+
+        $item = $this->jobs->findItem((int) $claim->id);
+        self::assertSame('ambiguous', $item?->status);
+        self::assertSame('cancelled_after_side_effect', $item?->error_code);
+        self::assertSame('export_voucher:483', $item?->dedupe_key);
+        self::assertSame('900483', $item?->sevdesk_id);
+    }
+
+    public function testCancelledFailedJobRejectsRetryButCancelledAmbiguousJobCanReconcile(): void
     {
         $failedJob = $this->jobs->create('single', [[
             'invoice_id' => 49,
@@ -1143,12 +1174,12 @@ final class JobRepositoryTest extends MariaDbTestCase
             JobOutcome::ambiguous('Synthetic unknown outcome.', 'voucher_write_requested'),
         );
         $this->jobs->cancel($ambiguousJob);
-        $ambiguousBefore = $this->jobs->findItem((int) $ambiguousClaim->id);
 
-        self::assertFalse($this->jobs->reconcile((int) $ambiguousClaim->id));
+        self::assertTrue($this->jobs->reconcile((int) $ambiguousClaim->id));
         $ambiguousAfter = $this->jobs->findItem((int) $ambiguousClaim->id);
-        self::assertSame($ambiguousBefore?->status, $ambiguousAfter?->status);
-        self::assertSame($ambiguousBefore?->dedupe_key, $ambiguousAfter?->dedupe_key);
+        self::assertSame('pending', $ambiguousAfter?->status);
+        self::assertSame('export_voucher:50', $ambiguousAfter?->dedupe_key);
+        self::assertNull($this->jobs->findJob($ambiguousJob)?->cancel_requested_at);
     }
 
     public function testTwoProcessesNeverClaimTheSameItem(): void

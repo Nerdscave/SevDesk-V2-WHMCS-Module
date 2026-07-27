@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tests\Unit\Jobs;
 
 use PHPUnit\Framework\TestCase;
+use WHMCS\Module\Addon\SevDesk\Config;
 use WHMCS\Module\Addon\SevDesk\Jobs\ExportJobHandler;
 use WHMCS\Module\Addon\SevDesk\Jobs\JobOutcome;
 use WHMCS\Module\Addon\SevDesk\Repository\MappingRepository;
@@ -183,6 +184,19 @@ final class ExportJobHandlerTest extends TestCase
         self::assertStringContainsString("!\$checkpoint('pdf_validated'", $source);
         self::assertStringContainsString('voucher_preflight_checkpoint_failed', $source);
         self::assertStringContainsString('voucher_pdf_checkpoint_failed', $source);
+    }
+
+    public function testInvalidPersistedImportDateFailsClosed(): void
+    {
+        $config = new Config();
+        (new \ReflectionProperty(Config::class, 'values'))->setValue($config, [
+            'import_after' => 'not-a-date',
+        ]);
+        $handler = (new \ReflectionClass(ExportJobHandler::class))->newInstanceWithoutConstructor();
+        (new \ReflectionProperty(ExportJobHandler::class, 'config'))->setValue($handler, $config);
+        $method = new \ReflectionMethod(ExportJobHandler::class, 'isAfterConfiguredStart');
+
+        self::assertFalse($method->invoke($handler, '2026-07-27'));
     }
 
     private function failureOutcome(int $httpStatus, bool $definiteWriteRejected, string $checkpoint): JobOutcome

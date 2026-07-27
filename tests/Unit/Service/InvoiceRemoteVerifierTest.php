@@ -55,6 +55,21 @@ final class InvoiceRemoteVerifierTest extends TestCase
             'total_mismatch',
             $this->verifier()->invoiceMismatch($wrongTotal, $this->invoice(), '42', '1', 100),
         );
+
+        $missingNet = $this->remoteInvoice();
+        unset($missingNet['sumNet']);
+        self::assertSame(
+            'tax_totals_missing',
+            $this->verifier()->invoiceMismatch($missingNet, $this->invoice(), '42', '1', 100),
+        );
+
+        $wrongTax = $this->remoteInvoice();
+        $wrongTax['sumNet'] = '100.01';
+        $wrongTax['sumTax'] = '18.99';
+        self::assertSame(
+            'tax_totals_mismatch',
+            $this->verifier()->invoiceMismatch($wrongTax, $this->invoice(), '42', '1', 100),
+        );
     }
 
     public function testNormalInvoiceAcceptsOmittedCountryButRejectsReportedMismatch(): void
@@ -279,7 +294,7 @@ final class InvoiceRemoteVerifierTest extends TestCase
         ));
 
         unset($remote['sumTax']);
-        self::assertSame('discount_tax_totals_missing', $this->verifier()->invoiceMismatch(
+        self::assertSame('tax_totals_missing', $this->verifier()->invoiceMismatch(
             $remote,
             $invoice,
             '42',
@@ -288,7 +303,7 @@ final class InvoiceRemoteVerifierTest extends TestCase
         ));
 
         $remote['sumTax'] = '15.19';
-        self::assertSame('discount_tax_totals_mismatch', $this->verifier()->invoiceMismatch(
+        self::assertSame('tax_totals_mismatch', $this->verifier()->invoiceMismatch(
             $remote,
             $invoice,
             '42',
@@ -529,22 +544,13 @@ final class InvoiceRemoteVerifierTest extends TestCase
         ));
     }
 
-    public function testRecoveryCanRetainItsHistoricalMalformedListClassification(): void
+    public function testMalformedPositionListsAlwaysFailClosed(): void
     {
         $verifier = $this->verifier();
 
         self::assertSame(
             'position_invalid',
             $verifier->positionsMismatch(['malformed'], $this->invoice(), '99'),
-        );
-        self::assertSame(
-            'position_count_mismatch',
-            $verifier->positionsMismatch(
-                ['malformed'],
-                $this->invoice(),
-                '99',
-                discardNonArrayListMembers: true,
-            ),
         );
     }
 
@@ -564,6 +570,9 @@ final class InvoiceRemoteVerifierTest extends TestCase
             '119.00',
             '0',
             [new LineItem('Hosting', '100.00', '19', true)],
+            [],
+            '100.00',
+            '19.00',
         );
     }
 
@@ -584,6 +593,8 @@ final class InvoiceRemoteVerifierTest extends TestCase
             'contactPerson' => ['id' => '7'],
             'showNet' => true,
             'deliveryAddressCountry' => 'DE',
+            'sumNet' => '100.00',
+            'sumTax' => '19.00',
             'sumGross' => '119.00',
         ];
     }

@@ -156,7 +156,7 @@ final class VoucherRemoteVerifier
         foreach ($invoice->lineItems as $lineItem) {
             try {
                 $expected[] = self::positionSignature(
-                    substr($lineItem->description, 0, 255),
+                    mb_substr($lineItem->description, 0, 255),
                     Decimal::toMinorUnits($lineItem->amount),
                     Decimal::toFloat($lineItem->taxRate),
                     $lineItem->net,

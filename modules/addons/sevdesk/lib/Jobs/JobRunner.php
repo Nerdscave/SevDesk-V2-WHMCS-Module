@@ -8,6 +8,7 @@ use Throwable;
 use WHMCS\Database\Capsule;
 use WHMCS\Module\Addon\SevDesk\Config;
 use WHMCS\Module\Addon\SevDesk\Repository\JobRepository;
+use WHMCS\Module\Addon\SevDesk\Support\AdvisoryLockName;
 
 final class JobRunner
 {
@@ -23,11 +24,17 @@ final class JobRunner
     public function run(int $maxItems = 10, int $maxSeconds = 50): array
     {
         $started = microtime(true);
-        if ($this->runtimeBlocked()) {
-            return ['processed' => 0, 'locked' => false, 'duration' => 0.0];
-        }
-        if (!$this->acquireLock()) {
-            return ['processed' => 0, 'locked' => true, 'duration' => 0.0];
+        try {
+            if ($this->runtimeBlocked()) {
+                return ['processed' => 0, 'locked' => false, 'duration' => 0.0];
+            }
+            if (!$this->acquireLock()) {
+                return ['processed' => 0, 'locked' => true, 'duration' => 0.0];
+            }
+        } catch (Throwable $error) {
+            $this->logBoundaryFailure('startup', $error);
+
+            return ['processed' => 0, 'locked' => false, 'duration' => microtime(true) - $started];
         }
 
         $processed = 0;
@@ -53,9 +60,14 @@ final class JobRunner
                 // tenant-wide authentication alarm therefore linearize either
                 // before this claim (no handler starts) or after it (this is the
                 // one already-started item that may finish).
-                $item = $this->jobs->claimNext(
-                    claimAllowed: fn (): bool => $this->config->runtimeAllowsClaimWhileLocked(),
-                );
+                try {
+                    $item = $this->jobs->claimNext(
+                        claimAllowed: fn (): bool => $this->config->runtimeAllowsClaimWhileLocked(),
+                    );
+                } catch (Throwable $error) {
+                    $this->logBoundaryFailure('claim', $error);
+                    break;
+                }
                 if ($item === null) {
                     break;
                 }
@@ -132,7 +144,12 @@ final class JobRunner
                     }
                 }
 
-                $this->jobs->finish($item, $outcome);
+                try {
+                    $this->jobs->finish($item, $outcome);
+                } catch (Throwable $error) {
+                    $this->logBoundaryFailure('finish item ' . (int) $item->id, $error);
+                    break;
+                }
                 if ($this->config->bool('debug_logging') && function_exists('logActivity')) {
                     $safeCode = preg_replace('/[^A-Za-z0-9_.:-]+/', '_', (string) ($outcome->errorCode ?? 'none'));
                     logActivity(sprintf(
@@ -147,7 +164,11 @@ final class JobRunner
                 ++$processed;
             }
         } finally {
-            $this->releaseLock();
+            try {
+                $this->releaseLock();
+            } catch (Throwable $error) {
+                $this->logBoundaryFailure('lock release', $error);
+            }
         }
 
         return ['processed' => $processed, 'locked' => false, 'duration' => microtime(true) - $started];
@@ -171,13 +192,22 @@ final class JobRunner
 
     private function acquireLock(): bool
     {
-        $result = Capsule::selectOne('SELECT GET_LOCK(?, 0) AS acquired', ['whmcs_sevdesk_job_runner']);
+        $result = Capsule::selectOne('SELECT GET_LOCK(?, 0) AS acquired', [AdvisoryLockName::jobRunner()]);
 
         return isset($result->acquired) && (int) $result->acquired === 1;
     }
 
     private function releaseLock(): void
     {
-        Capsule::selectOne('SELECT RELEASE_LOCK(?) AS released', ['whmcs_sevdesk_job_runner']);
+        Capsule::selectOne('SELECT RELEASE_LOCK(?) AS released', [AdvisoryLockName::jobRunner()]);
+    }
+
+    private function logBoundaryFailure(string $phase, Throwable $error): void
+    {
+        if (function_exists('logActivity')) {
+            logActivity(
+                'sevdesk job runner ' . $phase . ' failed safely: ' . get_class($error),
+            );
+        }
     }
 }

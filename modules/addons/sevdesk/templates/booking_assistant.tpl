@@ -83,7 +83,7 @@
                 <button type="submit" name="import" value="1" class="btn btn-primary" data-requires-selection data-confirm="Ausgewählte Zahlungen jetzt verbindlich in sevdesk buchen? Bitte prüfen Sie Referenzen und Beträge vor der Bestätigung."><i class="fas fa-check" aria-hidden="true"></i> Auswahl buchen</button>
             </div>
         </div>
-        {include file="partials/pagination.tpl"}
+        {include file="partials/pagination.tpl" paginationPost=true}
     {elseif ($filters.submitted || $smarty.post) && !$job}
         {include file="partials/empty_state.tpl" emptyIcon="fa-money-check-alt" emptyTitle="Keine Zahlungskandidaten" emptyText="Für den gewählten Zeitraum wurden keine eindeutigen oder prüfbaren Treffer gefunden."}
     {/if}

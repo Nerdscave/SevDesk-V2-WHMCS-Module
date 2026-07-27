@@ -115,6 +115,7 @@ function sevdesk_mass_payment_target_ids(Application $application, int $invoiceI
 /** @param array<string, mixed> $vars */
 function sevdesk_enqueue_invoice(array $vars, string $event): void
 {
+    $invoiceId = (int) ($vars['invoiceid'] ?? 0);
     try {
         if (!Capsule::schema()->hasTable(Migrator::JOBS_TABLE)) {
             return;
@@ -165,7 +166,6 @@ function sevdesk_enqueue_invoice(array $vars, string $event): void
             return;
         }
 
-        $invoiceId = (int) ($vars['invoiceid'] ?? 0);
         if ($invoiceId < 1) {
             return;
         }
@@ -237,7 +237,11 @@ function sevdesk_enqueue_invoice(array $vars, string $event): void
         ]);
     } catch (Throwable $error) {
         if (function_exists('logActivity')) {
-            logActivity('sevdesk could not enqueue ' . $event . ': ' . get_class($error));
+            logActivity(
+                'sevdesk could not enqueue ' . $event
+                . ' for invoice ' . max(0, $invoiceId)
+                . ': ' . get_class($error),
+            );
         }
     }
 }
@@ -250,8 +254,8 @@ function sevdesk_enqueue_invoice(array $vars, string $event): void
  */
 function sevdesk_prepare_paid_invoice_email_guard(array $vars): void
 {
+    $invoiceId = (int) ($vars['invoiceid'] ?? 0);
     try {
-        $invoiceId = (int) ($vars['invoiceid'] ?? 0);
         if ($invoiceId < 1) {
             return;
         }
@@ -309,7 +313,10 @@ function sevdesk_prepare_paid_invoice_email_guard(array $vars): void
         }
     } catch (Throwable $error) {
         if (function_exists('logActivity')) {
-            logActivity('sevdesk could not prepare the paid Invoice email guard: ' . get_class($error));
+            logActivity(
+                'sevdesk could not prepare the paid Invoice email guard for invoice '
+                . max(0, $invoiceId) . ': ' . get_class($error),
+            );
         }
     }
 }
@@ -317,6 +324,7 @@ function sevdesk_prepare_paid_invoice_email_guard(array $vars): void
 /** @param array<string, mixed> $vars */
 function sevdesk_enqueue_review(array $vars, string $reason): void
 {
+    $invoiceId = (int) ($vars['invoiceid'] ?? 0);
     try {
         if (!Capsule::schema()->hasTable(Migrator::JOBS_TABLE)) {
             return;
@@ -325,7 +333,6 @@ function sevdesk_enqueue_review(array $vars, string $reason): void
         if (!sevdesk_automatic_enqueue_enabled($application)) {
             return;
         }
-        $invoiceId = (int) ($vars['invoiceid'] ?? 0);
         if ($invoiceId < 1) {
             return;
         }
@@ -336,7 +343,10 @@ function sevdesk_enqueue_review(array $vars, string $reason): void
         ]], ['reason' => $reason]);
     } catch (Throwable $error) {
         if (function_exists('logActivity')) {
-            logActivity('sevdesk could not enqueue accounting review: ' . get_class($error));
+            logActivity(
+                'sevdesk could not enqueue accounting review for invoice '
+                . max(0, $invoiceId) . ': ' . get_class($error),
+            );
         }
     }
 }
@@ -344,6 +354,8 @@ function sevdesk_enqueue_review(array $vars, string $reason): void
 /** @param array<string, mixed> $vars */
 function sevdesk_enqueue_transaction_review(array $vars): void
 {
+    $transactionId = (int) ($vars['id'] ?? 0);
+    $invoiceId = (int) ($vars['invoiceid'] ?? $vars['invocieid'] ?? 0);
     try {
         if (!Capsule::schema()->hasTable(Migrator::JOBS_TABLE)) {
             return;
@@ -352,13 +364,11 @@ function sevdesk_enqueue_transaction_review(array $vars): void
         if (!sevdesk_automatic_enqueue_enabled($application)) {
             return;
         }
-        $transactionId = (int) ($vars['id'] ?? 0);
         $amountOut = (float) ($vars['amountout'] ?? 0);
         $refundId = (int) ($vars['refundid'] ?? 0);
         if ($transactionId < 1 || ($amountOut <= 0 && $refundId < 1)) {
             return;
         }
-        $invoiceId = (int) ($vars['invoiceid'] ?? $vars['invocieid'] ?? 0);
         if ($invoiceId < 1) {
             $invoiceId = (int) Capsule::table('tblaccounts')->where('id', $transactionId)->value('invoiceid');
         }
@@ -374,7 +384,11 @@ function sevdesk_enqueue_transaction_review(array $vars): void
         ]], ['reason' => 'negative_transaction'], null);
     } catch (Throwable $error) {
         if (function_exists('logActivity')) {
-            logActivity('sevdesk could not enqueue transaction review: ' . get_class($error));
+            logActivity(
+                'sevdesk could not enqueue transaction review for transaction '
+                . max(0, $transactionId) . ' and invoice ' . max(0, $invoiceId)
+                . ': ' . get_class($error),
+            );
         }
     }
 }
@@ -388,6 +402,7 @@ function sevdesk_enqueue_transaction_review(array $vars): void
  */
 function sevdesk_client_invoice_variables(array $vars): array
 {
+    $invoiceId = (int) ($vars['invoiceid'] ?? $vars['invoiceId'] ?? $_GET['id'] ?? 0);
     try {
         if (!Capsule::schema()->hasTable(Migrator::MAPPING_TABLE)) {
             return [];
@@ -402,7 +417,6 @@ function sevdesk_client_invoice_variables(array $vars): array
             return [];
         }
 
-        $invoiceId = (int) ($vars['invoiceid'] ?? $vars['invoiceId'] ?? $_GET['id'] ?? 0);
         if ($invoiceId < 1) {
             return [];
         }
@@ -443,7 +457,10 @@ function sevdesk_client_invoice_variables(array $vars): array
         ];
     } catch (Throwable $error) {
         if (function_exists('logActivity')) {
-            logActivity('sevdesk client invoice adapter failed safely: ' . get_class($error));
+            logActivity(
+                'sevdesk client invoice adapter failed safely for invoice '
+                . max(0, $invoiceId) . ': ' . get_class($error),
+            );
         }
 
         return [];
@@ -549,20 +566,36 @@ function sevdesk_email_pre_send(array $vars): array
 }
 
 add_hook('AdminAreaHeadOutput', 1, static function (): string {
-    if (($_GET['module'] ?? null) !== 'sevdesk') {
+    try {
+        if (($_GET['module'] ?? null) !== 'sevdesk') {
+            return '';
+        }
+
+        return AdminAssets::stylesheetMarkup();
+    } catch (Throwable $error) {
+        if (function_exists('logActivity')) {
+            logActivity('sevdesk admin stylesheet hook failed safely: ' . get_class($error));
+        }
+
         return '';
     }
-
-    return AdminAssets::stylesheetMarkup();
 });
 
 add_hook('AdminAreaFooterOutput', 1, static function (): string {
-    $output = AdminInvoiceControls::footerForms();
-    if (($_GET['module'] ?? null) === 'sevdesk') {
-        $output = AdminAssets::scriptMarkup() . $output;
-    }
+    try {
+        $output = AdminInvoiceControls::footerForms();
+        if (($_GET['module'] ?? null) === 'sevdesk') {
+            $output = AdminAssets::scriptMarkup() . $output;
+        }
 
-    return $output;
+        return $output;
+    } catch (Throwable $error) {
+        if (function_exists('logActivity')) {
+            logActivity('sevdesk admin footer hook failed safely: ' . get_class($error));
+        }
+
+        return '';
+    }
 });
 
 add_hook('InvoiceCreated', 1, static fn (array $vars) => sevdesk_enqueue_invoice($vars, 'InvoiceCreated'));
@@ -598,8 +631,8 @@ add_hook('AfterCronJob', 1, static function (): void {
 });
 
 add_hook('AdminInvoicesControlsOutput', 1, static function (array $vars): string {
+    $invoiceId = (int) ($vars['invoiceid'] ?? 0);
     try {
-        $invoiceId = (int) ($vars['invoiceid'] ?? 0);
         if ($invoiceId < 1 || !Capsule::schema()->hasTable(Migrator::MAPPING_TABLE)) {
             return '';
         }
@@ -643,7 +676,13 @@ add_hook('AdminInvoicesControlsOutput', 1, static function (array $vars): string
             $quickEligible,
             $token,
         );
-    } catch (Throwable) {
+    } catch (Throwable $error) {
+        if (function_exists('logActivity')) {
+            logActivity(
+                'sevdesk admin invoice controls failed safely for invoice '
+                . max(0, $invoiceId) . ': ' . get_class($error),
+            );
+        }
         return '';
     }
 });

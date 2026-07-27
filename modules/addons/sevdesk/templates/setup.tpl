@@ -352,6 +352,9 @@
                         <label class="control-label" for="import-after">Rechnungen berücksichtigen ab</label>
                         <input type="date" id="import-after" name="import_after" class="form-control" value="{$settings.import_after_iso|default:$settings.import_after|escape:'html':'UTF-8'}" required aria-describedby="import-after-help">
                         <small id="import-after-help" class="help-block">Ältere Rechnungen werden als übersprungen protokolliert.</small>
+                        {if $settings.import_after_invalid|default:false}
+                            <p class="text-danger small">Der gespeicherte Exportstichtag ist ungültig. Bitte wählen Sie ein gültiges Datum; bis dahin bleiben Vorschau und Worker gesperrt.</p>
+                        {/if}
                     </div>
                 </div>
                 <div class="col-md-6">

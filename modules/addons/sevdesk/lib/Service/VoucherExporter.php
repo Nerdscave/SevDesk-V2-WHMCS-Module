@@ -286,7 +286,7 @@ final class VoucherExporter
                     ],
                     'taxRate' => Decimal::toFloat($lineItem->taxRate),
                     'net' => $lineItem->net,
-                    'comment' => substr($lineItem->description, 0, 255),
+                    'comment' => mb_substr($lineItem->description, 0, 255),
                 ];
                 $position[$lineItem->net ? 'sumNet' : 'sumGross'] = Decimal::toFloat($lineItem->amount);
 
@@ -296,7 +296,7 @@ final class VoucherExporter
         );
 
         $invoiceLabel = trim((string) preg_replace('/[\x00-\x1F\x7F]+/', ' ', $invoice->invoiceNumber));
-        $description = substr($invoiceLabel, 0, 120) . ' ' . self::marker($invoice->invoiceId);
+        $description = mb_substr($invoiceLabel, 0, 120) . ' ' . self::marker($invoice->invoiceId);
 
         return [
             'voucher' => [

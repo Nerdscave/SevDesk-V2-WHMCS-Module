@@ -129,6 +129,24 @@ final class TaxPolicyTest extends TestCase
         self::assertSame('unsupported_receipt_guidance', $decision->code);
     }
 
+    public function testGuidanceWithoutExplicitRevenueScopeNeverAuthorisesAVoucher(): void
+    {
+        foreach ([[], null, ['REVENUE', ['malformed']]] as $receiptTypes) {
+            $guidance = $this->guidance();
+            $guidance[0]['allowedReceiptTypes'] = $receiptTypes;
+            $decision = (new TaxPolicy(
+                $this->profiles(),
+                TaxPolicy::EU_B2C_BLOCKED,
+                $guidance,
+            ))->decide('DE', false, null, false, false, [
+                new LineItem('Service', '119', '19', false),
+            ]);
+
+            self::assertFalse($decision->allowed);
+            self::assertSame('unsupported_receipt_guidance', $decision->code);
+        }
+    }
+
 
     public function testEuPrivateCustomerIsNeverClassifiedAsEuB2b(): void
     {
@@ -176,6 +194,52 @@ final class TaxPolicyTest extends TestCase
         self::assertTrue($allowed->allowed);
         self::assertSame('3', $allowed->taxRuleId);
         self::assertTrue($allowed->guidanceValidated);
+    }
+
+    public function testEuB2bRejectsPlaceholderAndCountryMismatchedVatIds(): void
+    {
+        foreach (['-', 'n/a', '0', 'DE123456789'] as $vatNumber) {
+            $lines = [new LineItem('Goods shipment', '100', '0', false)];
+            $voucher = $this->policyWithConfirmedEuGoods()->decide(
+                'NL',
+                true,
+                $vatNumber,
+                false,
+                false,
+                $lines,
+                true,
+            );
+            $invoice = $this->policyWithConfirmedEuGoods()->decideInvoice(
+                'NL',
+                true,
+                $vatNumber,
+                false,
+                false,
+                $lines,
+                true,
+            );
+
+            self::assertFalse($voucher->allowed, $vatNumber);
+            self::assertSame('invalid_vat_id_evidence', $voucher->code, $vatNumber);
+            self::assertFalse($invoice->allowed, $vatNumber);
+            self::assertSame('invalid_vat_id_evidence', $invoice->code, $vatNumber);
+        }
+    }
+
+    public function testGreekVatPrefixUsesTheEuElConvention(): void
+    {
+        $decision = $this->policyWithConfirmedEuGoods()->decide(
+            'GR',
+            true,
+            'EL123456789',
+            false,
+            false,
+            [new LineItem('Goods shipment', '100', '0', false)],
+            true,
+        );
+
+        self::assertTrue($decision->allowed);
+        self::assertSame('3', $decision->taxRuleId);
     }
 
     public function testEuB2bWithPositiveVatIsBlockedEvenIfGuidanceWouldAllowIt(): void
@@ -329,12 +393,12 @@ final class TaxPolicyTest extends TestCase
         $voucherAfterCutoff = $this->policy()->decide('DE', false, null, false, true, $lines);
         $invoiceAfterCutoff = $this->policy()->decideInvoice('DE', false, null, false, true, $lines);
 
-        self::assertTrue($voucherAfterCutoff->allowed);
+        self::assertFalse($voucherAfterCutoff->allowed);
         self::assertSame('add_funds', $voucherAfterCutoff->profile);
-        self::assertSame('1', $voucherAfterCutoff->taxRuleId);
-        self::assertTrue($invoiceAfterCutoff->allowed);
+        self::assertSame('domestic_zero_tax_rate_outside_small_business_period', $voucherAfterCutoff->code);
+        self::assertFalse($invoiceAfterCutoff->allowed);
         self::assertSame('add_funds', $invoiceAfterCutoff->profile);
-        self::assertSame('1', $invoiceAfterCutoff->taxRuleId);
+        self::assertSame('domestic_zero_tax_rate_outside_small_business_period', $invoiceAfterCutoff->code);
     }
 
     public function testAddFundsCannotBypassTheRuleElevenInvoiceCanary(): void

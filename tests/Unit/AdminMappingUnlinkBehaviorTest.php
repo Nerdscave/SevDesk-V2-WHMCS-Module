@@ -147,6 +147,18 @@ final class AdminMappingUnlinkBehaviorTest extends TestCase
         self::assertTrue(Capsule::table('mod_sevdesk')->where('id', $mappingId)->exists());
     }
 
+    public function testGenericBadRequestNeverProvesThatTheRemoteDocumentIsAbsent(): void
+    {
+        $mappingId = $this->insertMapping('7012', 'invoice');
+        $application = $this->application([
+            new Response(400, [], '{"error":{"code":"INVALID_PARAMETER"}}'),
+        ]);
+
+        $this->deleteMapping($application, $mappingId);
+
+        self::assertTrue(Capsule::table('mod_sevdesk')->where('id', $mappingId)->exists());
+    }
+
     public function testAuthenticationFailureKeepsMappingAndTripsTenantSafetyGates(): void
     {
         $mappingId = $this->insertMapping('7004', 'invoice');

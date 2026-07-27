@@ -4853,6 +4853,8 @@ SQL);
             'addressCity' => 'Example City',
             'addressCountry' => ['id' => '1', 'objectName' => 'StaticCountry', 'code' => 'DE'],
             'customerInternalNote' => '[WHMCS-INVOICE:10]',
+            'sumNet' => '100.00',
+            'sumTax' => '19.00',
             'sumGross' => '119.00',
         ]]], JSON_THROW_ON_ERROR));
     }

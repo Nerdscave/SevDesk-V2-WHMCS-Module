@@ -4,7 +4,8 @@ declare(strict_types=1);
 
 namespace WHMCS\Module\Addon\SevDesk\Support;
 
-use DateTimeImmutable;
+use RuntimeException;
+use WHMCS\Module\Addon\SevDesk\Config;
 use WHMCS\Module\Addon\SevDesk\Jobs\ExportJobHandler;
 
 /**
@@ -46,8 +47,9 @@ final class QuickExportGuard
             return self::STATUS_BLOCKED;
         }
 
-        $start = DateTimeImmutable::createFromFormat('!d-m-Y', $importAfter);
-        if (!$start instanceof DateTimeImmutable || $start->format('d-m-Y') !== $importAfter) {
+        try {
+            $start = Config::parseImportAfter($importAfter);
+        } catch (RuntimeException) {
             return self::INVALID_CONFIGURATION;
         }
         $invoiceDate = trim((string) ($invoice->date ?? ''));

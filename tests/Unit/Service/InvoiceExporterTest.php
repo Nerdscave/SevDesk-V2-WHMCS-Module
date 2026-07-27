@@ -132,6 +132,9 @@ final class InvoiceExporterTest extends TestCase
             '119.01',
             '0',
             [new LineItem('Hosting', '100.00', '19', true)],
+            [],
+            '100.00',
+            '19.01',
         );
         $exporter = new InvoiceExporter(
             $this->client([], $history),
@@ -739,6 +742,12 @@ final class InvoiceExporterTest extends TestCase
             '120.00',
             '0',
             [new LineItem('Digital service', '120.00', '20', false)],
+            [],
+            '100.00',
+            '20.00',
+            [],
+            '100.00',
+            '20.00',
         );
         $tax = TaxDecision::allowInvoiceRule19(
             'eu_b2c_oss_rule19',
@@ -973,6 +982,9 @@ final class InvoiceExporterTest extends TestCase
             '120.00',
             '0',
             [new LineItem('Digital service', '120.00', '20', false)],
+            [],
+            '100.00',
+            '20.00',
         );
         $rule19Tax = TaxDecision::allowInvoiceRule19(
             'eu_b2c_oss_rule19',
@@ -989,6 +1001,8 @@ final class InvoiceExporterTest extends TestCase
             'showNet' => false,
             'deliveryAddressCountry' => null,
             'addressCountry' => ['id' => '1490', 'objectName' => 'StaticCountry', 'code' => 'cy'],
+            'sumNet' => '100.00',
+            'sumTax' => '20.00',
             'sumGross' => '120.00',
         ];
         $remotePosition = [
@@ -1210,6 +1224,42 @@ final class InvoiceExporterTest extends TestCase
         self::assertSame('99', $result->remoteId);
         self::assertSame(0, $persistCalls);
         self::assertCount(2, $history);
+    }
+
+    public function testTaxDistributionMismatchLeavesTheTypedMappingEmptyEvenWhenGrossMatches(): void
+    {
+        $history = [];
+        $persistCalls = 0;
+        $exporter = new InvoiceExporter(
+            $this->client([
+                new Response(201, [], '{"objects":{"invoice":{"id":"99"}}}'),
+                $this->invoiceResponse(100, [
+                    'sumNet' => '99.99',
+                    'sumTax' => '19.01',
+                    'sumGross' => '119.00',
+                ]),
+            ], $history),
+            static fn (): null => null,
+            static function () use (&$persistCalls): void {
+                ++$persistCalls;
+            },
+            '7',
+            '8',
+        );
+
+        $result = $exporter->export(
+            $this->invoice(),
+            '42',
+            $this->taxDecision(),
+            'DE',
+            $this->target(DocumentTargetResolver::AUTHORITY_WHMCS),
+            invoiceAddressContext: $this->invoiceAddressContext(),
+        );
+
+        self::assertSame(ExportResult::AMBIGUOUS, $result->status);
+        self::assertSame('remote_tax_totals_mismatch', $result->code);
+        self::assertSame(0, $persistCalls);
+        self::assertSame(['POST', 'GET'], $this->requestMethods($history));
     }
 
     public function testImpossibleRemoteDateThatNormalisesToExpectedDateIsRejected(): void
@@ -1528,6 +1578,43 @@ final class InvoiceExporterTest extends TestCase
 
         self::assertSame(ExportResult::AMBIGUOUS, $result->status);
         self::assertSame('invoice_open_prewrite_remote_total_mismatch', $result->code);
+        self::assertSame([], $checkpoints);
+        self::assertSame(['GET', 'GET'], $this->requestMethods($history));
+    }
+
+    public function testChangedDraftTaxDistributionIsRejectedBeforeSendBy(): void
+    {
+        $history = [];
+        $checkpoints = [];
+        $exporter = new InvoiceExporter(
+            $this->client([
+                $this->invoiceResponse(100, [
+                    'sumNet' => '99.99',
+                    'sumTax' => '19.01',
+                    'sumGross' => '119.00',
+                ]),
+                $this->positionResponse(),
+            ], $history),
+            static fn (): string => '99',
+            static fn (): bool => true,
+            '7',
+            '8',
+        );
+
+        $result = $exporter->openForWhmcsAuthority(
+            $this->invoice(),
+            '99',
+            $this->taxDecision(),
+            '42',
+            'DE',
+            static function (string $checkpoint) use (&$checkpoints): void {
+                $checkpoints[] = $checkpoint;
+            },
+            invoiceAddressContext: $this->invoiceAddressContext(),
+        );
+
+        self::assertSame(ExportResult::AMBIGUOUS, $result->status);
+        self::assertSame('invoice_open_prewrite_remote_tax_totals_mismatch', $result->code);
         self::assertSame([], $checkpoints);
         self::assertSame(['GET', 'GET'], $this->requestMethods($history));
     }
@@ -2089,6 +2176,9 @@ final class InvoiceExporterTest extends TestCase
             '120.00',
             '0',
             [new LineItem('Digital service', '120.00', '20', false)],
+            [],
+            '100.00',
+            '20.00',
         );
         $tax = TaxDecision::allowInvoiceRule19('oss', 'confirmed', ['20']);
         $target = DocumentTargetDecision::select(
@@ -2220,6 +2310,9 @@ final class InvoiceExporterTest extends TestCase
             '119.00',
             '0',
             [new LineItem('Hosting', '100.00', '19', true)],
+            [],
+            '100.00',
+            '19.00',
         );
     }
 
@@ -2342,6 +2435,8 @@ final class InvoiceExporterTest extends TestCase
             'addressCity' => 'Example City',
             'addressCountry' => ['id' => '1', 'objectName' => 'StaticCountry', 'code' => 'DE'],
             'customerInternalNote' => '[WHMCS-INVOICE:10]',
+            'sumNet' => '100.00',
+            'sumTax' => '19.00',
             'sumGross' => '119.00',
         ], $overrides);
 

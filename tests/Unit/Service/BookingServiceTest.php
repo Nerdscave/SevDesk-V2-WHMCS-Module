@@ -39,7 +39,7 @@ final class BookingServiceTest extends TestCase
         self::assertSame('false', $query['isBooked']);
         self::assertSame('true', $query['onlyCredit']);
         self::assertSame('TX-42', $query['paymtPurpose']);
-        self::assertSame('1000', $query['limit']);
+        self::assertSame('100', $query['limit']);
         self::assertSame('0', $query['offset']);
 
         $checkpoints = [];
@@ -120,6 +120,27 @@ final class BookingServiceTest extends TestCase
             );
             self::assertCount(0, $history);
         }
+    }
+
+    public function testMalformedTransactionCandidateInvalidatesTheWholePreview(): void
+    {
+        $history = [];
+        $service = new BookingService($this->client([
+            $this->voucherResponse(),
+            new Response(200, [], json_encode([
+                'objects' => [$this->transaction('73'), 'malformed'],
+            ], JSON_THROW_ON_ERROR)),
+        ], $history));
+
+        $result = $service->preview($this->payment());
+
+        self::assertSame('failed', $result['status']);
+        self::assertSame('booking_preview_failed', $result['code']);
+        self::assertCount(2, $history);
+        self::assertSame(['GET', 'GET'], array_map(
+            static fn (array $entry): string => $entry['request']->getMethod(),
+            $history,
+        ));
     }
 
     public function testOnlyAnAuthenticBookingV1SnapshotCanUpgradeToLegacyVoucher(): void
@@ -253,36 +274,68 @@ final class BookingServiceTest extends TestCase
         self::assertCount(2, $history, 'TX-42 must not match the longer reference TX-420.');
     }
 
+    public function testUniqueTransactionSearchReadsEveryRequiredPage(): void
+    {
+        $history = [];
+        $firstPage = [];
+        for ($id = 1; $id <= 100; ++$id) {
+            $firstPage[] = $this->transaction((string) $id, purpose: 'unrelated reference');
+        }
+        $service = new BookingService($this->client([
+            $this->voucherResponse(),
+            new Response(200, [], json_encode(['objects' => $firstPage], JSON_THROW_ON_ERROR)),
+            $this->transactionListResponse(),
+            $this->accountResponse(),
+        ], $history));
+
+        $preview = $service->preview($this->payment());
+
+        self::assertSame('ready', $preview['status']);
+        self::assertCount(4, $history);
+        parse_str($history[1]['request']->getUri()->getQuery(), $firstQuery);
+        parse_str($history[2]['request']->getUri()->getQuery(), $secondQuery);
+        self::assertSame('100', $firstQuery['limit']);
+        self::assertSame('0', $firstQuery['offset']);
+        self::assertSame('100', $secondQuery['limit']);
+        self::assertSame('100', $secondQuery['offset']);
+    }
+
     public function testFullTransactionSearchPageBlocksBeforeAccountReads(): void
     {
         $history = [];
-        $service = new BookingService($this->client([
-            $this->voucherResponse(),
-            $this->fullTransactionListResponse(),
-        ], $history));
+        $responses = [$this->voucherResponse()];
+        for ($page = 0; $page < 10; ++$page) {
+            $responses[] = $this->fullTransactionListResponse();
+        }
+        $service = new BookingService($this->client($responses, $history));
 
         $preview = $service->preview($this->payment());
 
         self::assertSame('blocked', $preview['status']);
         self::assertSame('payment_candidate_search_truncated', $preview['code']);
-        self::assertCount(2, $history, 'A full search page must block before resolving transaction accounts.');
+        self::assertCount(11, $history, 'A full search range must block before resolving transaction accounts.');
         parse_str($history[1]['request']->getUri()->getQuery(), $query);
-        self::assertSame('1000', $query['limit']);
+        self::assertSame('100', $query['limit']);
         self::assertSame('0', $query['offset']);
+        parse_str($history[10]['request']->getUri()->getQuery(), $lastQuery);
+        self::assertSame('900', $lastQuery['offset']);
     }
 
     public function testFullTransactionSearchPageAlsoBlocksConfirmationBeforeCheckpointAndWrite(): void
     {
         $history = [];
-        $service = new BookingService($this->client([
+        $responses = [
             $this->voucherResponse(),
             $this->transactionListResponse(),
             $this->accountResponse(),
             $this->voucherResponse(),
             $this->transactionResponse(),
             $this->accountResponse(),
-            $this->fullTransactionListResponse(),
-        ], $history));
+        ];
+        for ($page = 0; $page < 10; ++$page) {
+            $responses[] = $this->fullTransactionListResponse();
+        }
+        $service = new BookingService($this->client($responses, $history));
         $preview = $service->preview($this->payment());
         $checkpoints = [];
 
@@ -297,7 +350,7 @@ final class BookingServiceTest extends TestCase
         self::assertSame('blocked', $result['status']);
         self::assertSame('payment_candidate_search_truncated', $result['code']);
         self::assertSame([], $checkpoints);
-        self::assertCount(7, $history);
+        self::assertCount(16, $history);
         self::assertSame(0, count(array_filter(
             $history,
             static fn (array $entry): bool => $entry['request']->getMethod() === 'PUT',
@@ -559,8 +612,8 @@ final class BookingServiceTest extends TestCase
     private function fullTransactionListResponse(): Response
     {
         $transactions = [];
-        for ($id = 1; $id <= 1000; ++$id) {
-            $transactions[] = $this->transaction((string) $id);
+        for ($id = 1; $id <= 100; ++$id) {
+            $transactions[] = $this->transaction((string) $id, purpose: 'unrelated reference');
         }
 
         return new Response(200, [], json_encode([

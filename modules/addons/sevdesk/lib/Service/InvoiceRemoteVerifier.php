@@ -161,31 +161,32 @@ final class InvoiceRemoteVerifier
         } catch (\InvalidArgumentException) {
             return 'total_invalid';
         }
+        $expectedNet = $invoice->expectedNetMinorUnits();
+        $expectedTax = $invoice->expectedTaxMinorUnits();
+        if ($expectedNet === null || $expectedTax === null) {
+            return 'tax_totals_unavailable';
+        }
+        $sumNet = $remote['sumNet'] ?? null;
+        $sumTax = $remote['sumTax'] ?? null;
+        if (
+            (!is_string($sumNet) && !is_int($sumNet) && !is_float($sumNet))
+            || (!is_string($sumTax) && !is_int($sumTax) && !is_float($sumTax))
+        ) {
+            return 'tax_totals_missing';
+        }
+        try {
+            if (
+                Decimal::toMinorUnits((string) $sumNet) !== $expectedNet
+                || Decimal::toMinorUnits((string) $sumTax) !== $expectedTax
+            ) {
+                return 'tax_totals_mismatch';
+            }
+        } catch (\InvalidArgumentException) {
+            return 'tax_totals_invalid';
+        }
+
         $sumDiscounts = $remote['sumDiscounts'] ?? null;
         if ($invoice->discounts !== []) {
-            $expectedNet = $invoice->expectedNetMinorUnits();
-            $expectedTax = $invoice->expectedTaxMinorUnits();
-            if ($expectedNet === null || $expectedTax === null) {
-                return 'discount_tax_totals_unavailable';
-            }
-            $sumNet = $remote['sumNet'] ?? null;
-            $sumTax = $remote['sumTax'] ?? null;
-            if (
-                (!is_string($sumNet) && !is_int($sumNet) && !is_float($sumNet))
-                || (!is_string($sumTax) && !is_int($sumTax) && !is_float($sumTax))
-            ) {
-                return 'discount_tax_totals_missing';
-            }
-            try {
-                if (
-                    Decimal::toMinorUnits((string) $sumNet) !== $expectedNet
-                    || Decimal::toMinorUnits((string) $sumTax) !== $expectedTax
-                ) {
-                    return 'discount_tax_totals_mismatch';
-                }
-            } catch (\InvalidArgumentException) {
-                return 'discount_tax_totals_invalid';
-            }
             if ($sumDiscounts === null) {
                 return 'discount_total_missing';
             }
@@ -241,23 +242,23 @@ final class InvoiceRemoteVerifier
 
     /**
      * @param array<array-key, mixed> $response
-     * @param bool $discardNonArrayListMembers Preserves the historical recovery
-     *     classification, which treated malformed list members as a count mismatch.
      */
     public function positionsMismatch(
         array $response,
         InvoiceSnapshot $invoice,
         string $remoteId,
-        bool $discardNonArrayListMembers = false,
     ): ?string {
         if (array_is_list($response)) {
-            $positions = $discardNonArrayListMembers
-                ? array_values(array_filter($response, 'is_array'))
-                : $response;
+            $positions = $response;
         } else {
             $positions = isset($response['invoicePos']) && is_array($response['invoicePos'])
                 ? [$response['invoicePos']]
                 : [];
+        }
+        foreach ($positions as $position) {
+            if (!is_array($position)) {
+                return 'position_invalid';
+            }
         }
         if (count($positions) >= 1000) {
             return 'position_search_truncated';
@@ -266,9 +267,9 @@ final class InvoiceRemoteVerifier
             return 'position_count_mismatch';
         }
 
-        usort($positions, static fn (mixed $left, mixed $right): int =>
-            (int) (is_array($left) ? ($left['positionNumber'] ?? 0) : 0)
-            <=> (int) (is_array($right) ? ($right['positionNumber'] ?? 0) : 0));
+        usort($positions, static fn (array $left, array $right): int =>
+            (int) ($left['positionNumber'] ?? 0)
+            <=> (int) ($right['positionNumber'] ?? 0));
 
         $expectedPositions = [];
         foreach ($invoice->lineItems as $lineItem) {

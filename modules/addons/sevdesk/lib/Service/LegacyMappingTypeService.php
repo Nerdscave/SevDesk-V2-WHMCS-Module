@@ -251,11 +251,9 @@ final class LegacyMappingTypeService
         try {
             $response = $this->client->get('/' . $resource . '/' . rawurlencode($remoteId));
         } catch (ApiException $exception) {
-            // The versioned sevdesk contract documents 400 as the definitive
-            // by-ID absence response for both Invoice and Voucher. Some
-            // tenants also return the conventional 404.
-            $absenceStatuses = [400, 404];
-            if (in_array($exception->httpStatus, $absenceStatuses, true)) {
+            // A plain 400 is also used for malformed requests and capability
+            // failures. Treat it as absence only with the explicit safe code.
+            if ($exception->isDefinitiveNotFound()) {
                 return null;
             }
 

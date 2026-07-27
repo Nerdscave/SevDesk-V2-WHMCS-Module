@@ -43,6 +43,15 @@ final class ApiException extends RuntimeException
         return in_array($this->httpStatus, [400, 409, 422], true);
     }
 
+    public function isDefinitiveNotFound(): bool
+    {
+        return $this->httpStatus === 404
+            || (
+                $this->httpStatus === 400
+                && strtoupper(trim((string) $this->sevdeskCode)) === 'NOT_FOUND'
+            );
+    }
+
     /**
      * @return array{
      *     httpStatus: int|null,

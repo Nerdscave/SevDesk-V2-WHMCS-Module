@@ -1,6 +1,10 @@
 # Sicherer Ersatz eines bestehenden WHMCS-sevDesk-Moduls
 
-Diese Anleitung gehört zu `2.1.0-rc.7`. Der RC ist eine Vorabversion für kontrollierte Test- und Nachlaufinstallationen. Die technischen Invoice- und ZUGFeRD-Läufe unter WHMCS 8.13.4 sind weitgehend abgeschlossen. Zwei Postfachtests haben bestätigt, dass WHMCS 8.13 Binäranhänge aus `EmailPreSend` nicht übernimmt. Der Versandweg `whmcs_template` ist deshalb gesperrt; bei sevDesk-Dokumenthoheit steht der direkte sevDesk-Versand zur Verfügung. Für die vollständige Freigabe fehlen außerdem Invoice-`bookAmount`, der rabattfreie Rule-11-Invoice-Canary, die fünf getrennten Rabatt-Canaries, die produktiven Voucher-Steuerfälle und die fachliche Abnahme.
+Diese Anleitung gehört zu `2.1.0-rc.8`. Der RC ist eine Vorabversion für kontrollierte Test- und Nachlaufinstallationen. Die technischen Invoice- und ZUGFeRD-Läufe unter WHMCS 8.13.4 sind weitgehend abgeschlossen. Zwei Postfachtests haben bestätigt, dass WHMCS 8.13 Binäranhänge aus `EmailPreSend` nicht übernimmt. Der Versandweg `whmcs_template` ist deshalb gesperrt; bei sevDesk-Dokumenthoheit steht der direkte sevDesk-Versand zur Verfügung. Für die vollständige Freigabe fehlen außerdem Invoice-`bookAmount`, der rabattfreie Rule-11-Invoice-Canary, die fünf getrennten Rabatt-Canaries, die produktiven Voucher-Steuerfälle und die fachliche Abnahme.
+
+RC.8 ergänzt die Tabelle `mod_sevdesk_pdf_rate_limits`. Sie enthält nur
+Kunden-ID, Zeitfenster und Zähler für den authentifizierten PDF-Proxy. Die
+Migration legt sie additiv an und verändert keine vorhandenen Mappings.
 
 Diese Version verwendet weiterhin den Addon-Namen und Ordner `sevdesk` sowie
 die Mappingtabelle `mod_sevdesk`. Der Austausch erhält vorhandene Zuordnungen

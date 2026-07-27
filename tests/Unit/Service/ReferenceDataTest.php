@@ -105,6 +105,23 @@ final class ReferenceDataTest extends TestCase
         self::assertCount(2, $history);
     }
 
+    public function testMalformedReferenceMemberCannotBeHiddenByAValidPaymentMethod(): void
+    {
+        $history = [];
+        $references = new ReferenceData($this->client([
+            new Response(200, [], '{"objects":[{"id":9,"name":"Bank"},"malformed"]}'),
+        ], $history));
+
+        try {
+            $references->hasPaymentMethod('9');
+            self::fail('A malformed reference list must invalidate the complete proof.');
+        } catch (ApiException $exception) {
+            self::assertSame('unexpected_reference_response', $exception->sevdeskCode);
+        }
+
+        self::assertCount(1, $history);
+    }
+
     /**
      * @param list<Response> $responses
      * @param array<int, array<string, mixed>> $history

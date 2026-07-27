@@ -33,7 +33,7 @@ final class TaxPolicy
      * @var array<int, list<string>>
      */
     private const NORMAL_TAX_RATES_BY_RULE = [
-        '1' => ['0', '7', '19'],
+        '1' => ['7', '19'],
         '2' => ['0'],
         '3' => ['0'],
         '4' => ['0'],
@@ -145,6 +145,13 @@ final class TaxPolicy
                         'eu_b2b',
                     );
                 }
+                if (!self::validEuVatIdForCountry($vatNumber, $countryCode)) {
+                    return TaxDecision::block(
+                        'invalid_vat_id_evidence',
+                        'EU B2B export requires a plausible VAT ID whose prefix matches the customer country.',
+                        'eu_b2b',
+                    );
+                }
                 // Rule 3 represents an intra-community supply of goods. The
                 // profile therefore remains disabled until the operator has
                 // explicitly confirmed that exact business case. Hosting and
@@ -169,7 +176,7 @@ final class TaxPolicy
             $decision = $this->fromProfile('third_country', true, null);
         }
 
-        $decision = self::validateDomesticRuleOneRates($decision, $lineItems);
+        $decision = self::validateRuleOneRates($decision, $lineItems);
         if ($decision->allowed && $decision->profile === 'eu_b2b') {
             foreach ($lineItems as $lineItem) {
                 if (Decimal::toMinorUnits($lineItem->taxRate) !== 0) {
@@ -253,6 +260,13 @@ final class TaxPolicy
                         'eu_b2b',
                     );
                 }
+                if (!self::validEuVatIdForCountry($vatNumber, $countryCode)) {
+                    return TaxDecision::block(
+                        'invalid_vat_id_evidence',
+                        'EU B2B export requires a plausible VAT ID whose prefix matches the customer country.',
+                        'eu_b2b',
+                    );
+                }
                 $decision = $this->fromInvoiceProfile('eu_b2b', true, '3', $lineItems);
             } elseif ($this->hasConflictingEuB2cProfiles()) {
                 return TaxDecision::block(
@@ -333,14 +347,17 @@ final class TaxPolicy
                 continue;
             }
             $receiptTypes = $accountGuide['allowedReceiptTypes'] ?? null;
-            if (
-                !is_array($receiptTypes)
-                || !in_array(
-                    'REVENUE',
-                    array_map('strtoupper', array_map('strval', $receiptTypes)),
-                    true,
-                )
-            ) {
+            if (!is_array($receiptTypes) || $receiptTypes === []) {
+                continue;
+            }
+            $normalisedReceiptTypes = [];
+            foreach ($receiptTypes as $receiptType) {
+                if (!is_string($receiptType) && !is_int($receiptType)) {
+                    continue 2;
+                }
+                $normalisedReceiptTypes[] = strtoupper(trim((string) $receiptType));
+            }
+            if (!in_array('REVENUE', $normalisedReceiptTypes, true)) {
                 continue;
             }
             $rules = $accountGuide['allowedTaxRules'] ?? null;
@@ -394,13 +411,17 @@ final class TaxPolicy
             }
 
             $receiptTypes = $accountGuide['allowedReceiptTypes'] ?? [];
-            if (!is_array($receiptTypes)) {
+            if (!is_array($receiptTypes) || $receiptTypes === []) {
                 continue;
             }
-            if (
-                $receiptTypes !== []
-                && !in_array('REVENUE', array_map('strtoupper', array_map('strval', $receiptTypes)), true)
-            ) {
+            $normalisedReceiptTypes = [];
+            foreach ($receiptTypes as $receiptType) {
+                if (!is_string($receiptType) && !is_int($receiptType)) {
+                    continue 2;
+                }
+                $normalisedReceiptTypes[] = strtoupper(trim((string) $receiptType));
+            }
+            if (!in_array('REVENUE', $normalisedReceiptTypes, true)) {
                 continue;
             }
 
@@ -628,12 +649,8 @@ final class TaxPolicy
                 continue;
             }
 
-            if (
-                in_array($profileName, ['domestic', 'eu_b2c_domestic'], true)
-                && $taxRule === '1'
-                && $normalisedRate === '0'
-            ) {
-                return self::domesticZeroTaxRateBlocked();
+            if ($taxRule === '1' && $normalisedRate === '0') {
+                return self::ruleOneZeroTaxRateBlocked($profileName);
             }
             if ($taxRule === '3') {
                 return TaxDecision::block(
@@ -659,13 +676,12 @@ final class TaxPolicy
     }
 
     /** @param list<LineItem> $lineItems */
-    private static function validateDomesticRuleOneRates(
+    private static function validateRuleOneRates(
         TaxDecision $decision,
         array $lineItems,
     ): TaxDecision {
         if (
             !$decision->allowed
-            || !in_array($decision->profile, ['domestic', 'eu_b2c_domestic'], true)
             || $decision->taxRuleId !== '1'
         ) {
             return $decision;
@@ -673,29 +689,26 @@ final class TaxPolicy
 
         foreach ($lineItems as $lineItem) {
             if (self::normaliseNumericRate($lineItem->taxRate) === '0') {
-                return self::domesticZeroTaxRateBlocked();
+                return self::ruleOneZeroTaxRateBlocked($decision->profile);
             }
         }
 
         return $decision;
     }
 
-    private static function domesticZeroTaxRateBlocked(): TaxDecision
+    private static function ruleOneZeroTaxRateBlocked(string $profile): TaxDecision
     {
         return TaxDecision::block(
             'domestic_zero_tax_rate_outside_small_business_period',
-            'A domestic zero-percent position is not allowed outside the configured small-business period.',
-            'domestic',
+            'A zero-percent Rule 1 position is not allowed outside the configured small-business period.',
+            $profile,
         );
     }
 
     /** @return list<string>|null */
     private static function fixedTaxRatesForProfile(string $profileName, string $taxRule): ?array
     {
-        if (
-            in_array($profileName, ['domestic', 'eu_b2c_domestic'], true)
-            && $taxRule === '1'
-        ) {
+        if ($taxRule === '1') {
             return self::DOMESTIC_RULE_ONE_TAX_RATES;
         }
 
@@ -706,6 +719,15 @@ final class TaxPolicy
     {
         return $this->euB2cMode === self::EU_B2C_DOMESTIC_CONFIRMED
             && $this->ossProfile === self::OSS_RULE_19_CONFIRMED;
+    }
+
+    private static function validEuVatIdForCountry(?string $vatNumber, string $countryCode): bool
+    {
+        $normalised = strtoupper((string) preg_replace('/[^A-Za-z0-9]+/', '', (string) $vatNumber));
+        $expectedPrefix = $countryCode === 'GR' ? 'EL' : $countryCode;
+
+        return preg_match('/^[A-Z]{2}[A-Z0-9]{2,13}$/', $normalised) === 1
+            && str_starts_with($normalised, $expectedPrefix);
     }
 
     /** @param list<LineItem> $lineItems */

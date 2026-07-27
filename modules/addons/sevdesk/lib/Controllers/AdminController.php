@@ -18,6 +18,7 @@ use WHMCS\Module\Addon\SevDesk\Domain\InvoiceSnapshot;
 use WHMCS\Module\Addon\SevDesk\Domain\LineItem;
 use WHMCS\Module\Addon\SevDesk\Domain\WhmcsInvoiceItem;
 use WHMCS\Module\Addon\SevDesk\Health\HealthService;
+use WHMCS\Module\Addon\SevDesk\Jobs\ExportJobHandler;
 use WHMCS\Module\Addon\SevDesk\Repository\JobRepository;
 use WHMCS\Module\Addon\SevDesk\Repository\MappingRepository;
 use WHMCS\Module\Addon\SevDesk\Service\CorrectionService;
@@ -30,6 +31,7 @@ use WHMCS\Module\Addon\SevDesk\Service\TaxPolicy;
 use WHMCS\Module\Addon\SevDesk\Service\WhmcsGateway;
 use WHMCS\Module\Addon\SevDesk\Service\WhmcsPaymentStructureService;
 use WHMCS\Module\Addon\SevDesk\Support\AdminInvoiceControls;
+use WHMCS\Module\Addon\SevDesk\Support\AdvisoryLockName;
 use WHMCS\Module\Addon\SevDesk\Support\Csrf;
 use WHMCS\Module\Addon\SevDesk\Support\DocumentDeliveryContext;
 use WHMCS\Module\Addon\SevDesk\Support\QuickExportGuard;
@@ -91,8 +93,14 @@ final class AdminController
             ? 'Noch kein Token gespeichert'
             : 'Token gespeichert – leer lassen zum Beibehalten';
         unset($settings['sevdesk_api_key']);
-        $start = DateTimeImmutable::createFromFormat('!d-m-Y', (string) ($settings['import_after'] ?? ''));
-        $settings['import_after_iso'] = $start instanceof DateTimeImmutable ? $start->format('Y-m-d') : (string) ($settings['import_after'] ?? '');
+        try {
+            $start = Config::parseImportAfter((string) ($settings['import_after'] ?? ''));
+            $settings['import_after_iso'] = $start->format('Y-m-d');
+            $settings['import_after_invalid'] = false;
+        } catch (RuntimeException) {
+            $settings['import_after_iso'] = '';
+            $settings['import_after_invalid'] = true;
+        }
         $eInvoiceStart = DateTimeImmutable::createFromFormat(
             '!d-m-Y',
             (string) ($settings['e_invoice_active_from'] ?? ''),
@@ -228,6 +236,7 @@ final class AdminController
                 $this->view->flash('danger', 'Die angegebene WHMCS-Rechnung wurde nicht gefunden.', 'Einzelexport nicht gestartet');
             } else {
                 try {
+                    $this->assertJobMutationAllowed();
                     $row = $this->application->whmcs->invoiceForDryRun($invoiceId);
                     if ($row === null) {
                         throw new RuntimeException('Entwürfe und anderweitig gesperrte Rechnungen sind nicht exportierbar.');
@@ -245,7 +254,6 @@ final class AdminController
                         && is_array($preflight)
                         && ($preflight['exportable'] || $creditConfirmed)
                     ) {
-                        $this->assertJobMutationAllowed();
                         $candidate = $this->requestedExportContext();
                         if ($creditConfirmed) {
                             $candidate['credit_treatment'] = 'full_gross_voucher';
@@ -391,6 +399,7 @@ final class AdminController
         if ($this->isPost()) {
             $this->csrf->assertPost();
             try {
+                $this->assertJobMutationAllowed();
                 [$from, $until] = $this->dateRange($filters['date_start'], $filters['date_end']);
                 $rows = $this->application->whmcs->invoicesBetween(
                     $from,
@@ -407,7 +416,6 @@ final class AdminController
                 $invoices = $this->decorateDryRun($rows, true);
 
                 if (isset($_POST['import'])) {
-                    $this->assertJobMutationAllowed();
                     $selected = array_values(array_unique(array_filter(
                         array_map('intval', (array) ($_POST['invoice_ids'] ?? [])),
                         static fn (int $id): bool => $id > 0,
@@ -617,6 +625,7 @@ final class AdminController
             $this->csrf->assertPost();
             $mappingId = (int) ($_POST['mapping_id'] ?? 0);
             try {
+                $this->assertJobMutationAllowed();
                 if (isset($_POST['inspect_legacy_types_batch'])) {
                     $batchTypeInspections = $this->inspectLegacyMappingsBatch(
                         $this->submittedLegacyBatchIds(),
@@ -702,7 +711,13 @@ final class AdminController
                 } elseif (isset($_POST['delete'])) {
                     $this->deleteMapping($mappingId, (int) ($_POST['invoiceid'] ?? 0));
                 }
-            } catch (Throwable) {
+            } catch (Throwable $error) {
+                if (function_exists('logActivity')) {
+                    logActivity(
+                        'sevdesk legacy mapping action failed for mapping '
+                        . max(0, $mappingId) . ': ' . get_class($error),
+                    );
+                }
                 $this->view->flash(
                     'danger',
                     'Die Legacy-Zuordnung konnte nicht sicher geprüft oder aktualisiert werden.',
@@ -942,22 +957,23 @@ final class AdminController
         $filters = [
             'date_start' => (string) ($_POST['date_start'] ?? $_GET['date_start'] ?? ''),
             'date_end' => (string) ($_POST['date_end'] ?? $_GET['date_end'] ?? ''),
-            'submitted' => $isPost || isset($_GET['page']),
+            'submitted' => $isPost,
         ];
         $candidates = [];
         $job = null;
         $paymentTotal = 0;
         $pagination = $this->pagination(1, 1, $this->moduleLink . '&a=bookingAssistant');
-        $previewRequested = ($isPost && isset($_POST['preview']))
-            || (!$isPost && isset($_GET['page']));
+        $previewRequested = $isPost
+            && (isset($_POST['preview']) || isset($_POST['preview_page']));
         if ($isPost) {
             $this->csrf->assertPost();
         }
         if ($previewRequested) {
             try {
+                $this->assertJobMutationAllowed();
                 $previewStarted = microtime(true);
                 [$from, $until] = $this->dateRange($filters['date_start'], $filters['date_end']);
-                $page = $isPost ? 1 : max(1, (int) ($_GET['page'] ?? 1));
+                $page = max(1, (int) ($_POST['preview_page'] ?? 1));
                 $paymentPage = $this->application->whmcs->bookingPaymentsBetween($from, $until, $page, 10);
                 $rows = $paymentPage['items'];
                 $paymentTotal = $paymentPage['total'];
@@ -1587,9 +1603,10 @@ final class AdminController
             if ($error->isAuthenticationFailure()) {
                 $this->application->config->tripAuthenticationSafetyGates();
             }
-            // sevdesk documents 400 for a missing by-ID Voucher or Invoice;
-            // accept 404 as a compatible conventional response as well.
-            if (in_array($error->httpStatus, [400, 404], true)) {
+            // A generic 400 can also mean a changed path, parameter contract or
+            // tenant capability. It is only accepted when sevdesk additionally
+            // returns its explicit, sanitised NOT_FOUND code.
+            if ($error->isDefinitiveNotFound()) {
                 return true;
             }
 
@@ -1753,15 +1770,20 @@ final class AdminController
             ->distinct()
             ->count('item.invoice_id');
 
-        $importAfter = DateTimeImmutable::createFromFormat(
-            '!d-m-Y',
-            (string) $this->application->config->get('import_after', '01-01-1999'),
-        );
+        try {
+            $importAfter = Config::parseImportAfter(
+                (string) $this->application->config->get('import_after', '01-01-1999'),
+            );
+        } catch (RuntimeException) {
+            $importAfter = null;
+        }
         $paidUnmappedQuery = Capsule::table('tblinvoices as invoice')
             ->leftJoin(Migrator::MAPPING_TABLE . ' as mapping', 'invoice.id', '=', 'mapping.invoice_id')
             ->where('invoice.status', 'Paid')
             ->whereNull('mapping.id');
-        if ($importAfter instanceof DateTimeImmutable) {
+        if ($importAfter === null) {
+            $paidUnmappedQuery->whereRaw('1 = 0');
+        } else {
             $paidUnmappedQuery->where('invoice.date', '>=', $importAfter->format('Y-m-d'));
         }
 
@@ -1832,7 +1854,7 @@ final class AdminController
 
     private function saveSetup(): void
     {
-        $lock = Capsule::selectOne('SELECT GET_LOCK(?, 0) AS acquired', ['whmcs_sevdesk_job_runner']);
+        $lock = Capsule::selectOne('SELECT GET_LOCK(?, 0) AS acquired', [AdvisoryLockName::jobRunner()]);
         if (!isset($lock->acquired) || (int) $lock->acquired !== 1) {
             throw new RuntimeException('Ein Worker ist gerade aktiv. Bitte die Einrichtung nach dessen Abschluss erneut speichern.');
         }
@@ -1874,7 +1896,7 @@ final class AdminController
             });
         } finally {
             try {
-                Capsule::selectOne('SELECT RELEASE_LOCK(?) AS released', ['whmcs_sevdesk_job_runner']);
+                Capsule::selectOne('SELECT RELEASE_LOCK(?) AS released', [AdvisoryLockName::jobRunner()]);
             } finally {
                 // Config may have cached values written inside a transaction
                 // that subsequently rolled back. The response must always read
@@ -2754,7 +2776,13 @@ final class AdminController
 
         $invoice = $this->application->whmcs->invoiceSnapshot($invoiceId);
         $transactionCurrency = (string) Capsule::table('tblcurrencies')->where('id', (int) $transaction->currency)->value('code');
-        if ($transactionCurrency !== '' && strtoupper($transactionCurrency) !== $invoice->currency) {
+        if ($transactionCurrency === '') {
+            throw new RuntimeException(
+                'Die Währung der Rückzahlung ist nicht mehr eindeutig auflösbar. '
+                    . 'Die Korrektur muss manuell geprüft werden.',
+            );
+        }
+        if (strtoupper($transactionCurrency) !== $invoice->currency) {
             throw new RuntimeException('Rückzahlung und Originalrechnung verwenden unterschiedliche Währungen. Dieser Fall benötigt eine manuelle Aufteilung.');
         }
         $contact = $this->application->whmcs->contactData($invoice->clientId);
@@ -2860,6 +2888,9 @@ final class AdminController
         if ($rows === []) {
             return [];
         }
+        $configuredStart = Config::parseImportAfter(
+            (string) $this->application->config->get('import_after', '01-01-1999'),
+        );
         $invoiceIds = array_map(static fn (object $invoice): int => (int) $invoice->id, $rows);
         $mappings = [];
         foreach (Capsule::table(Migrator::MAPPING_TABLE)->whereIn('invoice_id', $invoiceIds)->get() as $mapping) {
@@ -2916,10 +2947,6 @@ final class AdminController
         $taxType = strtolower((string) ($GLOBALS['CONFIG']['TaxType'] ?? 'Exclusive'));
         $taxTypeSupported = in_array($taxType, ['exclusive', 'inclusive'], true);
         $net = $taxType === 'exclusive';
-        $configuredStart = DateTimeImmutable::createFromFormat(
-            '!d-m-Y',
-            (string) $this->application->config->get('import_after', '01-01-1999'),
-        );
         $result = [];
         foreach ($rows as $invoice) {
             $invoiceId = (int) $invoice->id;
@@ -2961,6 +2988,15 @@ final class AdminController
                 $reason = $reasonCode === 'unresolved_export_history'
                     ? 'Ein älterer Export endete nach einem möglichen Remote-Write und muss zuerst geklärt werden'
                     : 'Ein aktiver oder ungeklärter Exportjob besitzt diese Rechnung bereits';
+            }
+            if (
+                $exportable
+                && !ExportJobHandler::statusIsExportable((string) ($invoice->status ?? ''), false)
+            ) {
+                $exportable = false;
+                $reasonCode = 'invoice_status_blocked';
+                $reason = 'Der WHMCS-Rechnungsstatus ist nicht exportierbar: '
+                    . trim((string) ($invoice->status ?? 'unbekannt'));
             }
             if ($exportable && InvoiceItemExportPolicy::containsLateFee($sourceTypes)) {
                 $exportable = false;
@@ -3038,7 +3074,6 @@ final class AdminController
                 $reason = 'Nach der aktuellen Einstellung werden nur bezahlte Rechnungen exportiert';
             } elseif (
                 $exportable
-                && $configuredStart instanceof DateTimeImmutable
                 && (string) $invoice->date < $configuredStart->format('Y-m-d')
             ) {
                 $exportable = false;
@@ -3526,7 +3561,7 @@ final class AdminController
             $grossMinor += $position->grossMinorUnits();
         }
 
-        if (abs($grossMinor - Decimal::toMinorUnits($refundAmount)) > 1) {
+        if ($grossMinor !== Decimal::toMinorUnits($refundAmount)) {
             throw new RuntimeException(
                 'Die Bruttosumme der Korrekturpositionen stimmt nicht mit dem Erstattungsbetrag überein.',
             );
@@ -3563,7 +3598,16 @@ final class AdminController
         exit;
     }
 
-    /** @return array{page:int,total_pages:int,previous_url:?string,next_url:?string} */
+    /**
+     * @return array{
+     *     page:int,
+     *     total_pages:int,
+     *     previous_page:?int,
+     *     next_page:?int,
+     *     previous_url:?string,
+     *     next_url:?string
+     * }
+     */
     private function pagination(int $page, int $pages, string $baseUrl): array
     {
         $separator = str_contains($baseUrl, '?') ? '&' : '?';
@@ -3571,6 +3615,8 @@ final class AdminController
         return [
             'page' => $page,
             'total_pages' => $pages,
+            'previous_page' => $page > 1 ? $page - 1 : null,
+            'next_page' => $page < $pages ? $page + 1 : null,
             'previous_url' => $page > 1 ? $baseUrl . $separator . 'page=' . ($page - 1) : null,
             'next_url' => $page < $pages ? $baseUrl . $separator . 'page=' . ($page + 1) : null,
         ];

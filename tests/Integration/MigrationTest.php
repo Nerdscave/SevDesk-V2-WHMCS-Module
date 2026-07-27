@@ -12,6 +12,7 @@ use WHMCS\Module\Addon\SevDesk\Config;
 use WHMCS\Module\Addon\SevDesk\Database\Migrator;
 use WHMCS\Module\Addon\SevDesk\Repository\JobRepository;
 use WHMCS\Module\Addon\SevDesk\Repository\MappingRepository;
+use WHMCS\Module\Addon\SevDesk\Support\ClientPdfRateLimiter;
 use WHMCS\Module\Addon\SevDesk\Tests\Integration\Support\MariaDbTestCase;
 
 final class MigrationTest extends MariaDbTestCase
@@ -24,6 +25,7 @@ final class MigrationTest extends MariaDbTestCase
         self::assertTrue(Capsule::schema()->hasTable(Migrator::MAPPING_TABLE));
         self::assertTrue(Capsule::schema()->hasTable(Migrator::JOBS_TABLE));
         self::assertTrue(Capsule::schema()->hasTable(Migrator::ITEMS_TABLE));
+        self::assertTrue(Capsule::schema()->hasTable(Migrator::PDF_RATE_TABLE));
         foreach (
             [
                 'document_type', 'document_authority', 'document_number', 'document_ready_at', 'delivered_at',
@@ -49,6 +51,30 @@ final class MigrationTest extends MariaDbTestCase
         self::assertFalse((new Config())->bool('e_invoice_canary_confirmed'));
         self::assertFalse((new Config())->bool('small_business_invoice_canary_confirmed'));
         self::assertSame('', (new Config())->get('small_business_until'));
+    }
+
+    public function testPersistentPdfRateLimitIsPerClientAndSurvivesSessions(): void
+    {
+        Migrator::up();
+        for ($attempt = 1; $attempt <= 8; ++$attempt) {
+            self::assertTrue(ClientPdfRateLimiter::consume(42, 1_000)['allowed']);
+        }
+
+        $_SESSION = [];
+        self::assertSame(
+            ['allowed' => false, 'retryAfter' => 60],
+            ClientPdfRateLimiter::consume(42, 1_000),
+        );
+        self::assertSame(
+            ['allowed' => true, 'retryAfter' => 0],
+            ClientPdfRateLimiter::consume(43, 1_000),
+        );
+        self::assertSame(
+            8,
+            (int) Capsule::table(Migrator::PDF_RATE_TABLE)
+                ->where('client_id', 42)
+                ->value('request_count'),
+        );
     }
 
     public function testWorkerRuntimeRejectsUnsignedSchemaBeforeMigrationAndDisablesSync(): void

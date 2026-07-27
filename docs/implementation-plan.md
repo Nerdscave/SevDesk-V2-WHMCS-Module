@@ -12,6 +12,16 @@ Die Voucher-Basisphasen sowie die Codepfade für wählbare Voucher-/Invoice-Ziel
 
 `2.1.0-rc.7` trennt den deutschen Rule-1-/19-%-Rabatt von demselben Steuersatz unter der bestätigten EU-B2C-Inlandsbesteuerung. Beide Fälle haben verschiedene Steuerprofile und Länderklassen und erhalten deshalb eigene Capability-Keys und Setup-Gates. Bestehende deutsche Freigaben bleiben unverändert. Veraltete Keys werden im Setup nicht mehr allein wegen eines nicht leeren Werts vorausgewählt.
 
+`2.1.0-rc.8` schließt die im Vollreview gefundenen
+Fail-Closed-Lücken. Alle Invoices verlangen nun auch ohne Rabatt exakte
+`sumNet`-/`sumTax`-/`sumGross`-Werte. API-Listen werden vor jeder
+Eindeutigkeitsentscheidung vollständig validiert, Antworten begrenzt gestreamt
+und Redirects nicht automatisch verfolgt. Riskante Cancel-Zustände behalten
+ihren Dedupe-Key. Blockierte WHMCS-Rechnungsstatus bleiben in Vorschau und
+Ergebnis sichtbar. Der Kunden-PDF-Proxy ist pro Kunde begrenzt, ohne
+Dokumentkopien anzulegen. Rule 1 mit 0 % wird regelbasiert blockiert und kann
+nicht über den Namen eines AddFunds- oder EU-B2C-Profils freigegeben werden.
+
 Der Invoice-Canary bleibt ein hartes Release-Gate. Bis dahin blockiert `invoice_canary_confirmed=off` alle Invoice-Modi. Rule-11-Invoices benötigen zusätzlich `small_business_invoice_canary_confirmed` und eine aktuelle `ReceiptGuidance` mit Rule 11, 0 % und `REVENUE`-Scope. ZUGFeRD hat mit `e_invoice_canary_confirmed` ein eigenes Gate. Die fünf Rabatt-Gates sind `invoice_discount_canary_confirmed`, `invoice_discount_rule1_19_canary_confirmed`, `invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed`, `invoice_discount_rule17_0_canary_confirmed` und `invoice_discount_rule19_canary_confirmed`. Das additive Upgrade behält `voucher_only` bei und setzt die neuen Gates auf aus. Der 2.0-Betrieb stoppt beim Upgrade einmalig mit `sync_enabled=off` und `runtime_review_required=on`.
 
 ## Feste Produktentscheidungen
@@ -117,12 +127,16 @@ Der Invoice-Canary bleibt ein hartes Release-Gate. Bis dahin blockiert `invoice_
 ### Aufgaben
 
 - schmalen sevDesk-Client mit Token-Redaktion, `User-Agent`, Connect- und Request-Timeout bauen.
+- Redirects abschalten und Response-Bodies bis zum festgelegten Limit plus ein
+  Byte streamen; eine zu große `Content-Length` vor dem Einlesen ablehnen.
 - Fehler in stabile Kategorien übersetzen.
 - Systemversion über `/Tools/bookkeepingSystemVersion` prüfen.
 - `ReceiptGuidance` lesen und funktionale Konto-Settings gegen den Mandanten validieren.
 - für Invoice-Modi `SevUser`, `Unity`, Modus-/Hoheitsmatrix und die lokale Canary-Bestätigung validieren.
 - Health-Seite für PHP, WHMCS, DB-Schema, Token, Systemversion, Konten und jüngste Jobfehler bereitstellen.
 - Nur die Felder aus API-Responses parsen, die das Modul tatsächlich benötigt.
+  Listen aber vor Filterung und Eindeutigkeitsprüfung vollständig strukturell
+  validieren.
 - Bei 401/403 den betroffenen Job pausieren und den globalen Auth-Alarm setzen. Danach darf der Runner weder im aktuellen noch in späteren Läufen weitere Items claimen. Der Alarm wird erst nach einer erfolgreichen Setupprüfung gelöscht.
 
 ### Tests
@@ -160,6 +174,8 @@ Der Invoice-Canary bleibt ein hartes Release-Gate. Bis dahin blockiert `invoice_
 - leeres Legacy-`invoicenum`: Snapshot, Dry-run und Worker verwenden konsistent die interne Invoice-ID,
   ohne `tblinvoices` zu verändern;
 - B2B mit fehlenden/widersprüchlichen Nachweisen;
+- Rule 3 nur mit plausibler USt-ID und zum Rechnungsland passendem EU-Präfix;
+  die Syntaxprüfung ersetzt keine VIES-Bestätigung;
 - Rule 19 in `invoice_for_oss`/`invoice_only` nur für bestätigte digitale EU-B2C-Leistungen; Rules 18/20, unbestätigtes OSS, gemischte Leistung, Nullsumme und Fremdwährung als blockierte/manuelle Fälle;
 - reine WHMCS-Sammelzahlungsrechnungen strukturell als Zahlungscontainer erkennen, nur die exakt verknüpften Originalrechnungen freigeben, dabei `subtotal + tax + tax2 = total + credit`, Dokumentbrutto `total + credit` und direkten Zahlteil `total` centgenau prüfen und die gemeinsame Banktransaktion nicht automatisch aufteilen;
 - sonstiges Kundenguthaben blockieren; im Voucher-Einzelfall bleibt nur die gespeicherte Bestätigung des vollen Rechnungsbruttos zulässig;
@@ -211,6 +227,8 @@ Der Invoice-Canary bleibt ein hartes Release-Gate. Bis dahin blockiert `invoice_
 - Bulk-Suche nach Rechnungsdatum mit serverseitiger Pagination und Eignungsvorschau bauen.
 - Auswahl als unveränderliche Job-Items persistieren.
 - Worker-Claim mit MySQL Advisory Lock, Item-Lease und atomarem Statuswechsel implementieren.
+- Advisory-Lock pro WHMCS-Datenbankschema namespacen, damit getrennte
+  Installationen auf demselben MySQL-Server einander nicht blockieren.
 - Checkpoints vor Contact-, Voucher- und späteren nicht sicher wiederholbaren Writes persistieren.
 - neue Exporte als `export_document` einplanen, den bisherigen Dedupe-Schlüssel `export_voucher:<invoiceId>` aber absichtlich dokumenttypübergreifend beibehalten.
 - `document_type_selected`, Invoice-Create, Open, Delivery und WHMCS-Mailübergabe als eigene riskante Checkpoints abbilden.
@@ -222,6 +240,9 @@ Der Invoice-Canary bleibt ein hartes Release-Gate. Bis dahin blockiert `invoice_
 - Cron-Integration so bauen, dass überlappende Läufe sicher sind.
 - abgelaufene Leases wiederaufnehmen und unbekannte Writes vorher abgleichen.
 - nach möglicherweise ausgeführtem Invoice-Create, Open oder Versand ausschließlich read-only reconciliieren; kein automatischer zweiter Write.
+- Cancel und Workerabschluss zentral nach Checkpointrisiko behandeln: sichere
+  Schritte werden `cancelled`, mögliche oder bestätigte Remote-Effekte
+  `ambiguous` bei weiterhin reserviertem Dedupe-Key.
 
 ### Tests
 
@@ -468,7 +489,9 @@ Der technische Live-Lauf hat Rule 19, Marker, Nummer, Pflichtreferenzen, PDF und
 - Rule 11 als Voucher unverändert; als Invoice ohne eigenen Canary oder ohne aktuellen REVENUE-Scope vor Create blockiert;
 - Rabatt-Capability-Matrix für Rule 11/0 %, Rule 1/19 % getrennt nach deutschem und bestätigtem EU-B2C-Inlandsprofil, Rule 17/0 % und Rule 19 mit positivem Zielsteuersatz; falscher oder fehlender Canary, uneinheitliche Steuerkontexte, E-Rechnung und `LateFee` blockieren vor Create;
 - Migration mit neuen Nullable-Spalten und unveränderten Legacy-Mappings;
-- Invoice-Payload, Rundung, Pflichtreferenzen, fehlendes `accountDatev` und exakte Remote-Rückprüfung;
+- Invoice-Payload, Rundung, Pflichtreferenzen, fehlendes `accountDatev` und
+  exakte Remote-Rückprüfung von `sumNet`, `sumTax` und `sumGross` mit und ohne
+  Rabatt;
 - Cross-Type-Dedupe, alte `export_voucher`-Items und Recovery an jedem riskanten Checkpoint;
 - Invoice-Booking einschließlich Snapshotänderung;
 - 401, 422, 429, 5xx, Timeout und ungültige Responses ohne zweiten Create/Open-Write.
@@ -489,6 +512,8 @@ Der technische Live-Lauf hat Rule 19, Marker, Nummer, Pflichtreferenzen, PDF und
 - Twenty-One-Referenzadapter und den Custom-Theme-Vertrag `authority`, `state`, `invoiceNumber`, `downloadUrl` liefern.
 - Proforma-, Pending-, Ready- und Failure-Zustand im Clientbereich abbilden; sichtbare WHMCS-Endrechnungslinks bei bezahlten Invoice-only-Fällen entfernen.
 - authentifizierte PDF-Route anhand der WHMCS-Invoice-ID mit Eigentümer-, Mappingtyp-, Signatur-, Größen- und Hashprüfung implementieren.
+- denselben Proxy pro WHMCS-Kunde auf acht Remote-Abrufe in 60 Sekunden
+  begrenzen und bei Überschreitung ohne sevDesk-Read mit HTTP 429 antworten.
 - keine dauerhafte PDF-Kopie anlegen; Downloads streamen und Mailanhänge nur im Speicher halten.
 - Versandkanal `sevdesk` über `sendViaEmail` implementieren. Der vorbereitete Kanal `whmcs_template` bleibt im Datenvertrag erhalten, ist unter WHMCS 8.13 aber gesperrt, weil Binäranhänge aus `EmailPreSend` erst ab WHMCS 9 unterstützt werden. Eine spätere Freigabe braucht einen eigenen Kompatibilitäts- und Postfachtest.
 - andere Invoice-Mailvorlagen nach Zahlung lokal blockieren; der Hook darf keine sevDesk-Abfrage ausführen.

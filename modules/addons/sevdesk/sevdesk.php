@@ -9,7 +9,9 @@ use WHMCS\Module\Addon\SevDesk\Api\ApiException;
 use WHMCS\Module\Addon\SevDesk\Config;
 use WHMCS\Module\Addon\SevDesk\Controller;
 use WHMCS\Module\Addon\SevDesk\Database\Migrator;
+use WHMCS\Module\Addon\SevDesk\Support\AdvisoryLockName;
 use WHMCS\Module\Addon\SevDesk\Support\ClientDocumentPresenter;
+use WHMCS\Module\Addon\SevDesk\Support\ClientPdfRateLimiter;
 use WHMCS\Module\Addon\SevDesk\Support\DocumentDeliveryContext;
 
 if (!defined('WHMCS')) {
@@ -21,14 +23,14 @@ require_once __DIR__ . '/lib/Autoloader.php';
 
 function sevdesk_acquire_runner_lock(): bool
 {
-    $lock = Capsule::selectOne('SELECT GET_LOCK(?, 0) AS acquired', ['whmcs_sevdesk_job_runner']);
+    $lock = Capsule::selectOne('SELECT GET_LOCK(?, 0) AS acquired', [AdvisoryLockName::jobRunner()]);
 
     return isset($lock->acquired) && (int) $lock->acquired === 1;
 }
 
 function sevdesk_release_runner_lock(): void
 {
-    Capsule::selectOne('SELECT RELEASE_LOCK(?) AS released', ['whmcs_sevdesk_job_runner']);
+    Capsule::selectOne('SELECT RELEASE_LOCK(?) AS released', [AdvisoryLockName::jobRunner()]);
 }
 
 /** @return array<string, mixed> */
@@ -38,7 +40,7 @@ function sevdesk_config(): array
         'name' => 'sevdesk Integration',
         'description' => 'Fortsetzbarer WHMCS→sevdesk Voucher-/Invoice-Export. '
             . 'Die betriebliche Konfiguration erfolgt ausschließlich auf der Modul-Seite „Einrichtung“.',
-        'version' => '2.1.0-rc.7',
+        'version' => '2.1.0-rc.8',
         'author' => 'Nerdscave',
         'language' => 'german',
         // WHMCS persists fields declared here without passing through the guarded
@@ -385,6 +387,18 @@ function sevdesk_clientarea(array $vars): array
         $invoiceStatus = $application->whmcs->invoiceStatusForDelivery($invoiceId);
         if (!ClientDocumentPresenter::isDeliverableInvoiceMapping($invoiceStatus, $mapping)) {
             return $page('Das Rechnungsdokument ist noch nicht verfügbar.', 409);
+        }
+
+        $rateLimit = ClientPdfRateLimiter::consume((int) $client->id);
+        if (!$rateLimit['allowed']) {
+            if (!headers_sent()) {
+                header('Retry-After: ' . $rateLimit['retryAfter']);
+            }
+
+            return $page(
+                'Das Rechnungsdokument wurde zu häufig abgerufen. Bitte versuchen Sie es gleich erneut.',
+                429,
+            );
         }
 
         $expectedHash = strtolower(trim((string) $mapping->pdf_sha256));

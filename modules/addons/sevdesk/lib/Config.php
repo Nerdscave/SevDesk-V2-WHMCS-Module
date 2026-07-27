@@ -137,6 +137,25 @@ final class Config
         return $date;
     }
 
+    public static function parseImportAfter(string $storedValue): DateTimeImmutable
+    {
+        $storedValue = trim($storedValue);
+        foreach (['d-m-Y', 'Y-m-d'] as $format) {
+            $date = DateTimeImmutable::createFromFormat('!' . $format, $storedValue);
+            if (
+                $date instanceof DateTimeImmutable
+                && $date->format($format) === $storedValue
+                && DateTimeImmutable::getLastErrors() === false
+            ) {
+                return $date;
+            }
+        }
+
+        throw new RuntimeException(
+            'Der gespeicherte Exportstichtag ist ungültig. Bitte die Einrichtung prüfen.',
+        );
+    }
+
     public function set(string $key, string|int|bool|null $value): void
     {
         $stored = match (true) {

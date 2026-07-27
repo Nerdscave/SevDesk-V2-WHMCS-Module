@@ -301,6 +301,34 @@ final class InvoiceReconciliationServiceTest extends TestCase
         self::assertSame(0, $persistCalls);
     }
 
+    public function testGrossMatchCannotHideDifferentNetAndTaxTotalsDuringRecovery(): void
+    {
+        $history = [];
+        $persistCalls = 0;
+        $candidate = $this->candidate('99');
+        $candidate['sumNet'] = '99.99';
+        $candidate['sumTax'] = '19.01';
+        $candidate['sumGross'] = '119.00';
+        $service = new InvoiceReconciliationService(
+            $this->client(new Response(200, [], json_encode([
+                'objects' => [$candidate],
+            ], JSON_THROW_ON_ERROR)), $history),
+            static fn (): null => null,
+            static function () use (&$persistCalls): void {
+                ++$persistCalls;
+            },
+            '7',
+            '8',
+        );
+
+        $result = $service->reconcile($this->invoice(), '42', $this->taxDecision(), 'DE');
+
+        self::assertSame(ExportResult::AMBIGUOUS, $result->status);
+        self::assertSame('invoice_reconciliation_no_match', $result->code);
+        self::assertSame(0, $persistCalls);
+        self::assertCount(1, $history);
+    }
+
     public function testMultipleExactCandidatesRemainAmbiguousAndUnmapped(): void
     {
         $history = [];
@@ -323,6 +351,30 @@ final class InvoiceReconciliationServiceTest extends TestCase
         self::assertSame('invoice_reconciliation_multiple_matches', $result->code);
         self::assertSame(2, $result->context['matchCount']);
         self::assertSame(0, $persistCalls);
+    }
+
+    public function testMalformedCandidateInvalidatesTheWholeUniquenessProof(): void
+    {
+        $history = [];
+        $persistCalls = 0;
+        $service = new InvoiceReconciliationService(
+            $this->client(new Response(200, [], json_encode([
+                'objects' => [$this->candidate('99'), 'malformed'],
+            ], JSON_THROW_ON_ERROR)), $history),
+            static fn (): null => null,
+            static function () use (&$persistCalls): void {
+                ++$persistCalls;
+            },
+            '7',
+            '8',
+        );
+
+        $result = $service->reconcile($this->invoice(), '42', $this->taxDecision(), 'DE');
+
+        self::assertSame(ExportResult::FAILED, $result->status);
+        self::assertSame('invoice_reconciliation_lookup_failed', $result->code);
+        self::assertSame(0, $persistCalls);
+        self::assertCount(1, $history);
     }
 
     public function testFullSearchPageBlocksBecauseGlobalUniquenessCannotBeProven(): void
@@ -380,6 +432,41 @@ final class InvoiceReconciliationServiceTest extends TestCase
             static fn (array $entry): string => $entry['request']->getMethod(),
             $history,
         ));
+    }
+
+    public function testMalformedPositionInvalidatesTheWholePositionProof(): void
+    {
+        $history = [];
+        $persistCalls = 0;
+        $positionPayload = json_decode(
+            (string) $this->positionResponse()->getBody(),
+            true,
+            512,
+            JSON_THROW_ON_ERROR,
+        );
+        $service = new InvoiceReconciliationService(
+            $this->client([
+                new Response(200, [], json_encode([
+                    'objects' => [$this->candidate('99')],
+                ], JSON_THROW_ON_ERROR)),
+                new Response(200, [], json_encode([
+                    'objects' => [$positionPayload['objects'][0], 'malformed'],
+                ], JSON_THROW_ON_ERROR)),
+            ], $history),
+            static fn (): null => null,
+            static function () use (&$persistCalls): void {
+                ++$persistCalls;
+            },
+            '7',
+            '8',
+        );
+
+        $result = $service->reconcile($this->invoice(), '42', $this->taxDecision(), 'DE');
+
+        self::assertSame(ExportResult::AMBIGUOUS, $result->status);
+        self::assertSame('invoice_reconciliation_position_invalid', $result->code);
+        self::assertSame(0, $persistCalls);
+        self::assertCount(2, $history);
     }
 
     public function testFullPositionPageCannotRestoreAMapping(): void
@@ -754,6 +841,9 @@ final class InvoiceReconciliationServiceTest extends TestCase
             '119.00',
             '0',
             [new LineItem('Hosting', '100.00', '19', true)],
+            [],
+            '100.00',
+            '19.00',
         );
     }
 
@@ -788,6 +878,9 @@ final class InvoiceReconciliationServiceTest extends TestCase
             '120.00',
             '0',
             [new LineItem('Digital service', '120.00', '20', false)],
+            [],
+            '100.00',
+            '20.00',
         );
     }
 
@@ -857,6 +950,8 @@ final class InvoiceReconciliationServiceTest extends TestCase
             'showNet' => true,
             'deliveryAddressCountry' => 'DE',
             'customerInternalNote' => '[WHMCS-INVOICE:10]',
+            'sumNet' => '100.00',
+            'sumTax' => '19.00',
             'sumGross' => '119.00',
         ];
     }
@@ -874,6 +969,8 @@ final class InvoiceReconciliationServiceTest extends TestCase
             'code' => 'cy',
         ];
         $candidate['sumGross'] = '120.00';
+        $candidate['sumNet'] = '100.00';
+        $candidate['sumTax'] = '20.00';
 
         return $candidate;
     }

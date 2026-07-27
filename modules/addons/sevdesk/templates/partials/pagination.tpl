@@ -4,7 +4,11 @@
         <ul class="pagination pagination-sm">
             <li{if !$pagination.previous_url} class="disabled"{/if}>
                 {if $pagination.previous_url}
-                    <a href="{$pagination.previous_url|escape:'html':'UTF-8'}" rel="prev"><span aria-hidden="true">&lsaquo;</span> Zurück</a>
+                    {if $paginationPost|default:false}
+                        <button type="submit" name="preview_page" value="{$pagination.previous_page|escape:'html':'UTF-8'}"><span aria-hidden="true">&lsaquo;</span> Zurück</button>
+                    {else}
+                        <a href="{$pagination.previous_url|escape:'html':'UTF-8'}" rel="prev"><span aria-hidden="true">&lsaquo;</span> Zurück</a>
+                    {/if}
                 {else}
                     <span><span aria-hidden="true">&lsaquo;</span> Zurück</span>
                 {/if}
@@ -12,7 +16,11 @@
             <li class="active"><span>{$pagination.page|default:1|escape:'html':'UTF-8'}</span></li>
             <li{if !$pagination.next_url} class="disabled"{/if}>
                 {if $pagination.next_url}
-                    <a href="{$pagination.next_url|escape:'html':'UTF-8'}" rel="next">Weiter <span aria-hidden="true">&rsaquo;</span></a>
+                    {if $paginationPost|default:false}
+                        <button type="submit" name="preview_page" value="{$pagination.next_page|escape:'html':'UTF-8'}">Weiter <span aria-hidden="true">&rsaquo;</span></button>
+                    {else}
+                        <a href="{$pagination.next_url|escape:'html':'UTF-8'}" rel="next">Weiter <span aria-hidden="true">&rsaquo;</span></a>
+                    {/if}
                 {else}
                     <span>Weiter <span aria-hidden="true">&rsaquo;</span></span>
                 {/if}

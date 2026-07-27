@@ -425,7 +425,13 @@ final class EInvoiceEligibilityService
             return [$response];
         }
 
-        return array_values(array_filter($response, 'is_array'));
+        foreach ($response as $row) {
+            if (!is_array($row)) {
+                return [];
+            }
+        }
+
+        return $response;
     }
 
     private static function numericId(string $value): bool

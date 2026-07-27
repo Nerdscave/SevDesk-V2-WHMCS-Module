@@ -604,7 +604,7 @@ final class HealthService
             'stats' => [
                 'health_status' => $hasError ? 'error' : ($hasWarning ? 'warning' : 'healthy'),
                 'healthy' => $healthy,
-                'module_version' => '2.1.0-rc.7',
+                'module_version' => '2.1.0-rc.8',
                 'whmcs_version' => $whmcsVersion,
                 'php_version' => PHP_VERSION,
                 'bookkeeping_version' => $bookkeepingVersion,

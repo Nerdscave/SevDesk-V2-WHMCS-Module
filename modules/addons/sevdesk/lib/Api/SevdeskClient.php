@@ -37,7 +37,7 @@ final class SevdeskClient
         #[\SensitiveParameter]
         string $apiToken,
         string $baseUrl = 'https://my.sevdesk.de/api/v1',
-        string $userAgent = 'WHMCS-sevdesk/2.1.0-rc.7',
+        string $userAgent = 'WHMCS-sevdesk/2.1.0-rc.8',
     ) {
         $apiToken = trim($apiToken);
         if ($apiToken === '') {
@@ -144,22 +144,7 @@ final class SevdeskClient
         }
         $contentType = strtolower(trim(explode(';', $response->getHeaderLine('Content-Type'), 2)[0]));
         if ($status === 200 && $contentType === 'application/pdf') {
-            try {
-                $content = (string) $response->getBody();
-            } catch (Throwable) {
-                throw new ApiException(
-                    'The sevdesk PDF response could not be read.',
-                    $response->getStatusCode(),
-                    'response_read_error',
-                );
-            }
-            if (strlen($content) > self::MAX_PDF_RESPONSE_BYTES) {
-                throw new ApiException(
-                    'sevdesk returned an unexpectedly large PDF response.',
-                    $response->getStatusCode(),
-                    'response_too_large',
-                );
-            }
+            $content = self::readBoundedBody($response, self::MAX_PDF_RESPONSE_BYTES, false);
 
             return [
                 'kind' => 'binary',
@@ -322,6 +307,10 @@ final class SevdeskClient
         $options['connect_timeout'] = 5.0;
         $options['timeout'] = $timeout;
         $options['http_errors'] = false;
+        $options['allow_redirects'] = false;
+        // Keep the transport body lazy so the module's own byte limit applies
+        // before a large response is materialised as a PHP string.
+        $options['stream'] = true;
 
         try {
             $response = $this->httpClient->request(
@@ -365,18 +354,7 @@ final class SevdeskClient
         int $maxResponseBytes,
     ): array {
         $status = $response->getStatusCode();
-        $body = (string) $response->getBody();
-
-        if (strlen($body) > $maxResponseBytes) {
-            throw new ApiException(
-                'sevdesk returned an unexpectedly large response.',
-                $status,
-                'response_too_large',
-                null,
-                null,
-                self::isUnknownWriteOutcome($outcomeMayBeUnknown, $status),
-            );
-        }
+        $body = self::readBoundedBody($response, $maxResponseBytes, $outcomeMayBeUnknown);
 
         $decoded = [];
         if ($body !== '') {
@@ -538,7 +516,70 @@ final class SevdeskClient
     private static function isUnknownWriteOutcome(bool $outcomeMayBeUnknown, int $status): bool
     {
         return $outcomeMayBeUnknown
-            && ($status === 408 || ($status >= 200 && $status < 300) || $status >= 500);
+            && (
+                $status === 408
+                || ($status >= 200 && $status < 400)
+                || $status >= 500
+            );
+    }
+
+    private static function readBoundedBody(
+        ResponseInterface $response,
+        int $maxResponseBytes,
+        bool $outcomeMayBeUnknown,
+    ): string {
+        $status = $response->getStatusCode();
+        $contentLength = trim($response->getHeaderLine('Content-Length'));
+        if (
+            preg_match('/^\d+$/', $contentLength) === 1
+            && (int) $contentLength > $maxResponseBytes
+        ) {
+            throw new ApiException(
+                'sevdesk returned an unexpectedly large response.',
+                $status,
+                'response_too_large',
+                null,
+                null,
+                self::isUnknownWriteOutcome($outcomeMayBeUnknown, $status),
+            );
+        }
+
+        $body = $response->getBody();
+        $contents = '';
+        try {
+            while (!$body->eof()) {
+                $remaining = $maxResponseBytes - strlen($contents);
+                $chunk = $body->read(min(8192, $remaining + 1));
+                if ($chunk === '') {
+                    break;
+                }
+                $contents .= $chunk;
+                if (strlen($contents) > $maxResponseBytes) {
+                    throw new ApiException(
+                        'sevdesk returned an unexpectedly large response.',
+                        $status,
+                        'response_too_large',
+                        null,
+                        null,
+                        self::isUnknownWriteOutcome($outcomeMayBeUnknown, $status),
+                    );
+                }
+            }
+        } catch (ApiException $exception) {
+            throw $exception;
+        } catch (Throwable $exception) {
+            throw new ApiException(
+                'The sevdesk response body could not be read.',
+                $status,
+                'response_read_error',
+                null,
+                null,
+                self::isUnknownWriteOutcome($outcomeMayBeUnknown, $status),
+                $exception,
+            );
+        }
+
+        return $contents;
     }
 
     private function redactToken(?string $value): ?string

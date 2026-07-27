@@ -275,9 +275,12 @@ final class AdminDryRunTotalBehaviorTest extends TestCase
         self::assertTrue($rows2025[0]['exportable']);
         self::assertSame('small_business', $rows2025[0]['tax_profile']);
         self::assertSame('11', $rows2025[0]['tax_rule']);
-        self::assertTrue($rows2026[0]['exportable']);
+        self::assertFalse($rows2026[0]['exportable']);
         self::assertSame('add_funds', $rows2026[0]['tax_profile']);
-        self::assertSame('1', $rows2026[0]['tax_rule']);
+        self::assertSame(
+            'domestic_zero_tax_rate_outside_small_business_period',
+            $rows2026[0]['reason_code'],
+        );
     }
 
     public function testPreviewBlocksRuleElevenWhenItsCanaryIsNotConfirmed(): void

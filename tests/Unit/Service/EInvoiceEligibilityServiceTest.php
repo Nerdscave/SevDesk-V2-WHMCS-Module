@@ -224,7 +224,6 @@ final class EInvoiceEligibilityServiceTest extends TestCase
 
     public function testMissingOrInvalidReferencesAndCanariesFailClosed(): void
     {
-        $ready = $this->readyResponses();
         $missingCandidateCanary = $this->candidate();
         unset($missingCandidateCanary['requestedEInvoiceCanaryConfirmed']);
         $scenarios = [
@@ -251,7 +250,7 @@ final class EInvoiceEligibilityServiceTest extends TestCase
             ],
             'missing Unity' => [
                 $this->candidate(),
-                [$ready[0], new Response(200, [], '{"objects":[]}')],
+                [$this->readyResponses()[0], new Response(200, [], '{"objects":[]}')],
                 'e_invoice_reference_missing',
                 [],
                 2,
@@ -265,14 +264,20 @@ final class EInvoiceEligibilityServiceTest extends TestCase
             ],
             'missing SevUser' => [
                 $this->candidate(),
-                [$ready[0], $ready[1], new Response(200, [], '{"objects":[]}')],
+                [
+                    ...array_slice($this->readyResponses(), 0, 2),
+                    new Response(200, [], '{"objects":[]}'),
+                ],
                 'e_invoice_reference_missing',
                 [],
                 3,
             ],
             'missing country' => [
                 $this->candidate(),
-                [$ready[0], $ready[1], $ready[2], new Response(200, [], '{"objects":[]}')],
+                [
+                    ...array_slice($this->readyResponses(), 0, 3),
+                    new Response(200, [], '{"objects":[]}'),
+                ],
                 'e_invoice_country_reference_missing',
                 [],
                 4,
@@ -280,9 +285,7 @@ final class EInvoiceEligibilityServiceTest extends TestCase
             'invalid country ID' => [
                 $this->candidate(),
                 [
-                    $ready[0],
-                    $ready[1],
-                    $ready[2],
+                    ...array_slice($this->readyResponses(), 0, 3),
                     new Response(200, [], '{"objects":[{"id":"invalid","code":"DE"}]}'),
                 ],
                 'e_invoice_country_reference_missing',
@@ -318,7 +321,7 @@ final class EInvoiceEligibilityServiceTest extends TestCase
 
             self::assertTrue($result->isFailure(), $label);
             self::assertSame($code, $result->errorCode(), $label);
-            $this->assertOnlyReadCalls($history, $readCount);
+            $this->assertOnlyReadCalls($history, $readCount, $label);
         }
     }
 
@@ -348,6 +351,31 @@ final class EInvoiceEligibilityServiceTest extends TestCase
 
         self::assertTrue($result->isFailure());
         self::assertSame('e_invoice_contact_email_search_truncated', $result->errorCode());
+        $this->assertOnlyReadCalls($history, 6);
+    }
+
+    public function testMalformedMainEmailListInvalidatesTheWholeEInvoiceCheck(): void
+    {
+        $responses = array_slice($this->readyResponses(), 0, 6);
+        $responses[5] = new Response(
+            200,
+            [],
+            '{"objects":[{"contact":{"id":"42"},"type":"EMAIL","main":"1",'
+                . '"value":"billing@example.test"},"malformed"]}',
+        );
+        $history = new ArrayObject();
+
+        $result = $this->service($responses, true, $history)->decide(
+            $this->invoice(),
+            $this->contact(),
+            '42',
+            $this->tax('1'),
+            $this->target('1'),
+            $this->candidate(),
+        );
+
+        self::assertTrue($result->isFailure());
+        self::assertSame('e_invoice_contact_main_email_missing', $result->errorCode());
         $this->assertOnlyReadCalls($history, 6);
     }
 
@@ -557,14 +585,17 @@ final class EInvoiceEligibilityServiceTest extends TestCase
         return new EInvoiceEligibilityService($config, $gateway, $client, new ReferenceData($client));
     }
 
-    private function assertOnlyReadCalls(ArrayObject $history, int $expectedCount): void
-    {
+    private function assertOnlyReadCalls(
+        ArrayObject $history,
+        int $expectedCount,
+        string $message = '',
+    ): void {
         $requests = array_map(
             static fn (array $entry): string => $entry['request']->getMethod(),
             iterator_to_array($history),
         );
 
-        self::assertCount($expectedCount, $requests);
+        self::assertCount($expectedCount, $requests, $message);
         self::assertSame(array_fill(0, $expectedCount, 'GET'), $requests);
     }
 

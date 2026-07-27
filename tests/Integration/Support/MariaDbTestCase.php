@@ -152,6 +152,7 @@ abstract class MariaDbTestCase extends TestCase
     {
         foreach (
             [
+                Migrator::PDF_RATE_TABLE,
                 Migrator::ITEMS_TABLE,
                 Migrator::JOBS_TABLE,
                 Migrator::MAPPING_TABLE,

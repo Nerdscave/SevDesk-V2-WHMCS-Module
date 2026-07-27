@@ -104,6 +104,57 @@ final class CorrectionServiceTest extends TestCase
         self::assertCount(0, $history);
     }
 
+    public function testOneCentAllocationDifferenceStopsBeforeAnyRemoteWrite(): void
+    {
+        $history = [];
+        $service = new CorrectionService(
+            $this->client([], $history),
+            static fn (): null => null,
+            static fn (): bool => true,
+        );
+
+        $result = $service->create(
+            $this->request('119.01'),
+            $this->taxDecision(),
+            [new LineItem('Refund', '100.00', '19', true)],
+            true,
+        );
+
+        self::assertSame('blocked', $result['status']);
+        self::assertSame('correction_total_mismatch', $result['code']);
+        self::assertCount(0, $history);
+    }
+
+    public function testMalformedMarkerCandidateInvalidatesRecoveryWithoutCreatingAVoucher(): void
+    {
+        $history = [];
+        $validCandidate = [
+            'id' => '99',
+            'description' => CorrectionService::refundMarker('RF-9'),
+        ];
+        $service = new CorrectionService(
+            $this->client([
+                new Response(200, [], json_encode([
+                    'objects' => [$validCandidate, 'malformed'],
+                ], JSON_THROW_ON_ERROR)),
+            ], $history),
+            static fn (): null => null,
+            static fn (): bool => true,
+        );
+
+        $result = $service->create(
+            $this->request('119.00'),
+            $this->taxDecision(),
+            [new LineItem('Refund', '100.00', '19', true)],
+            true,
+        );
+
+        self::assertSame('failed', $result['status']);
+        self::assertSame('correction_reconciliation_failed', $result['code']);
+        self::assertCount(1, $history);
+        self::assertSame('GET', $history[0]['request']->getMethod());
+    }
+
     public function testInvoiceMappingIsBlockedWithoutCreditNoteOrVoucherFallback(): void
     {
         $history = [];

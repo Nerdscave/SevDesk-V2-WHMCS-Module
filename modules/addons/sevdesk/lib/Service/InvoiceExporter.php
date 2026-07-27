@@ -1424,6 +1424,16 @@ final class InvoiceExporter
                 );
             }
         }
+        if (
+            $invoice->expectedNetMinorUnits() === null
+            || $invoice->expectedTaxMinorUnits() === null
+        ) {
+            return ExportResult::failed(
+                $invoice->invoiceId,
+                'invoice_tax_totals_unavailable',
+                'Invoice export requires frozen WHMCS net and tax totals.',
+            );
+        }
         if ($invoice->calculatedDocumentGrossMinorUnits() !== $invoice->totalMinorUnits()) {
             return ExportResult::failed(
                 $invoice->invoiceId,

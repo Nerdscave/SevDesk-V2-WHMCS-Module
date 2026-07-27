@@ -434,7 +434,7 @@ final class CorrectionService
                     ],
                     'taxRate' => Decimal::toFloat($position->taxRate),
                     'net' => $position->net,
-                    'comment' => substr($position->description, 0, 255),
+                    'comment' => mb_substr($position->description, 0, 255),
                 ];
                 $payload[$position->net ? 'sumNet' : 'sumGross'] = -abs(Decimal::toFloat($position->amount));
 
@@ -448,7 +448,7 @@ final class CorrectionService
             ' ',
             'Correction ' . $correction['invoiceNumber'],
         ));
-        $description = substr($descriptionPrefix, 0, 80)
+        $description = mb_substr($descriptionPrefix, 0, 80)
             . ' ' . VoucherExporter::marker($correction['invoiceId'])
             . ' ' . self::originalVoucherMarker($correction['originalVoucherId'])
             . ' ' . $refundMarker;
@@ -662,7 +662,7 @@ final class CorrectionService
             $grossMinor += $position->grossMinorUnits();
         }
 
-        if (abs($grossMinor - $correction['refundMinorUnits']) > 1) {
+        if ($grossMinor !== $correction['refundMinorUnits']) {
             return self::result(
                 'blocked',
                 'correction_total_mismatch',
@@ -686,13 +686,24 @@ final class CorrectionService
             'limit' => 101,
         ]);
 
-        return array_values(array_filter(
-            self::records($response, 'voucher'),
-            static fn (array $candidate): bool => str_contains(
-                (string) ($candidate['description'] ?? ''),
-                $refundMarker,
-            ),
-        ));
+        $matches = [];
+        foreach (self::records($response, 'voucher') as $candidate) {
+            if (
+                self::numericId($candidate['id'] ?? null) === null
+                || !is_string($candidate['description'] ?? null)
+            ) {
+                throw new ApiException(
+                    'sevdesk returned an unidentifiable correction Voucher candidate.',
+                    null,
+                    'unexpected_correction_response',
+                );
+            }
+            if (str_contains($candidate['description'], $refundMarker)) {
+                $matches[] = $candidate;
+            }
+        }
+
+        return $matches;
     }
 
     /**
@@ -801,9 +812,20 @@ final class CorrectionService
         $result = [];
         foreach ($records as $record) {
             if (!is_array($record)) {
-                continue;
+                throw new ApiException(
+                    'sevdesk returned a malformed correction list member.',
+                    null,
+                    'unexpected_correction_response',
+                );
             }
-            if (isset($record[$nestedKey]) && is_array($record[$nestedKey])) {
+            if (array_key_exists($nestedKey, $record)) {
+                if (!is_array($record[$nestedKey])) {
+                    throw new ApiException(
+                        'sevdesk returned a malformed nested correction object.',
+                        null,
+                        'unexpected_correction_response',
+                    );
+                }
                 $record = $record[$nestedKey];
             }
             $result[] = $record;

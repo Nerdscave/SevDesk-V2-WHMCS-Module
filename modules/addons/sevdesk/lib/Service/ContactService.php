@@ -322,7 +322,14 @@ final class ContactService
 
         if (array_is_list($response)) {
             foreach ($response as $candidate) {
-                if (is_array($candidate) && self::extractContactId($candidate) === $contactId) {
+                if (!is_array($candidate) || self::extractContactId($candidate) === null) {
+                    throw new ApiException(
+                        'sevdesk returned a malformed Contact list member.',
+                        null,
+                        'unexpected_contact_response',
+                    );
+                }
+                if (self::extractContactId($candidate) === $contactId) {
                     return true;
                 }
             }
@@ -330,7 +337,16 @@ final class ContactService
             return false;
         }
 
-        return self::extractContactId($response) === $contactId;
+        $reportedContactId = self::extractContactId($response);
+        if ($reportedContactId === null) {
+            throw new ApiException(
+                'sevdesk returned an unidentifiable Contact object.',
+                null,
+                'unexpected_contact_response',
+            );
+        }
+
+        return $reportedContactId === $contactId;
     }
 
     private const int CONTACT_SEARCH_LIMIT = 1000;
@@ -357,10 +373,12 @@ final class ContactService
         $unverifiable = 0;
         foreach ($candidates as $candidate) {
             if (!is_array($candidate)) {
+                ++$unverifiable;
                 continue;
             }
             $contactId = self::extractContactId($candidate);
             if ($contactId === null) {
+                ++$unverifiable;
                 continue;
             }
 

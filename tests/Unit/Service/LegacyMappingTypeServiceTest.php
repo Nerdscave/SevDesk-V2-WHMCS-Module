@@ -180,6 +180,24 @@ final class LegacyMappingTypeServiceTest extends TestCase
         self::assertSame('/api/v1/Invoice/88', self::requestPath($history, 1));
     }
 
+    public function testGenericBadRequestNeverProvesLegacyDocumentAbsence(): void
+    {
+        $history = new ArrayObject();
+        $service = new LegacyMappingTypeService(
+            $this->client([
+                new Response(400, [], '{"error":{"code":"INVALID_PARAMETER"}}'),
+                $this->invoiceResponse(),
+            ], $history),
+            static fn (): bool => true,
+        );
+
+        $result = $service->inspect(42, 'INV-42', '88');
+
+        self::assertSame('failed', $result['status']);
+        self::assertArrayNotHasKey('suggestedType', $result);
+        self::assertCount(2, $history);
+    }
+
     public function testIdCollisionNeverProducesASuggestion(): void
     {
         $history = new ArrayObject();

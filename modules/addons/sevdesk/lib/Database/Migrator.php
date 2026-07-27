@@ -14,6 +14,7 @@ final class Migrator
     public const MAPPING_TABLE = 'mod_sevdesk';
     public const JOBS_TABLE = 'mod_sevdesk_jobs';
     public const ITEMS_TABLE = 'mod_sevdesk_job_items';
+    public const PDF_RATE_TABLE = 'mod_sevdesk_pdf_rate_limits';
 
     public static function up(): void
     {
@@ -85,6 +86,16 @@ final class Migrator
                 $table->index(['job_id', 'status'], 'mod_sevdesk_items_job_status');
                 $table->index(['status', 'available_at'], 'mod_sevdesk_items_available');
                 $table->index('invoice_id', 'mod_sevdesk_items_invoice');
+            });
+        }
+
+        if (!$schema->hasTable(self::PDF_RATE_TABLE)) {
+            $schema->create(self::PDF_RATE_TABLE, static function ($table): void {
+                $table->unsignedInteger('client_id')->primary();
+                $table->dateTime('window_started_at');
+                $table->unsignedSmallInteger('request_count')->default(0);
+                $table->dateTime('updated_at');
+                $table->index('updated_at', 'mod_sevdesk_pdf_rate_updated');
             });
         }
 
@@ -201,6 +212,9 @@ final class Migrator
                 'sevdesk_id', 'transaction_reference', 'candidate_json', 'http_status',
                 'exception_uuid', 'error_code', 'message', 'created_at', 'started_at',
                 'finished_at', 'updated_at',
+            ],
+            self::PDF_RATE_TABLE => [
+                'client_id', 'window_started_at', 'request_count', 'updated_at',
             ],
         ];
         $missing = [];

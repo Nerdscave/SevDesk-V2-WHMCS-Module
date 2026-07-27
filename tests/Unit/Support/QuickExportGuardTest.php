@@ -114,7 +114,7 @@ final class QuickExportGuardTest extends TestCase
                 $this->invoice(),
                 null,
                 true,
-                '2026-01-01',
+                'not-a-date',
                 true,
                 false,
             ),

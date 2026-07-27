@@ -9,8 +9,10 @@ use GuzzleHttp\Handler\MockHandler;
 use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Exception\ConnectException;
 use GuzzleHttp\Middleware;
+use GuzzleHttp\Psr7\FnStream;
 use GuzzleHttp\Psr7\Request;
 use GuzzleHttp\Psr7\Response;
+use GuzzleHttp\Psr7\Utils;
 use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\TestCase;
 use WHMCS\Module\Addon\SevDesk\Api\ApiException;
@@ -36,10 +38,34 @@ final class SevdeskClientTest extends TestCase
 
         self::assertSame([['id' => 12]], $client->get('/Contact', ['customerNumber' => '42']));
         self::assertSame('raw-api-token', $history[0]['request']->getHeaderLine('Authorization'));
-        self::assertSame('WHMCS-sevdesk/2.1.0-rc.7', $history[0]['request']->getHeaderLine('User-Agent'));
+        self::assertSame('WHMCS-sevdesk/2.1.0-rc.8', $history[0]['request']->getHeaderLine('User-Agent'));
         self::assertSame(5.0, $history[0]['options']['connect_timeout']);
         self::assertSame(30.0, $history[0]['options']['timeout']);
+        self::assertFalse($history[0]['options']['allow_redirects']);
+        self::assertTrue($history[0]['options']['stream']);
         self::assertStringContainsString('customerNumber=42', (string) $history[0]['request']->getUri());
+    }
+
+    public function testWriteRedirectIsNeverFollowedAndRemainsAnUnknownOutcome(): void
+    {
+        $history = [];
+        $stack = HandlerStack::create(new MockHandler([
+            new Response(302, ['Location' => '/api/v1/Contact/12'], '{"objects":{"id":"12"}}'),
+        ]));
+        $stack->push(Middleware::history($history));
+        $client = new SevdeskClient(new Client(['handler' => $stack]), 'token');
+
+        try {
+            $client->post('/Contact', ['name' => 'Synthetic'], true, [201]);
+            self::fail('A write redirect must not be accepted or followed.');
+        } catch (ApiException $exception) {
+            self::assertSame(302, $exception->httpStatus);
+            self::assertTrue($exception->outcomeUnknown);
+        }
+
+        self::assertCount(1, $history);
+        self::assertSame('POST', $history[0]['request']->getMethod());
+        self::assertFalse($history[0]['options']['allow_redirects']);
     }
 
     public function testItAlsoAcceptsDirectResourceResponses(): void
@@ -94,6 +120,58 @@ final class SevdeskClientTest extends TestCase
         self::assertSame($base64, $response['base64Encoded']);
         self::assertSame(60.0, $history[1]['options']['timeout']);
         self::assertStringContainsString('download=1', (string) $history[1]['request']->getUri());
+    }
+
+    public function testJsonBodyReadingStopsAtLimitPlusOneByte(): void
+    {
+        $limit = 2_097_152;
+        $source = Utils::streamFor(str_repeat('x', $limit + 16_384));
+        $readBytes = 0;
+        $stream = FnStream::decorate($source, [
+            'read' => static function (int $length) use ($source, &$readBytes): string {
+                $chunk = $source->read($length);
+                $readBytes += strlen($chunk);
+
+                return $chunk;
+            },
+        ]);
+        $client = $this->clientWith(new Response(200, [], $stream));
+
+        try {
+            $client->get('/Contact');
+            self::fail('The bounded reader must reject the oversized response.');
+        } catch (ApiException $exception) {
+            self::assertSame('response_too_large', $exception->sevdeskCode);
+        }
+
+        self::assertSame($limit + 1, $readBytes);
+    }
+
+    public function testOversizedContentLengthIsRejectedBeforeReadingTheBody(): void
+    {
+        $source = Utils::streamFor('must not be read');
+        $readCalls = 0;
+        $stream = FnStream::decorate($source, [
+            'read' => static function (int $length) use ($source, &$readCalls): string {
+                ++$readCalls;
+
+                return $source->read($length);
+            },
+        ]);
+        $client = $this->clientWith(new Response(
+            200,
+            ['Content-Length' => '2097153'],
+            $stream,
+        ));
+
+        try {
+            $client->get('/Contact');
+            self::fail('The Content-Length limit must be checked before reading.');
+        } catch (ApiException $exception) {
+            self::assertSame('response_too_large', $exception->sevdeskCode);
+        }
+
+        self::assertSame(0, $readCalls);
     }
 
     public function testRawPdfResourceDisablesBrokenHttpContentDecoding(): void
@@ -311,6 +389,16 @@ final class SevdeskClientTest extends TestCase
             self::assertFalse($exception->isRateLimit());
             self::assertFalse($exception->outcomeUnknown);
         }
+    }
+
+    public function testOnlyExplicitNotFoundResponsesProveAbsence(): void
+    {
+        self::assertTrue((new ApiException('missing', 404))->isDefinitiveNotFound());
+        self::assertTrue((new ApiException('missing', 400, 'not_found'))->isDefinitiveNotFound());
+        self::assertFalse((new ApiException('bad request', 400))->isDefinitiveNotFound());
+        self::assertFalse(
+            (new ApiException('bad request', 400, 'INVALID_PARAMETER'))->isDefinitiveNotFound(),
+        );
     }
 
     public function testInvalidSuccessfulWriteResponseIsAmbiguous(): void

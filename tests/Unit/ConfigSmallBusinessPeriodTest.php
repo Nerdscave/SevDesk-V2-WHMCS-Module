@@ -82,4 +82,28 @@ final class ConfigSmallBusinessPeriodTest extends TestCase
         $this->expectExceptionMessage('Kleinunternehmer-Stichtag');
         $config->smallBusinessAppliesOn(new DateTimeImmutable('2025-01-01'));
     }
+
+    public function testImportAfterAcceptsStoredAndIsoCompatibilityFormats(): void
+    {
+        self::assertSame(
+            '2026-01-01',
+            Config::parseImportAfter('01-01-2026')->format('Y-m-d'),
+        );
+        self::assertSame(
+            '2026-01-01',
+            Config::parseImportAfter('2026-01-01')->format('Y-m-d'),
+        );
+    }
+
+    public function testInvalidImportAfterFailsClosed(): void
+    {
+        foreach (['', 'not-a-date', '31-02-2026'] as $storedValue) {
+            try {
+                Config::parseImportAfter($storedValue);
+                self::fail('Invalid import_after was accepted: ' . $storedValue);
+            } catch (RuntimeException $error) {
+                self::assertStringContainsString('Exportstichtag', $error->getMessage());
+            }
+        }
+    }
 }

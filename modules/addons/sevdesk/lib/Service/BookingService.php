@@ -43,6 +43,7 @@ use WHMCS\Module\Addon\SevDesk\Domain\Decimal;
 final class BookingService
 {
     private const TRANSACTION_SEARCH_LIMIT = 1000;
+    private const TRANSACTION_SEARCH_PAGE_SIZE = 100;
 
     public function __construct(private readonly SevdeskClient $client)
     {
@@ -779,54 +780,76 @@ final class BookingService
      */
     private function matchingTransactions(array $payment, array &$accountCache): array
     {
-        $response = $this->client->get('/CheckAccountTransaction', [
-            'isBooked' => 'false',
-            'paymtPurpose' => $payment['whmcsTransactionId'],
-            'onlyCredit' => 'true',
-            'limit' => self::TRANSACTION_SEARCH_LIMIT,
-            'offset' => 0,
-        ]);
-
-        $records = self::records($response, 'checkAccountTransaction');
-        if (count($records) >= self::TRANSACTION_SEARCH_LIMIT) {
-            return ['matches' => [], 'truncated' => true];
-        }
-
         $matches = [];
-        foreach ($records as $transaction) {
-            if (!$this->transactionMatches($transaction, $payment)) {
-                continue;
+        for (
+            $offset = 0;
+            $offset < self::TRANSACTION_SEARCH_LIMIT;
+            $offset += self::TRANSACTION_SEARCH_PAGE_SIZE
+        ) {
+            $response = $this->client->get('/CheckAccountTransaction', [
+                'isBooked' => 'false',
+                'paymtPurpose' => $payment['whmcsTransactionId'],
+                'onlyCredit' => 'true',
+                'limit' => self::TRANSACTION_SEARCH_PAGE_SIZE,
+                'offset' => $offset,
+            ]);
+
+            $records = self::records($response, 'checkAccountTransaction');
+            if (count($records) > self::TRANSACTION_SEARCH_PAGE_SIZE) {
+                return ['matches' => [], 'truncated' => true];
             }
 
-            $transactionId = self::numericId($transaction['id'] ?? null);
-            $checkAccountId = self::numericId($transaction['checkAccount']['id'] ?? null);
-            if ($transactionId === null || $checkAccountId === null) {
-                continue;
+            foreach ($records as $transaction) {
+                if (!self::transactionIsStructurallyInspectable($transaction)) {
+                    throw new ApiException(
+                        'sevdesk returned an unidentifiable bank transaction candidate.',
+                        null,
+                        'unexpected_booking_response',
+                    );
+                }
+                if (!$this->transactionMatches($transaction, $payment)) {
+                    continue;
+                }
+
+                $transactionId = self::numericId($transaction['id'] ?? null);
+                $checkAccountId = self::numericId($transaction['checkAccount']['id'] ?? null);
+                if ($transactionId === null || $checkAccountId === null) {
+                    continue;
+                }
+
+                if (!isset($accountCache[$checkAccountId])) {
+                    $accountCache[$checkAccountId] = $this->readOne(
+                        '/CheckAccount/' . rawurlencode($checkAccountId),
+                        'checkAccount',
+                    );
+                }
+                if (
+                    !$this->accountUsesCurrency(
+                        $accountCache[$checkAccountId],
+                        $checkAccountId,
+                        $payment['currency'],
+                    )
+                ) {
+                    continue;
+                }
+
+                $matches[] = [
+                    'transactionId' => $transactionId,
+                    'checkAccountId' => $checkAccountId,
+                ];
+                if (count($matches) > 1) {
+                    return ['matches' => $matches, 'truncated' => false];
+                }
             }
 
-            if (!isset($accountCache[$checkAccountId])) {
-                $accountCache[$checkAccountId] = $this->readOne(
-                    '/CheckAccount/' . rawurlencode($checkAccountId),
-                    'checkAccount',
-                );
+            if (count($records) < self::TRANSACTION_SEARCH_PAGE_SIZE) {
+                return ['matches' => $matches, 'truncated' => false];
             }
-            if (
-                !$this->accountUsesCurrency(
-                    $accountCache[$checkAccountId],
-                    $checkAccountId,
-                    $payment['currency'],
-                )
-            ) {
-                continue;
-            }
-
-            $matches[] = [
-                'transactionId' => $transactionId,
-                'checkAccountId' => $checkAccountId,
-            ];
         }
 
-        return ['matches' => $matches, 'truncated' => false];
+        // A full last safety page cannot prove that there is no later exact
+        // match. Never book from such an incomplete candidate set.
+        return ['matches' => [], 'truncated' => true];
     }
 
     /**
@@ -837,6 +860,20 @@ final class BookingService
     {
         return (string) ($transaction['status'] ?? '') === '100'
             && $this->transactionIdentityMatches($transaction, $payment);
+    }
+
+    /** @param array<string, mixed> $transaction */
+    private static function transactionIsStructurallyInspectable(array $transaction): bool
+    {
+        $amount = $transaction['amount'] ?? null;
+
+        return self::numericId($transaction['id'] ?? null) !== null
+            && (string) ($transaction['objectName'] ?? '') === 'CheckAccountTransaction'
+            && (is_string($transaction['status'] ?? null) || is_int($transaction['status'] ?? null))
+            && is_string($transaction['paymtPurpose'] ?? null)
+            && (is_string($amount) || is_int($amount) || is_float($amount))
+            && is_array($transaction['checkAccount'] ?? null)
+            && self::numericId($transaction['checkAccount']['id'] ?? null) !== null;
     }
 
     /**
@@ -905,7 +942,7 @@ final class BookingService
     private function readOne(string $path, string $nestedKey): array
     {
         $records = self::records($this->client->get($path), $nestedKey);
-        if (count($records) !== 1) {
+        if (count($records) !== 1 || self::numericId($records[0]['id'] ?? null) === null) {
             throw new ApiException(
                 'sevdesk returned no unique object for a required booking read.',
                 null,
@@ -930,9 +967,20 @@ final class BookingService
         $result = [];
         foreach ($records as $record) {
             if (!is_array($record)) {
-                continue;
+                throw new ApiException(
+                    'sevdesk returned a malformed booking list member.',
+                    null,
+                    'unexpected_booking_response',
+                );
             }
-            if (isset($record[$nestedKey]) && is_array($record[$nestedKey])) {
+            if (array_key_exists($nestedKey, $record)) {
+                if (!is_array($record[$nestedKey])) {
+                    throw new ApiException(
+                        'sevdesk returned a malformed nested booking object.',
+                        null,
+                        'unexpected_booking_response',
+                    );
+                }
                 $record = $record[$nestedKey];
             }
             $result[] = $record;
@@ -990,7 +1038,11 @@ final class BookingService
         string $documentId,
     ): bool {
         $nestedKey = $documentType === 'invoice' ? 'invoiceLog' : 'voucherLog';
-        $records = self::records($response, $nestedKey);
+        try {
+            $records = self::records($response, $nestedKey);
+        } catch (ApiException) {
+            return false;
+        }
         if (count($records) !== 1) {
             return false;
         }

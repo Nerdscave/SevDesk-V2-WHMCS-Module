@@ -295,7 +295,17 @@ final class ReferenceData
             return [$response];
         }
 
-        return array_values(array_filter($response, 'is_array'));
+        foreach ($response as $row) {
+            if (!is_array($row)) {
+                throw new ApiException(
+                    'sevdesk returned a malformed reference-data list member.',
+                    null,
+                    'unexpected_reference_response',
+                );
+            }
+        }
+
+        return $response;
     }
 
     private static function numericId(mixed $id): ?string
@@ -318,7 +328,11 @@ final class ReferenceData
         foreach (self::rows($response) as $row) {
             $id = self::numericId($row['id'] ?? null);
             if ($id === null) {
-                continue;
+                throw new ApiException(
+                    'sevdesk returned an unidentifiable reference-data object.',
+                    null,
+                    'unexpected_reference_response',
+                );
             }
             $name = trim(implode(' ', array_filter([
                 (string) ($row['name'] ?? ''),

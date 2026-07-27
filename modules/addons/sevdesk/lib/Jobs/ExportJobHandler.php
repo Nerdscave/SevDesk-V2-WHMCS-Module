@@ -3478,11 +3478,15 @@ final class ExportJobHandler
             return false;
         }
 
-        $configured = (string) $this->config->get('import_after', '01-01-1999');
-        $start = DateTimeImmutable::createFromFormat('!d-m-Y', $configured)
-            ?: DateTimeImmutable::createFromFormat('!Y-m-d', $configured);
+        try {
+            $start = Config::parseImportAfter(
+                (string) $this->config->get('import_after', '01-01-1999'),
+            );
+        } catch (\RuntimeException) {
+            return false;
+        }
 
-        return !$start instanceof DateTimeImmutable || $date >= $start;
+        return $date >= $start;
     }
 
     private function deliveryText(string $setting, InvoiceSnapshot $invoice, ContactData $contact): string

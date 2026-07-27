@@ -44,6 +44,11 @@ Schnelle Tests ohne WHMCS-Datenbank oder Netzwerk für:
 - Invoice-Recovery nach begonnenem Write verwendet die eingefrorenen SevUser-/Unity-IDs und liest die aktuellen Referenzlisten nicht erneut;
 - kleingeschriebenes OSS-Land im Payload, passende `addressCountry`-Referenz und Readback über `embed=addressCountry`;
 - exakte Invoice-/Positionsrückprüfung und typabhängige Booking-Endpunkte;
+  `sumNet`, `sumTax` und `sumGross` sind auch ohne Rabatt Pflicht und eine
+  Abweichung von einem Cent blockiert Create, Open und Recovery;
+- vollständig strukturell validierte API-Listen: Ein skalares Element oder ein
+  Treffer ohne Pflicht-ID blockiert die gesamte Invoice-, Positions-, Kontakt-,
+  Korrektur-, Referenz- oder Zahlungskandidatenmenge;
 - PDF-MIME, Signatur, EOF, Größenlimit, Dateiname und SHA-256;
 - ZUGFeRD-Auswahl nur für `invoice_only` mit sevDesk-Hoheit, deutschem Organisationskunden, Rule 1, gültigem Aktivierungsdatum, gesetztem Admin-Tickbox-Feld und bestätigtem Canary;
 - kein ZUGFeRD bei Rule 19, Rules 18/20, B2G, historischem Backfill, fehlendem XMLReader oder Rechnung vor dem Aktivierungsdatum;
@@ -66,6 +71,8 @@ Schnelle Tests ohne WHMCS-Datenbank oder Netzwerk für:
 - Legacy-sevDesk-Hoheit nur bei atomar erneut geprüftem WHMCS-Status `Paid`; ein fertiges Mapping darf bei `Unpaid` weder im Presenter noch im PDF-Proxy als Endrechnung erscheinen, bleibt nach einem späteren `Refunded`-Status aber abrufbar;
 - eine eingefrorene Legacy-Entscheidung darf weder in der Einzel- noch in der Sammelbestätigung auf einen anderen Typ oder eine andere Hoheit umgestellt werden; Remote-Status 200, 750 und 1000 gelten als final, Draft 100 nicht;
 - der PDF-Proxy prüft den lokalen Rechnungsstatus vor und nach dem sevDesk-Abruf, sodass ein Wechsel während des Remote-Reads keine PDF ausliefert;
+- der PDF-Proxy lässt pro WHMCS-Kunde acht Abrufe in 60 Sekunden zu, antwortet
+  danach mit HTTP 429 und lässt getrennte Kundenkontingente unabhängig;
 - alte Voucher-Vor-Write-Jobs mit abweichender Konfiguration: normaler Retry blockiert, bestätigter neuer `export_document`-Job mailfrei und ohne E-Rechnung;
 - Health-Kompatibilität für die von WHMCS verwendete stabile Versionsform
   `8.13.4-release.N`, ohne Beta-/RC- oder WHMCS-9-Versionen freizugeben;
@@ -78,7 +85,12 @@ Schnelle Tests ohne WHMCS-Datenbank oder Netzwerk für:
   gespeicherte Stichtage blockieren Worker und Dry-run nur bei aktivem Profil.
 - deutsche Rule-1-Fälle außerhalb des Kleinunternehmerzeitraums: 0 % blockiert
   für Voucher und Invoice, während 7 % und 19 % unverändert zulässig bleiben;
+- Rule 1 mit 0 % bleibt auch über ein bestätigtes AddFunds- oder
+  EU-B2C-Inlandsprofil blockiert;
 - der aktive Kleinunternehmerzeitraum gewinnt bei gültigem Ländercode vor deutscher, EU-B2C-, EU-B2B-, Drittland- und AddFunds-Klassifikation; Voucher und Invoice verwenden Rule 11 mit 0 %, wobei AddFunds den Invoice-Canary und die Guidance-Prüfung nicht umgehen darf;
+- Rule-3-Nachweise normalisieren die EU-USt-ID und verlangen das zum
+  Rechnungsland passende Präfix. Tests decken auch das griechische `EL`-Präfix,
+  Platzhalter und Länderabweichungen ab;
 - `LateFee` blockiert Worker und Dry-run vor Steuerklassifikation, Kontakt,
   PDF und Beleg-Write; nach einem möglichen Write bleibt derselbe stabile Code
   mit dem vorhandenen Checkpoint `ambiguous`;
@@ -123,21 +135,32 @@ Mit einer isolierten MySQL-/MariaDB-Datenbank:
 - der endgültige Claim sperrt Aktivierung, Review, Signatur und 401/403-Alarm zusammen mit Job und Item in der Reihenfolge Settings → Job → Item; Quarantäne, Deaktivierung oder Zugangsalarm können dadurch nicht zwischen Gate-Prüfung und Handlerstart vorbeilaufen;
 - Setup verlangt die Bestandsbestätigung und eine erfolgreiche read-only Mandantenprüfung. Ein Fehler erhält die Quarantäne. Unter dem Runner-Lock werden abgelaufene sichere Leases und Leases mit bestätigtem Remote-Effekt ohne Abbruch zu `retry_wait`. Sichere abgebrochene Leases werden `cancelled`; unbekannte Write-Ausgänge und abgebrochene Leases mit bestätigtem Remote-Effekt werden `ambiguous`. Ein abgestürzter Altbestand blockiert dadurch nicht die gesamte Freigabe;
 - Lease-Recovery und Cancel werden pro Item über Job- und Itemlock serialisiert und vergleichen die gescannte Lease erneut; ein paralleler Abbruch hinterlässt weder eine fremde neue Lease noch ein unclaimbares `retry_wait`;
+- ein direkter Cancel von `pending`/`retry_wait` gibt nur bei sicheren
+  Checkpoints den Dedupe-Key frei. Bei möglichem oder bestätigtem Remote-Effekt
+  wird das Item `ambiguous`; eine ausdrückliche Reconciliation kann den
+  abgebrochenen Job anschließend wieder öffnen;
 - konkurrierende Setup-POSTs dürfen nach der Lock-Freigabe keine inzwischen gespeicherten Werte aus einem vor dem Lock gelesenen Snapshot zurückschreiben. Validierungsfehler rollen die Transaktion zurück; nur die innerhalb des Runner-Locks bewusst gesetzte Sync-Sperre bleibt fail-closed bestehen;
 - Setup bindet die Betreiberbestätigung an einen opaken Quarantäne-Token. Ein neuer Token während oder nach dem Seitenaufruf gewinnt. Fehler beim unabhängigen Speichern von Token oder Signatur verhindern die Migration. Nach Commit oder Rollback wird der lokale Config-Cache verworfen;
 - stabile, bereinigte Diagnosecodes für doppelte Invoice-/Remote-Zuordnungen und kollidierende Legacy-Indizes; unbekannte Datenbankmeldungen dürfen weder Admin-HTML noch Aktivierungsantwort erreichen;
 - vollständige, `NULL`- und verwaiste Mappings;
 - leere oder nur aus Leerzeichen bestehende Remote-IDs werden in Lookup, Health, Booking und UI wie `NULL` als unvollständige Recovery-Fälle behandelt;
 - additive Nullable-Spalten `document_type`, `document_authority`, `document_number`, `document_ready_at`, `delivered_at`, `pdf_sha256`, `is_e_invoice` und `xml_sha256`; alte Zeilen behalten die neuen Felder als `NULL`;
+- additive, idempotente Tabelle `mod_sevdesk_pdf_rate_limits` ohne PDF,
+  Remote-ID oder andere Dokumentdaten;
 - keine automatische Typ- oder Hoheitsannahme für vollständige Legacy-Mappings und atomare Typ-/ID-/Hoheitsspeicherung für neue Mappings;
 - typisierte Voucher und Invoices behalten beim Modus- oder Hoheitswechsel ihre bestehende Zuordnung und den eingefrorenen Dokumentkontext;
 - rein lesende Übergangsinventur mit frischem Fingerprint, vollständigen, untypisierten, `NULL`- und verwaisten Mappings sowie aktiven, unklaren und alten fehlgeschlagenen Exportjobs;
 - markerbasierte Sammelbestätigung von höchstens 25 sichtbaren Legacy-Mappings; die Hoheit wird je Invoice ausdrücklich gewählt, Voucher bleiben bei WHMCS. Markerlose, kollidierende oder zwischen Vorschau und Bestätigung geänderte Treffer bleiben einzeln gesperrt;
-- vollständige Mappings lassen sich nur nach atomarer Revalidation und eindeutigen 400- oder 404-Antworten von beiden Voucher-/Invoice-by-ID-Endpunkten entfernen; ein vorhandenes Objekt oder ein unklarer Read erhält die Zeile;
+- vollständige Mappings lassen sich nur nach atomarer Revalidation und
+  eindeutigen 404- beziehungsweise 400-`NOT_FOUND`-Antworten von beiden
+  Voucher-/Invoice-by-ID-Endpunkten entfernen; ein generisches 400, ein
+  vorhandenes Objekt oder ein unklarer Read erhält die Zeile;
 - fehlende und bereits vorhandene Unique-Indizes;
 - Job-/Item-Constraints und Pagination;
 - eindeutiger `dedupe_key` bei überlappenden Jobs;
 - MySQL Advisory Lock und atomarer Claim bei zwei Workern;
+- schemaabhängiger Advisory-Lockname, damit zwei WHMCS-Datenbanken auf demselben
+  MySQL-Server nicht denselben globalen Lock teilen;
 - sofortiger Claim bei abweichenden PHP-Zeitzonen von Web und CLI, solange beide dieselbe Datenbank-Session-Zeit verwenden; Lease, normaler Retry und `invoice_payment_event_followup` müssen aus Sicht von `CURRENT_TIMESTAMP` korrekt in der Zukunft liegen;
 - Lease-Ablauf und Übernahme;
 - Checkpoint-gesteuerte Entscheidung zwischen `retry_wait` und `ambiguous`;
@@ -167,11 +190,16 @@ Abzudecken sind:
 - Voucher-Create mit HTTP 201 und Remote-ID;
 - Invoice-Create `RE`/100 mit HTTP 201, effektiver WHMCS-Nummer, Marker, SevUser, Unity, Land, Rule und Positionen;
 - `GET /Invoice/{id}` und `getPositions` mit exakter ID-/Nummer-/Kontakt-/Rule-/Status-/Summenprüfung;
+- rabattfreie Invoice-Responses mit fehlendem oder um einen Cent abweichendem
+  `sumNet` beziehungsweise `sumTax`; kein Mapping und kein Folge-Write;
 - native E-Invoice mit `propertyIsEInvoice=true`, strukturierter Adresse, `PaymentMethod`, `takeDefaultAddress=false` sowie exakter Rückprüfung von Kontakt, Unity, PaymentMethod und Adresshash; die Matrix enthält vorhandenes Wahr-Flag, ausgelassenes Flag mit gültigem oder ungültigem XML und ein ausdrücklich falsches Flag;
 - `getXml` mit gültigem CII, leerer/übergroßer/ungültiger Antwort, DTD/Entity, Hashabweichung und fehlender XMLReader-Laufzeit;
 - `sendBy`, `sendViaEmail`, `getPdf` und typabhängiges `/Invoice/{id}/bookAmount`; bei `getPdf` sowohl dokumentiertes JSON/Base64 als auch die reale Raw-PDF-Antwort, fehlerhaftes Content-Encoding, HTTP 206/401, MIME, Signatur, Trailer und Größenlimit;
 - `sendViaEmail(sendXml=false)` für ZUGFeRD, ohne lose XML-Datei im WHMCS-Mail- oder Kundenpfad;
 - widersprüchliche, unvollständige oder übergroße Invoice-/PDF-Antworten;
+- deaktivierte Redirects, unbekannter 3xx-Write-Ausgang, frühe Ablehnung einer zu
+  großen `Content-Length` und höchstens Limit plus ein Byte gelesener
+  Chunk-Stream;
 - 400, 401, 403, 404, 409, 422, 429 und 5xx;
 - Connect-Timeout, Read-Timeout, leere Antwort, ungültiges JSON und fehlende Pflichtfelder;
 - `Retry-After` und begrenzter Backoff;
@@ -196,12 +224,23 @@ In einer Testinstallation mit WHMCS 8.13.4 und PHP 8.3:
 - ZUGFeRD-Setup mit Modus, vorhandenem Admin-Tickbox-Feld, PaymentMethod, Aktivierungsdatum, eigenem Canary und PHP XMLReader;
 - Übergangsinventur und Fingerprint vor Änderungen an Modus, Hoheit, OSS-, E-Rechnungs-, einem der fünf Rabatt-Canaries oder Kleinunternehmerprofil; der Fingerprint bindet auch den globalen WHMCS-`TaxType`, ein Wechsel bei geöffnetem Setup muss den POST ablehnen, und das Speichern allein darf keinen Job anlegen;
 - Moduswechsel bei aktiven oder ungeklärten Exportitems blockieren und bestehende Mappings unverändert lassen;
-- gelöschte Testbelege nur nach erneutem 400/404 an Voucher- und Invoice-by-ID abschließen; Mapping, Remote-ID, eingefrorener Typ und Dokumentcheckpoint müssen zusammenpassen. Bereits entfernte Mappings dürfen ausschließlich über die gleichwertig abgesicherte Klärfallaktion nachbereinigt werden;
+- gelöschte Testbelege nur nach erneutem 404 beziehungsweise
+  400-`NOT_FOUND` an Voucher- und Invoice-by-ID abschließen; ein generisches
+  400 bleibt ausdrücklich unzureichend. Mapping, Remote-ID, eingefrorener Typ
+  und Dokumentcheckpoint müssen zusammenpassen.
+  Bereits entfernte Mappings dürfen ausschließlich über die gleichwertig
+  abgesicherte Klärfallaktion nachbereinigt werden;
 - Invoice und Client über die vorgesehenen WHMCS-Schnittstellen laden;
 - WHMCS-PDF mit synthetischen Rechnungsdaten erzeugen;
 - sevDesk-PDF über die authentifizierte Addon-Route als Eigentümer mit Benutzerrecht `invoices` streamen und fremde Invoice-/Remote-IDs sowie delegierte Benutzer ohne dieses Recht vor Mapping- und Remote-I/O ablehnen;
 - Adminrollen und CSRF prüfen;
+- Quarantäne-Gate am Einstieg jeder remote-fähigen Adminaktion prüfen. Die
+  Buchungsvorschau und ihre Pagination dürfen nur per CSRF-geschütztem POST
+  laufen; GET darf weder sevDesk lesen noch den Session-Snapshot ersetzen;
 - Single- und Bulk-Job starten;
+- `Collections`, `Payment Pending`, `Draft`, `Cancelled`, `Refunded` und
+  unbekannte Rechnungsstatus in der Vorschau als explizit blockiert anzeigen,
+  statt sie bereits im SQL-Lesepfad zu verwerfen;
 - gemeinsame Altbestandsvorschau und mailfreien `historical_backfill` starten; jeder mögliche Invoice-/Voucher-Dublettenhinweis muss das Create blockieren und darf kein Mapping raten;
 - ein altes sicheres Voucher-Vor-Write-Item nach Moduswechsel nur über die bestätigte Requeue-Aktion neu einreihen; normaler Retry und riskante Checkpoints bleiben gesperrt;
 - Admin-Rechnungsbutton öffnet den vorausgefüllten Einzelimport; der kompakte
@@ -247,7 +286,9 @@ Geprüft werden:
 - Rule-11-Invoice ohne eigenes Canary-Gate sowie mit fehlendem `REVENUE`-Scope in der aktuellen `ReceiptGuidance`: kein Create;
 - `sendBy`, `sendViaEmail`, finale `getPdf`-Antwort und `/Invoice/{id}/bookAmount`;
 - erneute exakte Draft-Prüfung direkt vor `sendBy` und `sendViaEmail`; eine zwischenzeitliche Header-, Adress- oder Positionsänderung verhindert jeden Write;
-- volle 1.000er-Seiten bei Invoice-Suche, Positionen und Zahlungskandidaten blockieren als potenziell abgeschnitten;
+- volle 1.000er-Seiten bei Invoice-Suche und Positionen sowie zehn vollständig
+  gelesene 100er-Seiten bei Zahlungskandidaten blockieren als potenziell
+  abgeschnitten;
 - PDF-Stabilität nach Finalisierung sowie ID-Eindeutigkeit zwischen Voucher und Invoice;
 - typisiertes Mapping, zweiter Lauf ohne Cross-Type-Duplikat und Recovery nach gezielt unterbrochenem Create/Open/Versand.
 
@@ -287,7 +328,7 @@ Scheitern Rule 19, Marker oder ID-Eindeutigkeit, sind Hybrid- und gegebenenfalls
 | Kleinunternehmer, Voucher | Rule 11 und 0 % nach dem bisherigen Guidance-Vertrag |
 | Kleinunternehmer, Invoice | nur mit eigenem Canary und aktuellem REVENUE-Scope für Rule 11/0 %; sonst kein Create |
 | AddFunds am oder vor dem Kleinunternehmer-Stichtag | Rule 11/0 % gewinnt; Invoice-Canary und aktuelle Guidance bleiben zwingend |
-| AddFunds nach dem Kleinunternehmer-Stichtag | bestätigtes AddFunds-Sonderprofil bleibt unverändert wirksam |
+| AddFunds nach dem Kleinunternehmer-Stichtag | bestätigtes AddFunds-Sonderprofil wird gewählt; Rule 1 mit 0 % bleibt blockiert |
 | digitale EU-B2C-Leistung, Rule 19, paid/effektive Nummer, Profil und Canary bestätigt | Invoice in `invoice_for_oss`/`invoice_only`, niemals Voucher |
 | Rule 19 ohne Profil/Canary, in `voucher_only`, vor Zahlung oder ohne auswertbare effektive Nummer | blockiert, kein Remote-Write |
 | bezahlte Legacy-Rechnung mit leerem `invoicenum` | interne Invoice-ID als effektive Nummer in Dry-run, gefrorenem Snapshot, Payload und Mapping; kein DB-Backfill |
@@ -424,10 +465,15 @@ Diese Punkte werden manuell oder mit passenden Browsertests geprüft:
   getrennte Bestätigung ergänzt `document_type` und löst keinen Export aus.
   Markerlose Originalmodul-Belege erscheinen als schwächerer Legacy-Nachweis,
   widersprüchliche Marker und Cross-Type-ID-Kollisionen bleiben blockiert. Nur
-  eine eindeutige 400- oder 404-Antwort darf je by-ID-Endpoint als Abwesenheit
-  behandelt werden.
+  nur eine eindeutige 404- oder 400-`NOT_FOUND`-Antwort darf je
+  by-ID-Endpoint als Abwesenheit behandelt werden; ein generisches 400
+  blockiert.
 - Die Sammelvorschau übernimmt höchstens 25 sichtbare, markerbestätigte Legacy-Typen. Vor der Bestätigung geänderte Remote-Daten, markerlose Belege und Kollisionen bleiben unangetastet.
-- „Aufheben“ entfernt eine vollständige Zuordnung nur nach eindeutigen 400- oder 404-Antworten von beiden by-ID-Endpunkten und atomarer Revalidation von Remote-ID und Dokumenttyp. 401/403 setzt den globalen Alarm; 429, 5xx, Timeout oder ein vorhandener Beleg lassen das Mapping stehen.
+- „Aufheben“ entfernt eine vollständige Zuordnung nur nach eindeutigen 404-
+  beziehungsweise 400-`NOT_FOUND`-Antworten von beiden by-ID-Endpunkten und
+  atomarer Revalidation von Remote-ID und Dokumenttyp. Ein generisches 400,
+  401/403, 429, 5xx, Timeout oder ein vorhandener Beleg lässt das Mapping
+  stehen.
 - `stale_export_context_requeue_required` zeigt keinen normalen Retry. Die gesonderte Aktion verlangt die Mailfrei-Bestätigung und legt nur bei einem sicheren Vor-Write-Zustand einen neuen Job an.
 - Clientbereich für Proforma, Pending, Ready und Failure mit Eigentümer-,
   `invoices`-Berechtigungs- und PDF-Hashprüfung testen. Bei sevDesk-Hoheit darf kein normaler sichtbarer
@@ -449,7 +495,8 @@ Diese Punkte werden manuell oder mit passenden Browsertests geprüft:
 - `invoice_only` muss ohne Voucher-Konto und ohne Receipt-Guidance-Abruf eine
   gültige Invoice-Steuerentscheidung liefern; der Hybridmodus darf Guidance nur
   für seine tatsächlichen Voucher-Ziele laden.
-- Eine volle sichere Suchseite von 1.000 Invoice- oder Zahlungskandidaten muss
+- Eine volle sichere Suchseite von 1.000 Invoice-Kandidaten oder zehn
+  vollständig gelesene Seiten mit insgesamt 1.000 Zahlungskandidaten müssen
   wegen nicht beweisbarer Eindeutigkeit blockieren, bevor ein Write erfolgt.
 - Ein vorhandener Checkpoint `contact_write_requested` muss seine ausschließlich
   lesende Recovery vor Mapping-, Status-, Stichtags-, Währungs- und Tax-Terminals
@@ -567,6 +614,6 @@ Ein Release darf erst freigegeben werden, wenn:
 14. bei Verwendung fester `PromoHosting`-Rabatte für jede tatsächlich genutzte Rule-/Rate-Capability der separate Canary die negative `InvoicePos`, `discountSave=null`, Capability-Key, vollständigen Rabattmarker, exakte positive und negative Positionen, `sumNet`, `sumTax`, `sumGross`, `sumDiscounts=0`, PDF und read-only Recovery bestätigt hat. Rule 11 benötigt zusätzlich seinen rabattfreien Invoice-Canary und die aktuelle `REVENUE`-Guidance.
 15. das Positivlisten-Releasearchiv die eigenständige `UPGRADE.md` und die GPL-Lizenz enthält, aber weder Tests, `vendor/` noch lokale Arbeitsdaten. Die Release Notes werden separat am GitHub-Pre-Release veröffentlicht.
 
-`2.1.0-rc.7` darf als klar gekennzeichnete GitHub-Vorabversion veröffentlicht werden, sobald die automatisierten Repository-Checks und der Archivscan grün sind. Das ist keine pauschale Produktivfreigabe. Ein kontrollierter Nachlauf darf nur die Steuer- und Rabatt-Capabilities verwenden, deren Einzelnachweise im verbundenen Mandanten bestanden sind. Die finale `2.1.0` bleibt bis zu allen oben genannten Zielumgebungs- und Canary-Nachweisen gesperrt.
+`2.1.0-rc.8` darf als klar gekennzeichnete GitHub-Vorabversion veröffentlicht werden, sobald die automatisierten Repository-Checks und der Archivscan grün sind. Das ist keine pauschale Produktivfreigabe. Ein kontrollierter Nachlauf darf nur die Steuer- und Rabatt-Capabilities verwenden, deren Einzelnachweise im verbundenen Mandanten bestanden sind. Die finale `2.1.0` bleibt bis zu allen oben genannten Zielumgebungs- und Canary-Nachweisen gesperrt.
 
 Offene Punkte in Steuerlogik, Idempotenz oder Mappingmigration blockieren auch eine Vorabversion.

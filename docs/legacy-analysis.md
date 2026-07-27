@@ -140,7 +140,12 @@ Die Setupseite fasst diese Zustände in einer Übergangsinventur zusammen. Sie z
 
 Für vollständige Legacy-Mappings gibt es eine Sammelvorschau mit höchstens 25 sichtbaren Zeilen. Nur eindeutige Treffer mit passendem Rewrite-Marker können gemeinsam bestätigt werden. Markerlose Originalbelege, Typkollisionen und geänderte Treffer bleiben einzelne Klärfälle.
 
-Eine vollständige Mappingzeile darf nicht mehr allein deshalb entfernt werden, um einen Export neu zu starten. Erst eindeutige 400- oder 404-Antworten von beiden Voucher-/Invoice-by-ID-Endpunkten belegen, dass unter der gespeicherten ID kein Remote-Dokument mehr vorhanden ist. Danach prüft das Repository ID und Typ nochmals unter Zeilensperre. Jeder andere Ausgang erhält die Zuordnung.
+Eine vollständige Mappingzeile darf nicht mehr allein deshalb entfernt werden,
+um einen Export neu zu starten. Erst eindeutige 404- beziehungsweise
+400-`NOT_FOUND`-Antworten von beiden Voucher-/Invoice-by-ID-Endpunkten belegen,
+dass unter der gespeicherten ID kein Remote-Dokument mehr vorhanden ist. Ein
+generisches 400 reicht nicht. Danach prüft das Repository ID und Typ nochmals
+unter Zeilensperre. Jeder andere Ausgang erhält die Zuordnung.
 
 ## Jobs und Hooks
 

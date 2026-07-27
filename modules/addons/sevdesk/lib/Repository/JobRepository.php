@@ -131,14 +131,14 @@ final class JobRepository
             ->where('action', 'export_document')
             ->orderBy('invoice_id')
             ->orderByDesc('id')
-            ->get(['id', 'invoice_id', 'status', 'checkpoint', 'candidate_json', 'message']);
+            ->get(['id', 'invoice_id', 'status', 'checkpoint', 'candidate_json', 'error_code', 'message']);
 
         foreach ($items as $item) {
             $invoiceId = (int) ($item->invoice_id ?? 0);
             if ($invoiceId < 1 || isset($resolved[$invoiceId])) {
                 continue;
             }
-            if (self::isDedupeSkippedItem($item)) {
+            if (self::isNonOwningSkippedItem($item)) {
                 continue;
             }
 
@@ -506,7 +506,10 @@ final class JobRepository
                 ? 'Das bezahlte WHMCS-Ereignis wurde während der Verarbeitung erkannt; der Invoice-Pfad wird erneut geprüft.'
                 : mb_substr($outcome->message, 0, 4000);
 
-            if ($cancelRequested && $storedStatus === 'retry_wait') {
+            if (
+                $cancelRequested
+                && in_array($storedStatus, ['retry_wait', 'permanent_failed'], true)
+            ) {
                 $riskyCheckpoint = self::isRiskyCheckpoint($storedCheckpoint);
                 $storedStatus = $riskyCheckpoint ? 'ambiguous' : 'cancelled';
                 $storedAvailableAt = $now;
@@ -522,8 +525,7 @@ final class JobRepository
                 && (string) ($current->action ?? '') === 'review_notice'
                 && $storedStatus === 'permanent_failed'
                 && $storedErrorCode === 'manual_review_required';
-            $retainRiskDedupe = !$cancelRequested
-                && $storedStatus === 'permanent_failed'
+            $retainRiskDedupe = in_array($storedStatus, ['permanent_failed', 'ambiguous'], true)
                 && self::isRiskyCheckpoint($storedCheckpoint);
 
             Capsule::table(Migrator::ITEMS_TABLE)
@@ -558,20 +560,39 @@ final class JobRepository
     {
         $now = $this->now();
         Capsule::connection()->transaction(function () use ($jobId, $now): void {
+            $job = Capsule::table(Migrator::JOBS_TABLE)
+                ->where('id', $jobId)
+                ->lockForUpdate()
+                ->first();
+            if ($job === null) {
+                return;
+            }
             Capsule::table(Migrator::JOBS_TABLE)->where('id', $jobId)->update([
                 'cancel_requested_at' => $now,
                 'updated_at' => $now,
             ]);
-            Capsule::table(Migrator::ITEMS_TABLE)
+            $items = Capsule::table(Migrator::ITEMS_TABLE)
                 ->where('job_id', $jobId)
                 ->whereIn('status', ['pending', 'retry_wait'])
-                ->update([
-                    'status' => 'cancelled',
-                    'dedupe_key' => null,
-                    'message' => 'Job wurde durch einen Administrator abgebrochen.',
+                ->orderBy('id')
+                ->lockForUpdate()
+                ->get(['id', 'checkpoint', 'dedupe_key']);
+            foreach ($items as $item) {
+                $riskyCheckpoint = self::isRiskyCheckpoint((string) ($item->checkpoint ?? ''));
+                Capsule::table(Migrator::ITEMS_TABLE)->where('id', $item->id)->update([
+                    'status' => $riskyCheckpoint ? 'ambiguous' : 'cancelled',
+                    'dedupe_key' => $riskyCheckpoint ? $item->dedupe_key : null,
+                    'error_code' => $riskyCheckpoint
+                        ? 'cancelled_after_side_effect'
+                        : 'cancelled_by_admin',
+                    'message' => $riskyCheckpoint
+                        ? 'Jobabbruch nach möglichem oder bestätigtem Remote-Effekt; '
+                            . 'der lokale Abschluss muss geprüft werden.'
+                        : 'Job wurde durch einen Administrator abgebrochen.',
                     'finished_at' => $now,
                     'updated_at' => $now,
                 ]);
+            }
         });
         $this->refreshJob($jobId);
     }
@@ -759,7 +780,11 @@ final class JobRepository
 
         try {
             $updated = Capsule::connection()->transaction(function () use ($itemId, $item): int {
-                if (!$this->lockRunnableJob((int) $item->job_id)) {
+                $job = Capsule::table(Migrator::JOBS_TABLE)
+                    ->where('id', $item->job_id)
+                    ->lockForUpdate()
+                    ->first();
+                if ($job === null) {
                     return 0;
                 }
 
@@ -779,6 +804,18 @@ final class JobRepository
                 $target = $this->reconciliationTarget($current);
                 if ($target === null) {
                     return 0;
+                }
+
+                if (
+                    $job->cancel_requested_at !== null
+                    || (string) $job->status === 'cancelled'
+                ) {
+                    Capsule::table(Migrator::JOBS_TABLE)->where('id', $job->id)->update([
+                        'status' => 'pending',
+                        'cancel_requested_at' => null,
+                        'finished_at' => null,
+                        'updated_at' => $this->now(),
+                    ]);
                 }
 
                 return Capsule::table(Migrator::ITEMS_TABLE)
@@ -1749,7 +1786,7 @@ final class JobRepository
      */
     public static function documentContextFromItem(object $item, bool $frozenOnly = false): ?array
     {
-        if (self::isDedupeSkippedItem($item)) {
+        if (self::isNonOwningSkippedItem($item)) {
             return null;
         }
 
@@ -1935,11 +1972,17 @@ final class JobRepository
         ];
     }
 
-    private static function isDedupeSkippedItem(object $item): bool
+    private static function isNonOwningSkippedItem(object $item): bool
     {
-        return (string) ($item->status ?? '') === 'skipped'
-            && (string) ($item->checkpoint ?? '') === 'queued'
-            && (string) ($item->message ?? '') === self::DEDUPE_SKIPPED_MESSAGE;
+        if (
+            (string) ($item->status ?? '') !== 'skipped'
+            || (string) ($item->checkpoint ?? '') !== 'queued'
+        ) {
+            return false;
+        }
+
+        return (string) ($item->message ?? '') === self::DEDUPE_SKIPPED_MESSAGE
+            || (string) ($item->error_code ?? '') === 'unresolved_export_history';
     }
 
     /** @param array<mixed> $candidate */

@@ -19,6 +19,11 @@ Eine `/api/v2` ist weder Voraussetzung noch Teil der Implementierung. Technische
 - passender `Content-Type` für JSON beziehungsweise Voucher-PDF-Upload;
 - aussagekräftiger `User-Agent` aus Modulname und Version ohne Mandanten- oder Kundendaten;
 - explizite Connect- und Request-Timeouts;
+- automatische Redirects sind deaktiviert. Eine 3xx-Antwort auf einen Write gilt
+  als unbekannter Ausgang und darf nicht als GET weiterverfolgt werden;
+- JSON-, XML- und PDF-Antworten werden als Stream höchstens bis zum jeweiligen
+  Limit plus ein Byte gelesen. Eine zu große `Content-Length` wird vor dem
+  Einlesen abgelehnt;
 - Token niemals in URL, Jobdaten oder Fehlertext.
 
 Vor dem ersten Write und im Health Check liest das Modul `/Tools/bookkeepingSystemVersion` und erwartet sevDesk-Update 2.0. Eine abweichende oder nicht lesbare Version blockiert Writes.
@@ -43,6 +48,12 @@ Vor dem ersten Write und im Health Check liest das Modul `/Tools/bookkeepingSyst
 | Invoice-Zahlung buchen | `PUT /Invoice/{id}/bookAmount` plus typabhängige Read-/Log-Endpunkte |
 
 Invoice-Erstellung, Öffnen, PDF und Versand sind getrennte Schritte. Erfolg eines Schritts beweist keinen späteren Schritt.
+
+Listen sind nur verwertbar, wenn jedes Element die für den jeweiligen Endpunkt
+benötigte Struktur besitzt. Das Modul entfernt keine fehlerhaften Elemente, um
+danach aus der kleineren Restmenge Eindeutigkeit abzuleiten. Eine gemischte oder
+unvollständige Antwort blockiert daher Kandidatensuche, Mapping,
+Korrektur-Create und `bookAmount`.
 
 ## Dokumentziel und kein Fallback
 
@@ -180,7 +191,9 @@ Verbindliche Regeln:
 - vollständige WHMCS-Rechnungsadresse direkt am Dokument und `takeDefaultAddress=false`; ein bestehender sevDesk-Kontakt wird dafür weder ergänzt noch geändert;
 - v1 verwendet je WHMCS-Position Menge 1;
 - kein benutzerdefiniertes `accountDatev` an Invoice-Positionen;
-- nach Create werden Invoice und alle Positionen gelesen und ID, Nummer, Status, Kontakt, Rule, Währung, Positionen und Summen exakt verglichen;
+- nach Create werden Invoice und alle Positionen gelesen und ID, Nummer, Status,
+  Kontakt, Rule, Währung, Positionen sowie `sumNet`, `sumTax` und `sumGross`
+  exakt verglichen. Die drei Summen sind auch bei rabattfreien Invoices Pflicht;
 - erst die bestätigte Remote-ID plus `document_type=invoice` ergibt ein erfolgreiches Mapping.
 
 Der [Umsatzsteuer-Anwendungserlass, Abschnitt 1.3 Abs. 6](https://www.bundesfinanzministerium.de/Content/DE/Downloads/BMF_Schreiben/Steuerarten/Umsatzsteuer/Umsatzsteuer-Anwendungserlass/Umsatzsteuer-Anwendungserlass-aktuell.pdf?__blob=publicationFile)
@@ -273,6 +286,10 @@ Rule 19 sowie Rules 18/20, Behördenfälle und historische Backfills werden nie 
 - `getPdf` wird erst nach nachweisbarer Finalisierung verwendet. Laut Spezifikation kommt die PDF als JSON/Base64; der reale Endpunkt kann stattdessen direkt `application/pdf` liefern. Das Modul akzeptiert beide Formen mit genau einem GET, verlangt HTTP 200 und prüft danach PDF-MIME, `%PDF`-Signatur, EOF-Marker und höchstens 10 MiB.
 - Nur für diesen PDF-GET sind Guzzles automatische Inhaltsdekodierung und die entsprechende cURL-Dekodierung abgeschaltet. Das umgeht fehlerhafte `Content-Encoding`-Antworten einzelner sevDesk-Installationen, ohne den übrigen API-Client aufzuweichen.
 - Die PDF wird nicht dauerhaft in WHMCS gespeichert; SHA-256, Ready- und Delivery-Zeitpunkt dürfen im Mapping stehen.
+- Der authentifizierte Kundenproxy erlaubt pro WHMCS-Kunde höchstens acht
+  Remote-Abrufe in 60 Sekunden. Danach liefert er HTTP 429 mit `Retry-After`,
+  ohne sevDesk aufzurufen. Das schützt das gemeinsame Mandantenlimit, ersetzt
+  aber keine der Eigentümer-, Status-, Signatur- oder Hashprüfungen.
 - Bei ZUGFeRD wird vor Öffnung, Versand und PDF-Fortsetzung zusätzlich der unveränderliche XML-Hash geprüft.
 - Bei der Bestätigung einer alten sevDesk-geführten Invoice gelten die Remote-Status 200, 750 und 1000 als final. Draft 100 bleibt gesperrt. Eine im Altjob bereits eingefrorene Typ-/Hoheitsentscheidung darf durch die nachträgliche Mappingbestätigung nicht geändert werden.
 
@@ -300,14 +317,15 @@ Die Tabelle ist kein Steuerberatungsergebnis. Sie beschreibt API-Fähigkeiten un
 
 Der Tax-Resolver verwendet unter anderem Kleinunternehmerstatus, Land, Organisation, USt-ID, `taxexempt`, WHMCS-Steuersatz, Netto-/Bruttomodus, Positionsarten, Währung und eine zuverlässig bestätigte Leistungsart. Fehlen Pflichtdaten oder gibt es widersprüchliche Fälle, entsteht kein Payload.
 
-Der Kleinunternehmerstatus kann mit einem Enddatum versehen werden. Rule 11 gilt dann nur für Rechnungsdaten bis einschließlich dieses Tages. Sie hat in diesem Zeitraum auch Vorrang vor dem bestätigten AddFunds-Sonderprofil; dadurch kann AddFunds weder auf Rule 1 ausweichen noch die Rule-11-Invoice-Gates umgehen. Nach dem Stichtag gilt das AddFunds-Profil unverändert. Ohne Enddatum bleibt der aktivierte Schalter aus Gründen der Upgrade-Kompatibilität unbegrenzt wirksam. Bei aktivem Kleinunternehmerprofil wird ein ungültiger gespeicherter Stichtag nicht als „Regelbesteuerung“ interpretiert, sondern blockiert den Export. Im Modus `invoice_only` kommen der Rule-11-Invoice-Canary und die aktuelle Mandantenfähigkeit hinzu; `invoice_for_oss` lässt diese Fälle weiterhin als Voucher laufen.
+Der Kleinunternehmerstatus kann mit einem Enddatum versehen werden. Rule 11 gilt dann nur für Rechnungsdaten bis einschließlich dieses Tages. Sie hat in diesem Zeitraum auch Vorrang vor dem bestätigten AddFunds-Sonderprofil; dadurch kann AddFunds weder auf Rule 1 ausweichen noch die Rule-11-Invoice-Gates umgehen. Nach dem Stichtag wird das AddFunds-Profil wieder gewählt, muss aber weiterhin einen zulässigen Rule-/Rate-Vertrag erfüllen. Ohne Enddatum bleibt der aktivierte Schalter aus Gründen der Upgrade-Kompatibilität unbegrenzt wirksam. Bei aktivem Kleinunternehmerprofil wird ein ungültiger gespeicherter Stichtag nicht als „Regelbesteuerung“ interpretiert, sondern blockiert den Export. Im Modus `invoice_only` kommen der Rule-11-Invoice-Canary und die aktuelle Mandantenfähigkeit hinzu; `invoice_for_oss` lässt diese Fälle weiterhin als Voucher laufen.
 
-Nach dem Kleinunternehmer-Stichtag akzeptiert das normale deutsche Rule-1-Profil nur noch 7 % oder 19 %. Enthält eine deutsche, nicht steuerbefreite WHMCS-Rechnung weiterhin eine Position mit 0 %, wird sie vor jedem Voucher- oder Invoice-Write mit `domestic_zero_tax_rate_outside_small_business_period` blockiert. Das Modul rät in diesem Fall keinen anderen Steuergrund und ändert die WHMCS-Rechnung nicht.
+Nach dem Kleinunternehmer-Stichtag akzeptiert Rule 1 nur noch 7 % oder 19 %. Das gilt unabhängig davon, ob die Regel über das deutsche Standardprofil, EU-B2C mit bestätigter Inlandsbesteuerung oder das AddFunds-Sonderprofil gewählt wurde. Enthält die WHMCS-Rechnung weiterhin eine Position mit 0 %, wird sie vor jedem Voucher- oder Invoice-Write mit `domestic_zero_tax_rate_outside_small_business_period` blockiert. Das Modul rät in diesem Fall keinen anderen Steuergrund und ändert die WHMCS-Rechnung nicht.
 
 | Fall | Entscheidung |
 | --- | --- |
 | deutscher steuerpflichtiger Kunde | Rule 1 mit 7 % oder 19 %; Voucher oder Invoice gemäß Modus |
 | deutscher Rule-1-Fall mit 0 % außerhalb des Kleinunternehmerzeitraums | blockiert; Quelldaten oder eigener bestätigter Steuerfall erforderlich |
+| AddFunds mit Rule 1 und 0 % außerhalb des Kleinunternehmerzeitraums | blockiert; fachlich passende bestätigte Regel erforderlich |
 | EU-Privatkunde, fachlich kein OSS | Rule 1 nach bestätigtem Nicht-OSS-Profil; Ziel gemäß Modus |
 | bestätigte digitale EU-B2C-Leistung | Rule 19; nur `invoice_for_oss`/`invoice_only`, OSS-Profil und Canary |
 | Rule-18-/Rule-20-Fall | blockiert |
@@ -329,7 +347,7 @@ Die Rule-19-Bestätigung gilt für **alle Positionen** der betreffenden Rechnung
 
 ## B2B-Nachweis und Rule 3
 
-`taxexempt=true` allein ist kein EU-B2B-Nachweis. Rule 3 ist standardmäßig deaktiviert und darf nur für innergemeinschaftliche Warenlieferungen freigegeben werden. Erforderlich sind Organisation, USt-ID, `taxexempt` und die ausdrückliche Setupbestätigung. Hosting, Domains, Lizenzen und andere Dienstleistungen sind von diesem Profil ausgeschlossen. Northern Ireland und andere Sondergebiete benötigen eigene Tests und Freigaben.
+`taxexempt=true` allein ist kein EU-B2B-Nachweis. Rule 3 ist standardmäßig deaktiviert und darf nur für innergemeinschaftliche Warenlieferungen freigegeben werden. Erforderlich sind Organisation, eine plausible USt-ID mit zum Rechnungsland passendem EU-Präfix, `taxexempt` und die ausdrückliche Setupbestätigung. Platzhalter wie `-`, `0` oder `n/a` werden abgelehnt. Die lokale Syntaxprüfung ist kein Ersatz für die von WHMCS beziehungsweise VIES bestätigte Gültigkeit. Hosting, Domains, Lizenzen und andere Dienstleistungen sind von diesem Profil ausgeschlossen. Northern Ireland und andere Sondergebiete benötigen eigene Tests und Freigaben.
 
 ## `ReceiptGuidance` und Invoice-Fähigkeit
 
@@ -340,6 +358,11 @@ Account-Datev-IDs sind mandantenspezifisch. Im Voucher-Pfad prüft das Modul vor
 3. Konto erlaubt die Tax Rule.
 4. Konto erlaubt den Positionssteuersatz.
 5. Kombination ist für den Dokumenttyp Voucher zulässig.
+
+`allowedReceiptTypes` muss in der Guidance strukturell lesbar sein und
+`REVENUE` ausdrücklich enthalten. Ein fehlendes, leeres oder fehlerhaftes Feld
+wird nicht als Freigabe interpretiert. Dasselbe gilt für Rule 11 im
+Invoice-Pfad, obwohl dort kein `accountDatev` ins Payload geschrieben wird.
 
 Invoice-Positionen übernehmen kein frei konfiguriertes `accountDatev`. Der Invoice-Steuerpfad lädt deshalb auch keine Voucher-`ReceiptGuidance`; er prüft stattdessen die freigegebene Invoice-Rule, den tatsächlichen WHMCS-Steuersatz, Pflichtreferenzen und den Invoice-API-Vertrag. B2B-Nachweise, Rule-3-Warenprofil und Betreiberbestätigungen bleiben identisch streng. In `invoice_for_oss` gilt dieser guidance-freie Pfad nur für den bestätigten Rule-19-Fall, während alle Voucher-Ziele weiter gegen Guidance geprüft werden. Eine erfolgreiche Guidance- oder Contract-Prüfung beweist nur technische Kompatibilität, nicht die steuerliche Richtigkeit.
 
@@ -364,7 +387,10 @@ Erlaubt ein Voucher-Konto laut Guidance nur `AUSFUHREN`, muss jede andere Rule l
 ## Beträge und Positionen
 
 - Dezimalwerte werden ohne binäre Rundungsartefakte normalisiert.
-- Beim Voucher- und Korrekturpfad gelten die jeweils dokumentierten Cent-Toleranzen für aus WHMCS abgeleitete Summen. Der normale Invoice-Pfad vergleicht Payload und gelesene Remote-Werte dagegen exakt in normalisierten Minor Units; eine Abweichung von einem Cent ist dort bereits ein Vertragsfehler.
+- Der Voucher-Pfad behält seine dokumentierte Gesamttoleranz. Der
+  Korrekturpfad und der normale Invoice-Pfad vergleichen Payload und gelesene
+  Remote-Werte dagegen exakt in normalisierten Minor Units; eine Abweichung von
+  einem Cent blockiert den Write beziehungsweise die Bestätigung.
 - Invoice- und Voucher-Payload müssen denselben gefrorenen Netto-/Bruttomodus abbilden.
 - Negative Positionen bleiben im normalen Export verboten. Einzige Ausnahme ist der oben beschriebene feste `PromoHosting`-Rabatt; er wird als exakt geprüfte negative `InvoicePos` übertragen. `discountSave` bleibt leer.
 - Leere und Nullsummen-Rechnungen sind Prüffälle.
@@ -398,7 +424,7 @@ Zusätzlich sucht das Modul nach markerlosen Voucher-Kandidaten über Nummer, Da
 | --- | --- |
 | 400/409/422 | kein automatischer Retry; Payload, Rule oder Lifecycle korrigieren |
 | 401/403 | mandantenweiter Auth-Stopp bis erfolgreicher read-only Setupprüfung |
-| 400/404 bei GET nach Remote-ID | die versionierte Spezifikation beschreibt 400 für fehlende Voucher und Invoices; 404 wird kompatibel ebenfalls als Abwesenheit akzeptiert, aber nur in eng begrenzten read-only Prüfungen |
+| 400/404 bei GET nach Remote-ID | 404 oder 400 mit dem bereinigten Code `NOT_FOUND` darf in den eng begrenzten read-only Prüfungen Abwesenheit belegen; ein generisches 400 nie |
 | 429 | begrenzter Backoff, sofern noch kein unklarer Write vorliegt |
 | 5xx/Timeout | vor Write begrenzt retrybar; während/nach Write zuerst Reconciliation |
 | ungültiges JSON/Pflichtfeld fehlt | sicherer Fehler bei Reads; nach Write potenziell `ambiguous` |

@@ -113,6 +113,54 @@ final class VoucherExporterTest extends TestCase
         self::assertArrayNotHasKey('taxType', $payload['voucher']);
     }
 
+    public function testMultibyteDescriptionIsTruncatedWithoutCreatingInvalidUtf8(): void
+    {
+        $description = str_repeat('a', 254) . 'ä' . 'tail';
+        $expectedComment = mb_substr($description, 0, 255);
+        $history = [];
+        $mappings = [];
+        $exporter = new VoucherExporter(
+            $this->client([
+                new Response(201, [], '{"objects":{"filename":"temporary.pdf"}}'),
+                new Response(201, [], '{"objects":{"voucher":{"id":99}}}'),
+                $this->voucherResponse(),
+                $this->voucherPositionsResponse('100', $expectedComment),
+            ], $history),
+            static fn (): null => null,
+            static function (int $invoiceId, string $remoteId) use (&$mappings): void {
+                $mappings[$invoiceId] = $remoteId;
+            },
+        );
+        $invoice = new InvoiceSnapshot(
+            10,
+            20,
+            'RE-10',
+            new DateTimeImmutable('2026-07-01'),
+            'EUR',
+            '119.00',
+            '0',
+            [new LineItem($description, '100.00', '19', true)],
+        );
+
+        $result = $exporter->export(
+            $invoice,
+            '42',
+            $this->taxDecision(),
+            "%PDF-1.7\nsynthetic",
+        );
+
+        self::assertSame(ExportResult::SUCCEEDED, $result->status);
+        self::assertSame([10 => '99'], $mappings);
+        $payload = json_decode(
+            (string) $history[1]['request']->getBody(),
+            true,
+            512,
+            JSON_THROW_ON_ERROR,
+        );
+        self::assertSame($expectedComment, $payload['voucherPosSave'][0]['comment']);
+        self::assertStringNotContainsString("\u{FFFD}", $payload['voucherPosSave'][0]['comment']);
+    }
+
     public function testLostOrFailedVoucherWriteIsAmbiguousAndNeverMapped(): void
     {
         $history = [];
@@ -445,8 +493,10 @@ final class VoucherExporterTest extends TestCase
         ], JSON_THROW_ON_ERROR));
     }
 
-    private function voucherPositionsResponse(string $accountDatevId = '100'): Response
-    {
+    private function voucherPositionsResponse(
+        string $accountDatevId = '100',
+        string $comment = 'Hosting',
+    ): Response {
         return new Response(200, [], json_encode([
             'objects' => [[
                 'id' => '501',
@@ -457,7 +507,7 @@ final class VoucherExporterTest extends TestCase
                 'net' => true,
                 'sumNet' => '100.00',
                 'sumGross' => '119.00',
-                'comment' => 'Hosting',
+                'comment' => $comment,
             ]],
         ], JSON_THROW_ON_ERROR));
     }

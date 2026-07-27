@@ -693,15 +693,12 @@ final class WhmcsGateway
     public function invoicesBetween(
         DateTimeImmutable $from,
         DateTimeImmutable $until,
-        bool $onlyPaid,
+        bool $_onlyPaid,
         int $limit = 5000,
     ): array {
-        $statuses = $onlyPaid ? ['Paid'] : ['Paid', 'Unpaid'];
-
         return Capsule::table('tblinvoices as invoice')
             ->leftJoin('tblclients as client', 'invoice.userid', '=', 'client.id')
             ->leftJoin('tblcurrencies as currency', 'client.currency', '=', 'currency.id')
-            ->whereIn('invoice.status', $statuses)
             ->whereBetween('invoice.date', [$from->format('Y-m-d'), $until->format('Y-m-d')])
             ->orderBy('invoice.id')
             ->limit(max(1, min(20_000, $limit)))
@@ -722,7 +719,6 @@ final class WhmcsGateway
             ->leftJoin('tblclients as client', 'invoice.userid', '=', 'client.id')
             ->leftJoin('tblcurrencies as currency', 'client.currency', '=', 'currency.id')
             ->where('invoice.id', $this->positiveId($invoiceId, 'invoice'))
-            ->whereIn('invoice.status', ['Paid', 'Unpaid'])
             ->first([
                 'invoice.id', 'invoice.userid', 'invoice.invoicenum', 'invoice.date',
                 'invoice.datepaid', 'invoice.subtotal', 'invoice.credit', 'invoice.tax',

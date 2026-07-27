@@ -44,6 +44,49 @@ final class WhmcsRuntimeCompatibilityTest extends MariaDbTestCase
         self::assertSame('EUR', $dryRunInvoice->currencycode);
     }
 
+    public function testBulkAndDryRunQueriesKeepBlockedInvoiceStatusesVisible(): void
+    {
+        $this->insertInvoiceWithClientCurrency();
+        Capsule::table('tblinvoices')->insert([
+            [
+                'id' => 43,
+                'userid' => 7,
+                'invoicenum' => 'SYN-43',
+                'date' => '2026-07-10',
+                'subtotal' => '100.00',
+                'tax' => '19.00',
+                'taxrate' => '19.0000',
+                'total' => '119.00',
+                'status' => 'Collections',
+            ],
+            [
+                'id' => 44,
+                'userid' => 7,
+                'invoicenum' => 'SYN-44',
+                'date' => '2026-07-11',
+                'subtotal' => '100.00',
+                'tax' => '19.00',
+                'taxrate' => '19.0000',
+                'total' => '119.00',
+                'status' => 'Payment Pending',
+            ],
+        ]);
+        $gateway = new WhmcsGateway(new Config());
+
+        $invoices = $gateway->invoicesBetween(
+            new DateTimeImmutable('2026-07-01'),
+            new DateTimeImmutable('2026-07-31'),
+            true,
+        );
+
+        self::assertSame(
+            ['Paid', 'Collections', 'Payment Pending'],
+            array_map(static fn (object $invoice): string => (string) $invoice->status, $invoices),
+        );
+        self::assertSame('Collections', (string) $gateway->invoiceForDryRun(43)?->status);
+        self::assertSame('Payment Pending', (string) $gateway->invoiceForDryRun(44)?->status);
+    }
+
     public function testBookingFallsBackToClientCurrencyForZeroOrUnknownTransactionCurrency(): void
     {
         $this->insertInvoiceWithClientCurrency();

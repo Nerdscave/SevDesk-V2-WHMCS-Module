@@ -512,14 +512,31 @@ final class InvoiceReconciliationService
         if ($response === []) {
             return [];
         }
-        if (!array_is_list($response)) {
-            return [self::unwrapInvoice($response)];
+        $rows = array_is_list($response) ? $response : [$response];
+        $candidates = [];
+        foreach ($rows as $row) {
+            if (!is_array($row)) {
+                throw new ApiException(
+                    'sevdesk returned a malformed Invoice list member.',
+                    null,
+                    'unexpected_invoice_list_response',
+                );
+            }
+            $candidate = self::unwrapInvoice($row);
+            if (
+                self::numericId($candidate['id'] ?? null) === null
+                || (string) ($candidate['objectName'] ?? '') !== 'Invoice'
+            ) {
+                throw new ApiException(
+                    'sevdesk returned an unidentifiable Invoice list member.',
+                    null,
+                    'unexpected_invoice_list_response',
+                );
+            }
+            $candidates[] = $candidate;
         }
 
-        return array_values(array_map(
-            static fn (array $candidate): array => self::unwrapInvoice($candidate),
-            array_filter($response, 'is_array'),
-        ));
+        return $candidates;
     }
 
     /** @param array<array-key, mixed> $response */
@@ -604,7 +621,6 @@ final class InvoiceReconciliationService
             $response,
             $invoice,
             $remoteId,
-            discardNonArrayListMembers: true,
         );
 
         return $mismatch === null ? null : 'invoice_reconciliation_' . $mismatch;

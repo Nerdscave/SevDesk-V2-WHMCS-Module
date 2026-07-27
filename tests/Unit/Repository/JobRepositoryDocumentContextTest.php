@@ -40,6 +40,7 @@ final class JobRepositoryDocumentContextTest extends TestCase
             $table->string('status');
             $table->string('checkpoint');
             $table->text('candidate_json')->nullable();
+            $table->string('error_code')->nullable();
             $table->text('message')->nullable();
         });
     }
@@ -154,6 +155,40 @@ final class JobRepositoryDocumentContextTest extends TestCase
         self::assertSame(1, $context['itemId']);
         self::assertSame('ambiguous', $context['itemStatus']);
         self::assertSame('sevdesk', $context['documentAuthority']);
+    }
+
+    public function testUnresolvedHistoryPlaceholderNeverBecomesANewAuthorityOwner(): void
+    {
+        $this->insertContext(42, 'ambiguous', 'invoice_write_requested', [
+            'targetAllowed' => true,
+            'targetDocumentType' => 'invoice',
+            'targetDocumentAuthority' => 'whmcs',
+            'targetExportMode' => 'invoice_only',
+            'targetOssProfile' => 'blocked',
+            'targetEuB2cMode' => 'blocked',
+            'targetDeliveryChannel' => null,
+        ]);
+        Capsule::table(Migrator::ITEMS_TABLE)->insert([
+            'invoice_id' => 42,
+            'action' => 'export_document',
+            'status' => 'skipped',
+            'checkpoint' => 'queued',
+            'candidate_json' => json_encode([
+                'requestedExportMode' => 'invoice_only',
+                'requestedDocumentAuthority' => 'sevdesk',
+                'requestedOssProfile' => 'blocked',
+                'requestedEuB2cMode' => 'blocked',
+                'requestedDeliveryChannel' => 'sevdesk',
+            ], JSON_THROW_ON_ERROR),
+            'error_code' => 'unresolved_export_history',
+            'message' => 'Synthetic unresolved history placeholder.',
+        ]);
+
+        $context = (new JobRepository())->latestDocumentContextForInvoice(42);
+
+        self::assertNotNull($context);
+        self::assertSame(1, $context['itemId']);
+        self::assertSame('whmcs', $context['documentAuthority']);
     }
 
     public function testFrozenOnlyMalformedNewestDecisionDoesNotFallBackToOlderAuthority(): void

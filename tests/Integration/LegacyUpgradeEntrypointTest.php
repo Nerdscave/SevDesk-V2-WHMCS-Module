@@ -8,6 +8,7 @@ use Illuminate\Database\Capsule\Manager as IlluminateCapsule;
 use WHMCS\Database\Capsule;
 use WHMCS\Module\Addon\SevDesk\Config;
 use WHMCS\Module\Addon\SevDesk\Database\Migrator;
+use WHMCS\Module\Addon\SevDesk\Support\AdvisoryLockName;
 use WHMCS\Module\Addon\SevDesk\Tests\Integration\Support\MariaDbTestCase;
 use RuntimeException;
 
@@ -173,7 +174,7 @@ final class LegacyUpgradeEntrypointTest extends MariaDbTestCase
         $connection = $holder->getConnection();
         $acquired = $connection->selectOne(
             'SELECT GET_LOCK(?, 0) AS acquired',
-            ['whmcs_sevdesk_job_runner'],
+            [AdvisoryLockName::jobRunner()],
         );
         self::assertSame(1, (int) ($acquired->acquired ?? 0));
 
@@ -187,7 +188,7 @@ final class LegacyUpgradeEntrypointTest extends MariaDbTestCase
         } finally {
             $connection->selectOne(
                 'SELECT RELEASE_LOCK(?) AS released',
-                ['whmcs_sevdesk_job_runner'],
+                [AdvisoryLockName::jobRunner()],
             );
         }
 
