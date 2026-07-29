@@ -26,11 +26,12 @@
             <div class="table-responsive">
                 <table class="table table-condensed">
                     <tbody>
-                    <tr><th scope="row">Typisierte Voucher</th><td>{$transitionInventory.typed_vouchers|default:0|escape:'html':'UTF-8'}</td><th scope="row">Typisierte Invoices</th><td>{$transitionInventory.typed_invoices|default:0|escape:'html':'UTF-8'}</td></tr>
+                    <tr><th scope="row">Typisierte Voucher</th><td>{$transitionInventory.typed_vouchers|default:0|escape:'html':'UTF-8'}</td><th scope="row">Typisierte Invoices</th><td>{$transitionInventory.typed_invoices|default:0|escape:'html':'UTF-8'} (davon {$transitionInventory.direct_invoices|default:0|escape:'html':'UTF-8'} im Direktbetrieb)</td></tr>
                     <tr><th scope="row">Vollständig, Typ ungeklärt</th><td>{$transitionInventory.untyped_complete|default:0|escape:'html':'UTF-8'}</td><th scope="row">Ohne sevdesk-ID</th><td>{$transitionInventory.null_remote_mappings|default:0|escape:'html':'UTF-8'}</td></tr>
                     <tr><th scope="row">Verwaiste Zuordnungen</th><td>{$transitionInventory.orphan_mappings|default:0|escape:'html':'UTF-8'}</td><th scope="row">Bezahlte, ungemappte Rechnungen ab Stichtag</th><td>{$transitionInventory.paid_unmapped|default:0|escape:'html':'UTF-8'}</td></tr>
                     <tr><th scope="row">Aktive Exportjobs</th><td>{$transitionInventory.active_export_jobs|default:0|escape:'html':'UTF-8'}</td><th scope="row">Unklare Exportjobs</th><td>{$transitionInventory.ambiguous_export_jobs|default:0|escape:'html':'UTF-8'}</td></tr>
                     <tr><th scope="row">Alte fehlgeschlagene Exportjobs</th><td>{$transitionInventory.failed_export_jobs|default:0|escape:'html':'UTF-8'}</td><th scope="row">Lokale Hinweise auf mögliche Remote-Dubletten</th><td>{$transitionInventory.possible_remote_duplicates|default:0|escape:'html':'UTF-8'}</td></tr>
+                    <tr><th scope="row">Offene Rechnungen des aktuellen Lebenszyklus</th><td>{$transitionInventory.open_invoices|default:0|escape:'html':'UTF-8'}</td><th scope="row">Zusatzdokumente</th><td>{$transitionInventory.related_reminders|default:0|escape:'html':'UTF-8'} Mahnungen, {$transitionInventory.related_cancellations|default:0|escape:'html':'UTF-8'} Stornos, {$transitionInventory.related_late_fee_vouchers|default:0|escape:'html':'UTF-8'} Gebührenbelege; sie werden beim Wechsel nicht verändert</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -88,7 +89,7 @@
         <div class="panel-heading"><h3 class="panel-title">Dokumentziel und Dokumenthoheit</h3></div>
         <div class="panel-body">
             <div class="alert alert-info" role="note">
-                Bestehende Installationen bleiben bei <strong>WHMCS + Voucher only</strong>. Ein Moduswechsel exportiert vorhandene Zuordnungen nicht erneut. Invoice-Ziele werden ausschließlich nach vollständiger Zahlung und mit finaler WHMCS-Rechnungsnummer geschrieben.
+                Bestehende Installationen bleiben bei <strong>WHMCS + Voucher only</strong>. Ein Moduswechsel exportiert vorhandene Zuordnungen nicht erneut. Im Standardlebenszyklus entstehen Invoices erst nach vollständiger Zahlung; der separat freizugebende Direktbetrieb gibt sie mit unveränderlicher Nummer bereits bei Erstellung aus.
             </div>
 
             <div class="row">
@@ -110,7 +111,105 @@
                             <option value="whmcs"{if $settings.document_authority === 'whmcs'} selected{/if}>WHMCS</option>
                             <option value="sevdesk"{if $settings.document_authority === 'sevdesk'} selected{/if}>sevdesk (nur Invoice only)</option>
                         </select>
-                        <small class="help-block">WHMCS bleibt in beiden Fällen Billing-, Proforma- und Zahlungsplattform. sevdesk-Dokumenthoheit benötigt die automatische Einreihung neuer Rechnungen.</small>
+                        <small class="help-block">WHMCS bleibt in beiden Fällen Billing- und Zahlungsplattform. Im Standardbetrieb liefert WHMCS vor Zahlung die Proforma; im Direktbetrieb ist Proforma ausdrücklich ausgeschaltet.</small>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel panel-warning">
+                <div class="panel-heading"><h4 class="panel-title">Invoice-Lebenszyklus, Mahnungen und Late Fees</h4></div>
+                <div class="panel-body">
+                    <p>Der sichere Standard bleibt die Endrechnung nach Zahlung. Der Direktbetrieb erzeugt eine offene sevdesk-Invoice bereits bei Rechnungserstellung und bleibt bis zu den getrennten Live-Canaries ausgeschaltet.</p>
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="form-group">
+                                <label for="invoice-lifecycle-mode">Invoice-Lebenszyklus</label>
+                                <select id="invoice-lifecycle-mode" name="invoice_lifecycle_mode" class="form-control">
+                                    <option value="after_payment_proforma"{if $settings.invoice_lifecycle_mode === 'after_payment_proforma'} selected{/if}>Endrechnung nach Zahlung (WHMCS-Proforma)</option>
+                                    <option value="issue_on_creation"{if $settings.invoice_lifecycle_mode === 'issue_on_creation'} selected{/if}>Offene sevdesk-Invoice bei Erstellung</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="form-group">
+                                <label for="dunning-mode">Mahnverfahren</label>
+                                <select id="dunning-mode" name="dunning_mode" class="form-control">
+                                    <option value="off"{if $settings.dunning_mode === 'off'} selected{/if}>Aus</option>
+                                    <option value="whmcs_schedule_sevdesk_delivery"{if $settings.dunning_mode === 'whmcs_schedule_sevdesk_delivery'} selected{/if}>WHMCS-Termine, sevdesk-Versand</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                    <p>
+                        {if $proformaEnabled}<span class="label label-success">Proforma an</span>{else}<span class="label label-default">Proforma aus</span>{/if}
+                        {if $sequentialPaidNumberingEnabled}<span class="label label-danger">Paid-Nummerierung an</span>{else}<span class="label label-success">Paid-Nummerierung aus</span>{/if}
+                        {if $setInvoiceDateOnPaymentEnabled}<span class="label label-danger">Rechnungsdatum bei Zahlung aktiv</span>{else}<span class="label label-success">Rechnungsdatum bleibt unverändert</span>{/if}
+                        {if $openInvoiceCount > 0}<span class="label label-warning">{$openInvoiceCount|escape:'html':'UTF-8'} offene Rechnungen</span>{else}<span class="label label-success">Keine offenen Rechnungen</span>{/if}
+                    </p>
+                    <div class="checkbox">
+                        <label><input type="checkbox" name="direct_invoice_canary_confirmed" value="on"{if $settings.direct_invoice_canary_confirmed === 'on' || $settings.direct_invoice_canary_confirmed === true || $settings.direct_invoice_canary_confirmed == 1} checked{/if}> Direktbetrieb mit unveränderlicher Nummer, einmaligem Versand und Unpaid-Kundendownload wurde live geprüft.</label>
+                    </div>
+                    <div class="checkbox">
+                        <label><input type="checkbox" name="dunning_canary_confirmed" value="on"{if $settings.dunning_canary_confirmed === 'on' || $settings.dunning_canary_confirmed === true || $settings.dunning_canary_confirmed == 1} checked{/if}> WHMCS 8.13.4 löst <code>InvoicePaymentReminder</code> auch bei unterdrückter Core-Mail zuverlässig aus; Stufen und Versand wurden geprüft.</label>
+                    </div>
+                    <div class="checkbox">
+                        <label><input type="checkbox" name="cancellation_canary_confirmed" value="on"{if $settings.cancellation_canary_confirmed === 'on' || $settings.cancellation_canary_confirmed === true || $settings.cancellation_canary_confirmed == 1} checked{/if}> <code>cancelInvoice</code>, SR-Readback, PDF und einmaliger beziehungsweise mailfreier Versand wurden geprüft.</label>
+                    </div>
+                    <div class="checkbox">
+                        <label><input type="checkbox" name="e_invoice_cancellation_canary_confirmed" value="on"{if $settings.e_invoice_cancellation_canary_confirmed === 'on' || $settings.e_invoice_cancellation_canary_confirmed === true || $settings.e_invoice_cancellation_canary_confirmed == 1} checked{/if}> SR-PDF und SR-XML einer ZUGFeRD-Rechnung wurden separat geprüft.</label>
+                    </div>
+
+                    <hr>
+                    <div class="row">
+                        <div class="col-md-4">
+                            <div class="form-group">
+                                <label for="late-fee-mode">Mahngebühren</label>
+                                <select id="late-fee-mode" name="late_fee_mode" class="form-control">
+                                    <option value="blocked"{if $settings.late_fee_mode === 'blocked'} selected{/if}>Blockieren</option>
+                                    <option value="reminder_then_rule22"{if $settings.late_fee_mode === 'reminder_then_rule22'} selected{/if}>Von Leistungs-Invoice trennen</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="form-group">
+                                <label for="late-fee-accounting-source">Buchungsquelle der Gebühr</label>
+                                <select id="late-fee-accounting-source" name="late_fee_accounting_source" class="form-control">
+                                    <option value="rule22_voucher"{if $settings.late_fee_accounting_source === 'rule22_voucher'} selected{/if}>Separater Rule-22-Beleg</option>
+                                    <option value="reminder"{if $settings.late_fee_accounting_source === 'reminder'} selected{/if}>sevdesk-Mahnung (nur nach Wirkungs-Canary)</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <div class="form-group">
+                                <label for="late-fee-rule22-account">Rule-22-Erlöskonto</label>
+                                <input type="number" min="1" step="1" id="late-fee-rule22-account" name="late_fee_rule22_account_datev_id" class="form-control" value="{$settings.late_fee_rule22_account_datev_id|default:''|escape:'html':'UTF-8'}">
+                            </div>
+                        </div>
+                    </div>
+                    <div class="checkbox">
+                        <label><input type="checkbox" name="late_fee_rule22_canary_confirmed" value="on"{if $settings.late_fee_rule22_canary_confirmed === 'on' || $settings.late_fee_rule22_canary_confirmed === true || $settings.late_fee_rule22_canary_confirmed == 1} checked{/if}> Rule 22, 0&nbsp;%, aktuelles Receipt-Guidance-Konto, Readback und mailfreier Gebührenbeleg wurden geprüft.</label>
+                    </div>
+                    <div class="checkbox">
+                        <label><input type="checkbox" name="late_fee_reminder_accounting_canary_confirmed" value="on"{if $settings.late_fee_reminder_accounting_canary_confirmed === 'on' || $settings.late_fee_reminder_accounting_canary_confirmed === true || $settings.late_fee_reminder_accounting_canary_confirmed == 1} checked{/if}> Der Canary beweist, dass <code>reminderCharge</code> der sevdesk-Mahnung die Gebühr bereits buchhalterisch erfasst. Dann wird kein Rule-22-Beleg erzeugt.</label>
+                    </div>
+                    <small class="help-block">Positive, unbesteuerte <code>LateFee</code>-Positionen werden aus der Leistungsrechnung entfernt. Besteuerte, negative oder nachträglich veränderte Gebühren bleiben gesperrt. Backfills und Gebührenbelege versenden keine Mail.</small>
+
+                    <hr>
+                    <div class="form-group">
+                        <label for="sevdesk-reminder-subject">Betreff der sevdesk-Mahnung</label>
+                        <input type="text" id="sevdesk-reminder-subject" name="sevdesk_reminder_subject" class="form-control" maxlength="200" value="{$settings.sevdesk_reminder_subject|default:''|escape:'html':'UTF-8'}">
+                    </div>
+                    <div class="form-group">
+                        <label for="sevdesk-reminder-body">Text der sevdesk-Mahnung</label>
+                        <textarea id="sevdesk-reminder-body" name="sevdesk_reminder_body" class="form-control" rows="3" maxlength="5000">{$settings.sevdesk_reminder_body|default:''|escape:'html':'UTF-8'}</textarea>
+                    </div>
+                    <div class="form-group">
+                        <label for="sevdesk-cancellation-subject">Betreff der Stornorechnung</label>
+                        <input type="text" id="sevdesk-cancellation-subject" name="sevdesk_cancellation_subject" class="form-control" maxlength="200" value="{$settings.sevdesk_cancellation_subject|default:''|escape:'html':'UTF-8'}">
+                    </div>
+                    <div class="form-group">
+                        <label for="sevdesk-cancellation-body">Text der Stornorechnung</label>
+                        <textarea id="sevdesk-cancellation-body" name="sevdesk_cancellation_body" class="form-control" rows="3" maxlength="5000">{$settings.sevdesk_cancellation_body|default:''|escape:'html':'UTF-8'}</textarea>
                     </div>
                 </div>
             </div>
@@ -302,7 +401,7 @@
             <div class="panel panel-default">
                 <div class="panel-heading"><h4 class="panel-title">sevdesk-Dokumenthoheit und Versand</h4></div>
                 <div class="panel-body">
-                    <p>{if $proformaEnabled}<span class="label label-success">WHMCS-Proforma aktiv</span>{else}<span class="label label-danger">WHMCS-Proforma nicht aktiv</span>{/if} {if $themeAdapterInstalled}<span class="label label-success">Adapter-Manifest im aktiven Theme erkannt</span>{else}<span class="label label-danger">Adapter-Manifest im aktiven Theme fehlt</span>{/if} Der Modus lässt sich nur mit aktivem Proforma-Modus und installiertem Theme-Adapter einschalten.</p>
+                    <p>{if $proformaEnabled}<span class="label label-success">WHMCS-Proforma aktiv</span>{else}<span class="label label-default">WHMCS-Proforma aus</span>{/if} {if $themeAdapterInstalled}<span class="label label-success">Adapter-Manifest im aktiven Theme erkannt</span>{else}<span class="label label-danger">Adapter-Manifest im aktiven Theme fehlt</span>{/if} Bei Endrechnung nach Zahlung muss Proforma aktiv sein; im Direktbetrieb muss sie aus sein. Der Theme-Adapter bleibt in beiden sevdesk-geführten Varianten Pflicht.</p>
                     <div class="checkbox">
                         <label for="theme-adapter-confirmed">
                             <input type="checkbox" id="theme-adapter-confirmed" name="theme_adapter_confirmed" value="on"{if $settings.theme_adapter_confirmed === 'on' || $settings.theme_adapter_confirmed === true || $settings.theme_adapter_confirmed == 1} checked{/if}>

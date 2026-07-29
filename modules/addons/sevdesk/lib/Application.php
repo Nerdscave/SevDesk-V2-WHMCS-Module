@@ -11,18 +11,22 @@ use WHMCS\Module\Addon\SevDesk\Api\SevdeskClient;
 use WHMCS\Module\Addon\SevDesk\Jobs\ExportJobHandler;
 use WHMCS\Module\Addon\SevDesk\Jobs\BookingJobHandler;
 use WHMCS\Module\Addon\SevDesk\Jobs\CorrectionJobHandler;
+use WHMCS\Module\Addon\SevDesk\Jobs\DunningJobHandler;
 use WHMCS\Module\Addon\SevDesk\Jobs\JobOutcome;
 use WHMCS\Module\Addon\SevDesk\Jobs\JobRunner;
 use WHMCS\Module\Addon\SevDesk\Repository\JobRepository;
 use WHMCS\Module\Addon\SevDesk\Repository\MappingRepository;
+use WHMCS\Module\Addon\SevDesk\Repository\RelatedDocumentRepository;
 use WHMCS\Module\Addon\SevDesk\Service\ContactService;
 use WHMCS\Module\Addon\SevDesk\Service\BookingService;
 use WHMCS\Module\Addon\SevDesk\Service\CorrectionService;
 use WHMCS\Module\Addon\SevDesk\Service\DocumentTargetResolver;
+use WHMCS\Module\Addon\SevDesk\Service\DunningService;
 use WHMCS\Module\Addon\SevDesk\Service\EInvoiceEligibilityService;
 use WHMCS\Module\Addon\SevDesk\Service\InvoiceDiscountCapabilityPolicy;
 use WHMCS\Module\Addon\SevDesk\Service\InvoiceExporter;
 use WHMCS\Module\Addon\SevDesk\Service\InvoicePdf;
+use WHMCS\Module\Addon\SevDesk\Service\InvoiceXml;
 use WHMCS\Module\Addon\SevDesk\Service\InvoiceReconciliationService;
 use WHMCS\Module\Addon\SevDesk\Service\LegacyMappingTypeService;
 use WHMCS\Database\Capsule;
@@ -46,6 +50,8 @@ final class Application
     public readonly JobRepository $jobs;
 
     public readonly MappingRepository $mappings;
+
+    public readonly RelatedDocumentRepository $relatedDocuments;
 
     public readonly WhmcsGateway $whmcs;
 
@@ -83,11 +89,16 @@ final class Application
 
     private ?CorrectionJobHandler $correctionJobHandler = null;
 
+    private ?DunningService $dunning = null;
+
+    private ?DunningJobHandler $dunningJobHandler = null;
+
     public function __construct()
     {
         $this->config = new Config();
         $this->jobs = new JobRepository();
         $this->mappings = new MappingRepository();
+        $this->relatedDocuments = new RelatedDocumentRepository();
         $this->whmcs = new WhmcsGateway($this->config);
         $this->pdf = new PdfRenderer();
     }
@@ -115,7 +126,7 @@ final class Application
             new Client(),
             $token,
             'https://my.sevdesk.de/api/v1',
-            'WHMCS-sevdesk/2.1.0-rc.8',
+            'WHMCS-sevdesk/2.1.0-rc.9',
         );
     }
 
@@ -363,6 +374,10 @@ final class Application
             (string) $this->config->get('export_mode', DocumentTargetResolver::MODE_VOUCHER_ONLY),
             (string) $this->config->get('document_authority', DocumentTargetResolver::AUTHORITY_WHMCS),
             (string) $this->config->get('oss_profile', DocumentTargetResolver::OSS_BLOCKED),
+            (string) $this->config->get(
+                'invoice_lifecycle_mode',
+                DocumentTargetResolver::LIFECYCLE_AFTER_PAYMENT_PROFORMA,
+            ) === DocumentTargetResolver::LIFECYCLE_ISSUE_ON_CREATION,
         );
     }
 
@@ -474,6 +489,12 @@ final class Application
                 ($this->bookingJobHandler())($item, $checkpoint),
             'correction_voucher' => fn (object $item, callable $checkpoint): JobOutcome =>
                 ($this->correctionJobHandler())($item, $checkpoint),
+            'create_invoice_reminder' => fn (object $item, callable $checkpoint): JobOutcome =>
+                ($this->dunningJobHandler())($item, $checkpoint),
+            'cancel_invoice' => fn (object $item, callable $checkpoint): JobOutcome =>
+                ($this->dunningJobHandler())($item, $checkpoint),
+            'export_late_fee_voucher' => fn (object $item, callable $checkpoint): JobOutcome =>
+                ($this->dunningJobHandler())($item, $checkpoint),
             'review_notice' => static fn (): JobOutcome => JobOutcome::permanentFailure(
                 'Dieser Vorgang benötigt eine manuelle buchhalterische Prüfung.',
                 errorCode: 'manual_review_required',
@@ -525,6 +546,29 @@ final class Application
         );
     }
 
+    public function dunning(): DunningService
+    {
+        return $this->dunning ??= new DunningService(
+            $this->client(),
+            $this->relatedDocuments,
+            $this->invoicePdf(),
+            new InvoiceXml($this->client()),
+        );
+    }
+
+    private function dunningJobHandler(): DunningJobHandler
+    {
+        return $this->dunningJobHandler ??= new DunningJobHandler(
+            $this->config,
+            $this->whmcs,
+            $this->mappings,
+            $this->relatedDocuments,
+            $this->jobs,
+            $this->referenceData(),
+            $this->dunning(),
+        );
+    }
+
     private function mappingId(int $invoiceId): ?string
     {
         $mapping = $this->mappings->findCompleteByInvoice($invoiceId);
@@ -540,6 +584,7 @@ final class Application
             MappingRepository::DOCUMENT_TYPE_VOUCHER,
             isEInvoice: false,
             documentAuthority: MappingRepository::DOCUMENT_AUTHORITY_WHMCS,
+            invoiceLifecycleMode: MappingRepository::LIFECYCLE_AFTER_PAYMENT_PROFORMA,
         );
 
         return true;
@@ -562,6 +607,10 @@ final class Application
             $isEInvoice,
             $xmlSha256,
             $documentAuthority,
+            (string) $this->config->get(
+                'invoice_lifecycle_mode',
+                MappingRepository::LIFECYCLE_AFTER_PAYMENT_PROFORMA,
+            ),
         );
 
         return true;

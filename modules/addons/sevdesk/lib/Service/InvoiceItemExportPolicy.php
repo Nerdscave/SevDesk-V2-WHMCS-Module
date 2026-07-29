@@ -16,6 +16,9 @@ final class InvoiceItemExportPolicy
         . 'Mahn- und Verzugsgebühren benötigen einen eigenen steuerlichen Grund und dürfen nicht still '
         . 'als normaler Leistungsumsatz behandelt werden.';
 
+    public const LATE_FEE_MODE_BLOCKED = 'blocked';
+    public const LATE_FEE_MODE_REMINDER_THEN_RULE22 = 'reminder_then_rule22';
+
     /** @param iterable<string> $itemTypes */
     public static function containsLateFee(iterable $itemTypes): bool
     {

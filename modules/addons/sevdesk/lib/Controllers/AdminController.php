@@ -21,8 +21,10 @@ use WHMCS\Module\Addon\SevDesk\Health\HealthService;
 use WHMCS\Module\Addon\SevDesk\Jobs\ExportJobHandler;
 use WHMCS\Module\Addon\SevDesk\Repository\JobRepository;
 use WHMCS\Module\Addon\SevDesk\Repository\MappingRepository;
+use WHMCS\Module\Addon\SevDesk\Repository\RelatedDocumentRepository;
 use WHMCS\Module\Addon\SevDesk\Service\CorrectionService;
 use WHMCS\Module\Addon\SevDesk\Service\DocumentTargetResolver;
+use WHMCS\Module\Addon\SevDesk\Service\DunningService;
 use WHMCS\Module\Addon\SevDesk\Service\EInvoiceEligibilityService;
 use WHMCS\Module\Addon\SevDesk\Service\InvoiceDiscountCapabilityPolicy;
 use WHMCS\Module\Addon\SevDesk\Service\InvoiceItemExportPolicy;
@@ -220,6 +222,11 @@ final class AdminController
             'whmcsTemplateDeliverySupported' => $this->application->whmcs
                 ->supportsEmailPreSendAttachments(),
             'proformaEnabled' => $this->application->whmcs->proformaInvoicingEnabled(),
+            'sequentialPaidNumberingEnabled' => $this->application->whmcs
+                ->sequentialPaidInvoiceNumberingEnabled(),
+            'setInvoiceDateOnPaymentEnabled' => $this->application->whmcs
+                ->setInvoiceDateOnPaymentEnabled(),
+            'openInvoiceCount' => $this->application->whmcs->openInvoiceCount(),
             'themeAdapterInstalled' => $this->application->whmcs->themeAdapterManifestInstalled(),
             'transitionInventory' => $transitionInventory,
         ]);
@@ -730,8 +737,16 @@ final class AdminController
         $status = trim((string) ($_GET['status'] ?? $_POST['filter_status'] ?? ''));
         $query = trim((string) ($_GET['q'] ?? $_POST['filter_q'] ?? ''));
         $result = $this->application->mappings->paginate($page, 100, $query, $status);
+        $relatedByInvoice = Capsule::schema()->hasTable(Migrator::RELATED_DOCUMENTS_TABLE)
+            ? $this->application->relatedDocuments->forInvoices(array_values(array_filter(array_map(
+                static fn (object $mapping): int => (int) ($mapping->invoice_id ?? 0),
+                $result['items'],
+            ))))
+            : [];
         $legacyBatchIds = [];
         foreach ($result['items'] as $mapping) {
+            $invoiceId = (int) ($mapping->invoice_id ?? 0);
+            $mapping->related_documents = $relatedByInvoice[$invoiceId] ?? [];
             if (
                 ($mapping->invoice_exists ?? false) !== false
                 && trim((string) ($mapping->sevdesk_id ?? '')) !== ''
@@ -1033,6 +1048,26 @@ final class AdminController
                         ];
                         continue;
                     }
+                    if (
+                        $this->lateFeePaymentSplitRequired($invoiceId, (string) ($row->document_type ?? ''))
+                    ) {
+                        $candidates[] = [
+                            'id' => hash('sha256', $invoiceId . '|' . $reference . '|late-fee-split'),
+                            'invoice_id' => $invoiceId,
+                            'invoicenum' => (string) $row->invoicenum,
+                            'sevdesk_id' => (string) $row->sevdesk_id,
+                            'transaction_id' => $reference,
+                            'sevdesk_transaction_id' => '',
+                            'gateway' => (string) $transaction['gateway'],
+                            'amount' => $amountIn,
+                            'amount_formatted' => number_format((float) $amountIn, 2, ',', '.') . ' ' . $currency,
+                            'status' => 'blocked',
+                            'bookable' => false,
+                            'reason' => 'late_fee_payment_split_required',
+                            'message' => 'Grundrechnung und Mahngebührenbeleg benötigen eine manuelle Zahlungsaufteilung.',
+                        ];
+                        continue;
+                    }
                     $preview = $this->application->bookings()->preview([
                         'kind' => 'payment',
                         'documentType' => (string) ($row->document_type ?? ''),
@@ -1123,6 +1158,31 @@ final class AdminController
             'paymentTotal' => $paymentTotal,
             'pagination' => $pagination,
         ]);
+    }
+
+    private function lateFeePaymentSplitRequired(int $invoiceId, string $documentType): bool
+    {
+        if ($documentType !== MappingRepository::DOCUMENT_TYPE_INVOICE) {
+            return false;
+        }
+        if (
+            $this->application->relatedDocuments->find(
+                $invoiceId,
+                RelatedDocumentRepository::ROLE_LATE_FEE_VOUCHER,
+            ) !== null
+        ) {
+            return true;
+        }
+
+        return $this->application->config->get(
+            'late_fee_mode',
+            'blocked',
+        ) === 'reminder_then_rule22'
+            && Capsule::table('tblinvoiceitems')
+                ->where('invoiceid', $invoiceId)
+                ->where('type', 'LateFee')
+                ->where('amount', '>', 0)
+                ->exists();
     }
 
     public function corrections(): void
@@ -1681,6 +1741,14 @@ final class AdminController
                 DocumentTargetResolver::MODE_VOUCHER_ONLY,
             ),
             'requestedDocumentAuthority' => $authority,
+            'requestedInvoiceLifecycleMode' => (string) $this->application->config->get(
+                'invoice_lifecycle_mode',
+                DocumentTargetResolver::LIFECYCLE_AFTER_PAYMENT_PROFORMA,
+            ),
+            'requestedLateFeeMode' => (string) $this->application->config->get(
+                'late_fee_mode',
+                InvoiceItemExportPolicy::LATE_FEE_MODE_BLOCKED,
+            ),
             'requestedOssProfile' => (string) $this->application->config->get(
                 'oss_profile',
                 DocumentTargetResolver::OSS_BLOCKED,
@@ -1720,7 +1788,14 @@ final class AdminController
      */
     private function transitionInventory(): array
     {
-        $exportActions = ['export_document', 'export_voucher', 'reconcile_voucher'];
+        $exportActions = [
+            'export_document',
+            'export_voucher',
+            'reconcile_voucher',
+            'create_invoice_reminder',
+            'cancel_invoice',
+            'export_late_fee_voucher',
+        ];
         $complete = static fn ($query) => $query
             ->whereNotNull('mapping.sevdesk_id')
             ->whereRaw("TRIM(mapping.sevdesk_id) <> ''");
@@ -1730,6 +1805,13 @@ final class AdminController
             ->count();
         $typedInvoice = (int) $complete(Capsule::table(Migrator::MAPPING_TABLE . ' as mapping'))
             ->where('mapping.document_type', 'invoice')
+            ->count();
+        $directInvoice = (int) $complete(Capsule::table(Migrator::MAPPING_TABLE . ' as mapping'))
+            ->where('mapping.document_type', 'invoice')
+            ->where(
+                'mapping.invoice_lifecycle_mode',
+                MappingRepository::LIFECYCLE_ISSUE_ON_CREATION,
+            )
             ->count();
         $untypedComplete = (int) $complete(Capsule::table(Migrator::MAPPING_TABLE . ' as mapping'))
             ->whereNull('mapping.document_type')
@@ -1769,6 +1851,10 @@ final class AdminController
             })
             ->distinct()
             ->count('item.invoice_id');
+        $relatedCounts = Capsule::table(Migrator::RELATED_DOCUMENTS_TABLE)
+            ->select('role', Capsule::raw('COUNT(*) AS aggregate'))
+            ->groupBy('role')
+            ->pluck('aggregate', 'role');
 
         try {
             $importAfter = Config::parseImportAfter(
@@ -1790,6 +1876,7 @@ final class AdminController
         $inventory = [
             'typed_vouchers' => $typedVoucher,
             'typed_invoices' => $typedInvoice,
+            'direct_invoices' => $directInvoice,
             'untyped_complete' => $untypedComplete,
             'null_remote_mappings' => $nullRemote,
             'orphan_mappings' => $orphans,
@@ -1798,7 +1885,15 @@ final class AdminController
             'failed_export_jobs' => $failedJobs,
             'paid_unmapped' => (int) $paidUnmappedQuery->count(),
             'possible_remote_duplicates' => $possibleRemoteDuplicates,
+            'open_invoices' => $this->application->whmcs->openInvoiceCount(),
+            'related_reminders' => (int) ($relatedCounts['reminder'] ?? 0),
+            'related_cancellations' => (int) ($relatedCounts['cancellation'] ?? 0),
+            'related_late_fee_vouchers' => (int) ($relatedCounts['late_fee_voucher'] ?? 0),
             'mapping_high_water' => (int) (Capsule::table(Migrator::MAPPING_TABLE)->max('id') ?? 0),
+            'related_high_water' => (int) (
+                Capsule::table(Migrator::RELATED_DOCUMENTS_TABLE)->max('id')
+                ?? 0
+            ),
             'item_high_water' => (int) (Capsule::table(Migrator::ITEMS_TABLE)->max('id') ?? 0),
             'invoice_high_water' => (int) (Capsule::table('tblinvoices')->max('id') ?? 0),
         ];
@@ -1824,6 +1919,17 @@ final class AdminController
             'e_invoice_active_from',
             'e_invoice_canary_confirmed',
             'invoice_delivery_channel',
+            'invoice_lifecycle_mode',
+            'dunning_mode',
+            'late_fee_mode',
+            'late_fee_accounting_source',
+            'direct_invoice_canary_confirmed',
+            'dunning_canary_confirmed',
+            'cancellation_canary_confirmed',
+            'e_invoice_cancellation_canary_confirmed',
+            'late_fee_rule22_canary_confirmed',
+            'late_fee_reminder_accounting_canary_confirmed',
+            'late_fee_rule22_account_datev_id',
             'smallBusinessOwner',
             'small_business_until',
             'small_business_confirmed',
@@ -2013,6 +2119,149 @@ final class AdminController
             throw new RuntimeException(
                 'sevdesk-Dokumenthoheit benötigt die automatische Einreihung neuer Rechnungen. '
                     . 'Bitte „Neue Rechnungen automatisch als Exportjob einreihen“ aktivieren.',
+            );
+        }
+        $invoiceLifecycleMode = trim((string) (
+            $_POST['invoice_lifecycle_mode']
+            ?? MappingRepository::LIFECYCLE_AFTER_PAYMENT_PROFORMA
+        ));
+        if (
+            !in_array($invoiceLifecycleMode, [
+            MappingRepository::LIFECYCLE_AFTER_PAYMENT_PROFORMA,
+            MappingRepository::LIFECYCLE_ISSUE_ON_CREATION,
+            ], true)
+        ) {
+            throw new RuntimeException('Ungültiger Invoice-Lebenszyklus.');
+        }
+        $dunningMode = trim((string) ($_POST['dunning_mode'] ?? 'off'));
+        if (!in_array($dunningMode, ['off', 'whmcs_schedule_sevdesk_delivery'], true)) {
+            throw new RuntimeException('Ungültiger Mahnmodus.');
+        }
+        $lateFeeMode = trim((string) (
+            $_POST['late_fee_mode']
+            ?? InvoiceItemExportPolicy::LATE_FEE_MODE_BLOCKED
+        ));
+        if (
+            !in_array($lateFeeMode, [
+            InvoiceItemExportPolicy::LATE_FEE_MODE_BLOCKED,
+            InvoiceItemExportPolicy::LATE_FEE_MODE_REMINDER_THEN_RULE22,
+            ], true)
+        ) {
+            throw new RuntimeException('Ungültiger Mahngebührenmodus.');
+        }
+        $lateFeeAccountingSource = trim((string) (
+            $_POST['late_fee_accounting_source']
+            ?? 'rule22_voucher'
+        ));
+        if (!in_array($lateFeeAccountingSource, ['rule22_voucher', 'reminder'], true)) {
+            throw new RuntimeException('Ungültige Buchungsquelle für Mahngebühren.');
+        }
+        $directInvoiceCanary = isset($_POST['direct_invoice_canary_confirmed']);
+        $dunningCanary = isset($_POST['dunning_canary_confirmed']);
+        $cancellationCanary = isset($_POST['cancellation_canary_confirmed']);
+        $eInvoiceCancellationCanary = isset($_POST['e_invoice_cancellation_canary_confirmed']);
+        $lateFeeRule22Canary = isset($_POST['late_fee_rule22_canary_confirmed']);
+        $lateFeeReminderAccountingCanary = isset(
+            $_POST['late_fee_reminder_accounting_canary_confirmed'],
+        );
+        $lateFeeRule22Account = trim((string) (
+            $_POST['late_fee_rule22_account_datev_id']
+            ?? ''
+        ));
+        if ($lateFeeRule22Account !== '' && preg_match('/^[1-9]\d*$/', $lateFeeRule22Account) !== 1) {
+            throw new RuntimeException('Das Rule-22-Erlöskonto muss eine gültige numerische ID sein.');
+        }
+        if (
+            $invoiceLifecycleMode === MappingRepository::LIFECYCLE_ISSUE_ON_CREATION
+            && (
+                $exportMode !== DocumentTargetResolver::MODE_INVOICE_ONLY
+                || $documentAuthority !== DocumentTargetResolver::AUTHORITY_SEVDESK
+            )
+        ) {
+            throw new RuntimeException(
+                'Der Direktbetrieb ist ausschließlich mit „Invoice only“ und sevdesk-Dokumenthoheit zulässig.',
+            );
+        }
+        if (
+            $invoiceLifecycleMode === MappingRepository::LIFECYCLE_ISSUE_ON_CREATION
+            && (
+                $this->application->whmcs->proformaInvoicingEnabled()
+                || $this->application->whmcs->sequentialPaidInvoiceNumberingEnabled()
+                || $this->application->whmcs->setInvoiceDateOnPaymentEnabled()
+            )
+        ) {
+            throw new RuntimeException(
+                'Der Direktbetrieb benötigt WHMCS ohne Proforma, ohne bezahlte Folgennummerierung '
+                    . 'und ohne neues Rechnungsdatum bei Zahlung.',
+            );
+        }
+        if (
+            $invoiceLifecycleMode !== (string) $this->application->config->get(
+                'invoice_lifecycle_mode',
+                MappingRepository::LIFECYCLE_AFTER_PAYMENT_PROFORMA,
+            )
+            && $this->application->whmcs->openInvoiceCount() > 0
+        ) {
+            throw new RuntimeException(
+                'Vor einem Lebenszykluswechsel müssen alle offenen Rechnungen des bisherigen '
+                    . 'Ablaufs abgeschlossen sein.',
+            );
+        }
+        if (
+            $invoiceLifecycleMode === MappingRepository::LIFECYCLE_ISSUE_ON_CREATION
+            && !$directInvoiceCanary
+        ) {
+            throw new RuntimeException('Der Direktbetrieb bleibt bis zum eigenen Live-Canary gesperrt.');
+        }
+        if (
+            $dunningMode === 'whmcs_schedule_sevdesk_delivery'
+            && (
+                $invoiceLifecycleMode !== MappingRepository::LIFECYCLE_ISSUE_ON_CREATION
+                || !$dunningCanary
+            )
+        ) {
+            throw new RuntimeException(
+                'Der sevdesk-Mahnversand benötigt den Direktbetrieb und den bestätigten WHMCS-Hook-Canary.',
+            );
+        }
+        if (
+            $lateFeeMode === InvoiceItemExportPolicy::LATE_FEE_MODE_REMINDER_THEN_RULE22
+            && $exportMode !== DocumentTargetResolver::MODE_INVOICE_ONLY
+        ) {
+            throw new RuntimeException('Getrennte Mahngebühren sind ausschließlich im Invoice-only-Modus zulässig.');
+        }
+        if (
+            $lateFeeMode === InvoiceItemExportPolicy::LATE_FEE_MODE_REMINDER_THEN_RULE22
+            && $lateFeeAccountingSource === 'rule22_voucher'
+            && (!$lateFeeRule22Canary || $lateFeeRule22Account === '')
+        ) {
+            throw new RuntimeException(
+                'Der Rule-22-Gebührenpfad benötigt seinen Canary und ein aktuell bestätigtes Erlöskonto.',
+            );
+        }
+        if (
+            $lateFeeMode === InvoiceItemExportPolicy::LATE_FEE_MODE_REMINDER_THEN_RULE22
+            && $lateFeeAccountingSource === 'reminder'
+            && (
+                $dunningMode !== 'whmcs_schedule_sevdesk_delivery'
+                || !$lateFeeReminderAccountingCanary
+            )
+        ) {
+            throw new RuntimeException(
+                'Die Mahnung darf die Buchungsquelle der Gebühr nur nach einem Canary mit bewiesener '
+                    . 'buchhalterischer Wirkung sein.',
+            );
+        }
+        if (
+            $lateFeeMode === InvoiceItemExportPolicy::LATE_FEE_MODE_REMINDER_THEN_RULE22
+            && $lateFeeAccountingSource === 'rule22_voucher'
+            && !DunningService::guidanceAllowsRule22(
+                $this->application->referenceData()->receiptGuidance(true),
+                $lateFeeRule22Account,
+            )
+        ) {
+            throw new RuntimeException(
+                'Receipt Guidance bestätigt das gewählte Erlöskonto nicht für Rule 22 mit 0 %.',
             );
         }
 
@@ -2207,6 +2456,14 @@ final class AdminController
                     'Die Grenzen des deutschen B2B-ZUGFeRD-Profils müssen ausdrücklich bestätigt werden.',
                 );
             }
+            if (
+                $invoiceLifecycleMode === MappingRepository::LIFECYCLE_ISSUE_ON_CREATION
+                && !$eInvoiceCancellationCanary
+            ) {
+                throw new RuntimeException(
+                    'ZUGFeRD im Direktbetrieb benötigt zusätzlich den bestätigten SR-PDF-/XML-Canary.',
+                );
+            }
         }
 
         $deliveryChannel = trim((string) ($_POST['invoice_delivery_channel'] ?? 'sevdesk'));
@@ -2232,15 +2489,25 @@ final class AdminController
 
         $themeAdapterConfirmed = isset($_POST['theme_adapter_confirmed']);
         if ($documentAuthority === 'sevdesk') {
-            if (!$this->application->whmcs->proformaInvoicingEnabled()) {
-                throw new RuntimeException('Vor sevdesk-Dokumenthoheit muss WHMCS „Enable Proforma Invoicing“ aktiv sein.');
+            if (
+                $invoiceLifecycleMode === MappingRepository::LIFECYCLE_AFTER_PAYMENT_PROFORMA
+                && !$this->application->whmcs->proformaInvoicingEnabled()
+            ) {
+                throw new RuntimeException(
+                    'Der nachgelagerte sevdesk-Endrechnungsbetrieb benötigt aktivierte WHMCS-Proforma.',
+                );
             }
             if (
                 !$themeAdapterConfirmed
-                || !$this->application->whmcs->themeAdapterManifestInstalled()
+                || !$this->application->whmcs->themeAdapterManifestInstalled(
+                    $invoiceLifecycleMode === MappingRepository::LIFECYCLE_ISSUE_ON_CREATION
+                        ? 2
+                        : 1,
+                )
             ) {
                 throw new RuntimeException(
-                    'sevdesk-Dokumenthoheit benötigt den installierten Twenty-One-Adapter und die ausdrückliche Bestätigung.',
+                    'sevdesk-Dokumenthoheit benötigt den passenden installierten Twenty-One-Adapter '
+                        . 'und die ausdrückliche Bestätigung.',
                 );
             }
             if (
@@ -2252,6 +2519,29 @@ final class AdminController
             if ($deliveryChannel === 'sevdesk') {
                 self::validateDeliveryText($emailSubject, $emailBody);
             }
+            if (
+                $invoiceLifecycleMode === MappingRepository::LIFECYCLE_ISSUE_ON_CREATION
+                && $deliveryChannel !== 'sevdesk'
+            ) {
+                throw new RuntimeException(
+                    'Der Direktbetrieb verwendet ausschließlich den geprüften sevdesk-Mailversand.',
+                );
+            }
+        }
+
+        $reminderSubject = trim((string) ($_POST['sevdesk_reminder_subject']
+            ?? $this->application->config->get('sevdesk_reminder_subject', '')));
+        $reminderBody = trim((string) ($_POST['sevdesk_reminder_body']
+            ?? $this->application->config->get('sevdesk_reminder_body', '')));
+        $cancellationSubject = trim((string) ($_POST['sevdesk_cancellation_subject']
+            ?? $this->application->config->get('sevdesk_cancellation_subject', '')));
+        $cancellationBody = trim((string) ($_POST['sevdesk_cancellation_body']
+            ?? $this->application->config->get('sevdesk_cancellation_body', '')));
+        if ($dunningMode !== 'off') {
+            self::validateDeliveryText($reminderSubject, $reminderBody);
+        }
+        if ($cancellationCanary) {
+            self::validateDeliveryText($cancellationSubject, $cancellationBody);
         }
 
         $mode = (string) ($_POST['eu_b2c_mode'] ?? 'blocked');
@@ -2294,7 +2584,45 @@ final class AdminController
         $modeChanged = $exportMode !== (string) $this->application->config->get('export_mode', 'voucher_only')
             || $documentAuthority !== (string) $this->application->config->get('document_authority', 'whmcs')
             || $ossProfile !== (string) $this->application->config->get('oss_profile', 'blocked')
-            || $mode !== (string) $this->application->config->get('eu_b2c_mode', 'blocked');
+            || $mode !== (string) $this->application->config->get('eu_b2c_mode', 'blocked')
+            || $invoiceLifecycleMode !== (string) $this->application->config->get(
+                'invoice_lifecycle_mode',
+                MappingRepository::LIFECYCLE_AFTER_PAYMENT_PROFORMA,
+            )
+            || $dunningMode !== (string) $this->application->config->get('dunning_mode', 'off')
+            || $lateFeeMode !== (string) $this->application->config->get('late_fee_mode', 'blocked')
+            || $lateFeeAccountingSource !== (string) $this->application->config->get(
+                'late_fee_accounting_source',
+                'rule22_voucher',
+            )
+            || ($directInvoiceCanary ? 'on' : '') !== (string) $this->application->config->get(
+                'direct_invoice_canary_confirmed',
+                '',
+            )
+            || ($dunningCanary ? 'on' : '') !== (string) $this->application->config->get(
+                'dunning_canary_confirmed',
+                '',
+            )
+            || ($cancellationCanary ? 'on' : '') !== (string) $this->application->config->get(
+                'cancellation_canary_confirmed',
+                '',
+            )
+            || ($eInvoiceCancellationCanary ? 'on' : '') !== (string) $this->application->config->get(
+                'e_invoice_cancellation_canary_confirmed',
+                '',
+            )
+            || ($lateFeeRule22Canary ? 'on' : '') !== (string) $this->application->config->get(
+                'late_fee_rule22_canary_confirmed',
+                '',
+            )
+            || ($lateFeeReminderAccountingCanary ? 'on' : '') !== (string) $this->application->config->get(
+                'late_fee_reminder_accounting_canary_confirmed',
+                '',
+            )
+            || $lateFeeRule22Account !== (string) $this->application->config->get(
+                'late_fee_rule22_account_datev_id',
+                '',
+            );
         $documentProfileChanged = $modeChanged
             || $eInvoiceMode !== (string) $this->application->config->get('e_invoice_mode', 'off')
             || ($eInvoiceClientFieldId > 0 ? (string) $eInvoiceClientFieldId : '')
@@ -2350,7 +2678,14 @@ final class AdminController
         if (
             $documentProfileChanged
             && Capsule::table(Migrator::ITEMS_TABLE)
-                ->whereIn('action', ['export_document', 'export_voucher', 'reconcile_voucher'])
+                ->whereIn('action', [
+                    'export_document',
+                    'export_voucher',
+                    'reconcile_voucher',
+                    'create_invoice_reminder',
+                    'cancel_invoice',
+                    'export_late_fee_voucher',
+                ])
                 ->where(static function ($query): void {
                     $query->whereIn('status', ['pending', 'running', 'retry_wait', 'ambiguous'])
                         ->orWhere(static function ($riskyTerminal): void {
@@ -2405,6 +2740,26 @@ final class AdminController
         );
         $this->application->config->set('export_mode', $exportMode);
         $this->application->config->set('document_authority', $documentAuthority);
+        $this->application->config->set('invoice_lifecycle_mode', $invoiceLifecycleMode);
+        $this->application->config->set('dunning_mode', $dunningMode);
+        $this->application->config->set('late_fee_mode', $lateFeeMode);
+        $this->application->config->set('late_fee_accounting_source', $lateFeeAccountingSource);
+        $this->application->config->set('direct_invoice_canary_confirmed', $directInvoiceCanary);
+        $this->application->config->set('dunning_canary_confirmed', $dunningCanary);
+        $this->application->config->set('cancellation_canary_confirmed', $cancellationCanary);
+        $this->application->config->set(
+            'e_invoice_cancellation_canary_confirmed',
+            $eInvoiceCancellationCanary,
+        );
+        $this->application->config->set('late_fee_rule22_canary_confirmed', $lateFeeRule22Canary);
+        $this->application->config->set(
+            'late_fee_reminder_accounting_canary_confirmed',
+            $lateFeeReminderAccountingCanary,
+        );
+        $this->application->config->set(
+            'late_fee_rule22_account_datev_id',
+            $lateFeeRule22Account,
+        );
         $this->application->config->set('oss_profile', $ossProfile);
         $this->application->config->set('invoice_canary_confirmed', $invoiceCanaryConfirmed);
         $this->application->config->set(
@@ -2449,6 +2804,10 @@ final class AdminController
         $this->application->config->set('whmcs_invoice_email_template', $emailTemplate);
         $this->application->config->set('sevdesk_email_subject', $emailSubject);
         $this->application->config->set('sevdesk_email_body', $emailBody);
+        $this->application->config->set('sevdesk_reminder_subject', $reminderSubject);
+        $this->application->config->set('sevdesk_reminder_body', $reminderBody);
+        $this->application->config->set('sevdesk_cancellation_subject', $cancellationSubject);
+        $this->application->config->set('sevdesk_cancellation_body', $cancellationBody);
         $this->application->config->set('theme_adapter_confirmed', $themeAdapterConfirmed);
         $this->application->config->set('import_only_paid', isset($_POST['import_only_paid']));
         $this->application->config->set('smallBusinessOwner', $smallBusinessOwner);
@@ -2626,6 +2985,36 @@ final class AdminController
         $proposed = [
             'export_mode' => (string) ($_POST['export_mode'] ?? 'voucher_only'),
             'document_authority' => (string) ($_POST['document_authority'] ?? 'whmcs'),
+            'invoice_lifecycle_mode' => (string) (
+                $_POST['invoice_lifecycle_mode']
+                ?? MappingRepository::LIFECYCLE_AFTER_PAYMENT_PROFORMA
+            ),
+            'dunning_mode' => (string) ($_POST['dunning_mode'] ?? 'off'),
+            'late_fee_mode' => (string) ($_POST['late_fee_mode'] ?? 'blocked'),
+            'late_fee_accounting_source' => (string) (
+                $_POST['late_fee_accounting_source']
+                ?? 'rule22_voucher'
+            ),
+            'direct_invoice_canary_confirmed' => isset($_POST['direct_invoice_canary_confirmed'])
+                ? 'on'
+                : '',
+            'dunning_canary_confirmed' => isset($_POST['dunning_canary_confirmed']) ? 'on' : '',
+            'cancellation_canary_confirmed' => isset($_POST['cancellation_canary_confirmed'])
+                ? 'on'
+                : '',
+            'e_invoice_cancellation_canary_confirmed' => isset(
+                $_POST['e_invoice_cancellation_canary_confirmed'],
+            ) ? 'on' : '',
+            'late_fee_rule22_canary_confirmed' => isset($_POST['late_fee_rule22_canary_confirmed'])
+                ? 'on'
+                : '',
+            'late_fee_reminder_accounting_canary_confirmed' => isset(
+                $_POST['late_fee_reminder_accounting_canary_confirmed'],
+            ) ? 'on' : '',
+            'late_fee_rule22_account_datev_id' => trim((string) (
+                $_POST['late_fee_rule22_account_datev_id']
+                ?? ''
+            )),
             'oss_profile' => (string) ($_POST['oss_profile'] ?? 'blocked'),
             'invoice_canary_confirmed' => isset($_POST['invoice_canary_confirmed']) ? 'on' : '',
             'small_business_invoice_canary_confirmed' => isset(
@@ -2678,6 +3067,14 @@ final class AdminController
                 ?? $this->application->config->get('sevdesk_email_subject', ''))),
             'sevdesk_email_body' => trim((string) ($_POST['sevdesk_email_body']
                 ?? $this->application->config->get('sevdesk_email_body', ''))),
+            'sevdesk_reminder_subject' => trim((string) ($_POST['sevdesk_reminder_subject']
+                ?? $this->application->config->get('sevdesk_reminder_subject', ''))),
+            'sevdesk_reminder_body' => trim((string) ($_POST['sevdesk_reminder_body']
+                ?? $this->application->config->get('sevdesk_reminder_body', ''))),
+            'sevdesk_cancellation_subject' => trim((string) ($_POST['sevdesk_cancellation_subject']
+                ?? $this->application->config->get('sevdesk_cancellation_subject', ''))),
+            'sevdesk_cancellation_body' => trim((string) ($_POST['sevdesk_cancellation_body']
+                ?? $this->application->config->get('sevdesk_cancellation_body', ''))),
             'theme_adapter_confirmed' => isset($_POST['theme_adapter_confirmed']) ? 'on' : '',
             'import_after' => $date?->format('d-m-Y') ?? '',
             'import_only_paid' => isset($_POST['import_only_paid']) ? 'on' : '',
@@ -2998,10 +3395,54 @@ final class AdminController
                 $reason = 'Der WHMCS-Rechnungsstatus ist nicht exportierbar: '
                     . trim((string) ($invoice->status ?? 'unbekannt'));
             }
-            if ($exportable && InvoiceItemExportPolicy::containsLateFee($sourceTypes)) {
+            $lateFeeSeparationEnabled = $invoiceOnly
+                && (string) $this->application->config->get(
+                    'late_fee_mode',
+                    InvoiceItemExportPolicy::LATE_FEE_MODE_BLOCKED,
+                ) === InvoiceItemExportPolicy::LATE_FEE_MODE_REMINDER_THEN_RULE22;
+            if (
+                $exportable
+                && InvoiceItemExportPolicy::containsLateFee($sourceTypes)
+                && !$lateFeeSeparationEnabled
+            ) {
                 $exportable = false;
                 $reason = InvoiceItemExportPolicy::LATE_FEE_MESSAGE;
                 $reasonCode = InvoiceItemExportPolicy::LATE_FEE_REQUIRES_REVIEW;
+            }
+            $lateFeeMinor = 0;
+            if (
+                $exportable
+                && $lateFeeSeparationEnabled
+                && InvoiceItemExportPolicy::containsLateFee($sourceTypes)
+            ) {
+                $serviceItems = [];
+                foreach ($sourceItems as $sourceItem) {
+                    if (strcasecmp(trim((string) ($sourceItem->type ?? '')), 'LateFee') !== 0) {
+                        $serviceItems[] = $sourceItem;
+                        continue;
+                    }
+                    $feeMinor = Decimal::toMinorUnits((string) ($sourceItem->amount ?? ''));
+                    if ($feeMinor <= 0 || self::truthy($sourceItem->taxed ?? false)) {
+                        $exportable = false;
+                        $reason = 'Nur positive, unbesteuerte LateFee-Positionen können getrennt verbucht werden';
+                        $reasonCode = 'late_fee_structure_blocked';
+                        break;
+                    }
+                    $lateFeeMinor += $feeMinor;
+                }
+                if ($exportable && $serviceItems === []) {
+                    $exportable = false;
+                    $reason = 'Eine reine Mahngebührenrechnung benötigt eine manuelle Prüfung';
+                    $reasonCode = 'late_fee_without_service_lines';
+                }
+                if ($exportable && Decimal::toMinorUnits((string) ($invoice->credit ?? '0')) !== 0) {
+                    $exportable = false;
+                    $reason = 'Late Fees und Guthaben lassen sich nicht automatisch eindeutig aufteilen';
+                    $reasonCode = 'late_fee_with_credit_requires_review';
+                }
+                if ($exportable) {
+                    $sourceItems = $serviceItems;
+                }
             }
             if ($exportable && $requiresPaymentStructure) {
                 $paymentStructure = $this->application->paymentStructure()->classify($invoiceId);
@@ -3051,6 +3492,12 @@ final class AdminController
                     (string) ($invoice->credit ?? ''),
                 );
                 $directCashMinor = Decimal::toMinorUnits((string) $invoice->total);
+                if ($lateFeeMinor > 0) {
+                    $rawDocumentGross = Decimal::fromMinorUnits(
+                        Decimal::toMinorUnits($rawDocumentGross) - $lateFeeMinor,
+                    );
+                    $directCashMinor -= $lateFeeMinor;
+                }
             } catch (\InvalidArgumentException) {
                 if ($exportable) {
                     $exportable = false;
@@ -3165,7 +3612,9 @@ final class AdminController
                         (string) $invoice->credit,
                         $lines,
                         $discounts,
-                        (string) $invoice->subtotal,
+                        Decimal::fromMinorUnits(
+                            Decimal::toMinorUnits((string) $invoice->subtotal) - $lateFeeMinor,
+                        ),
                         Decimal::fromMinorUnits(
                             Decimal::toMinorUnits((string) $invoice->tax)
                                 + Decimal::toMinorUnits((string) $invoice->tax2),

@@ -348,6 +348,71 @@ final class WhmcsGatewayTest extends TestCase
         self::assertSame($expected, $fingerprint($formattedInvoice, $baseClient));
     }
 
+    public function testIssuedPrimaryFingerprintSurvivesOnlyTheUnpaidToPaidStatusChange(): void
+    {
+        $invoice = [
+            'result' => 'success',
+            'userid' => 7,
+            'status' => 'Unpaid',
+            'invoicenum' => 'SYN-44',
+            'date' => '2026-07-29',
+            'currencycode' => 'EUR',
+            'subtotal' => '100.00',
+            'credit' => '0.00',
+            'tax' => '19.00',
+            'tax2' => '0.00',
+            'total' => '119.00',
+            'taxrate' => '19.00',
+            'taxrate2' => '0.00',
+            'items' => ['item' => [[
+                'id' => 504,
+                'type' => 'Hosting',
+                'relid' => 99,
+                'description' => 'Synthetic service',
+                'amount' => '100.00',
+                'taxed' => true,
+            ]]],
+        ];
+        $client = [
+            'result' => 'success',
+            'client' => [
+                'id' => 7,
+                'currency_code' => 'EUR',
+                'companyname' => 'Synthetic Company',
+                'firstname' => 'Synthetic',
+                'lastname' => 'Customer',
+                'email' => 'synthetic@example.invalid',
+                'address1' => 'Example Street 1',
+                'postcode' => '12345',
+                'city' => 'Example City',
+                'countrycode' => 'DE',
+                'taxexempt' => false,
+            ],
+        ];
+        $contract = static function (array $sourceInvoice) use ($client): array {
+            $gateway = new WhmcsGateway(
+                new Config(),
+                static fn (string $command): array =>
+                    $command === 'GetClientsDetails' ? $client : $sourceInvoice,
+            );
+
+            return $gateway->invoiceExportContract(44);
+        };
+
+        $unpaid = $contract($invoice);
+        $invoice['status'] = 'Paid';
+        $paid = $contract($invoice);
+
+        self::assertNotSame($unpaid['fingerprint'], $paid['fingerprint']);
+        self::assertSame($unpaid['primaryFingerprint'], $paid['primaryFingerprint']);
+
+        $invoice['items']['item'][0]['description'] = 'Changed service';
+        self::assertNotSame(
+            $paid['primaryFingerprint'],
+            $contract($invoice)['primaryFingerprint'],
+        );
+    }
+
     public function testThemeAdapterManifestContractIsExactAndThemeBound(): void
     {
         $manifest = [
@@ -366,6 +431,23 @@ final class WhmcsGatewayTest extends TestCase
         self::assertFalse(WhmcsGateway::validThemeAdapterManifest($manifest, 'custom-theme'));
         $manifest['contract'] = ['authority', 'state', 'invoiceNumber', 'authority'];
         self::assertFalse(WhmcsGateway::validThemeAdapterManifest($manifest, 'custom-theme'));
+
+        $manifest = [
+            'module' => 'sevdesk',
+            'contractVersion' => 2,
+            'theme' => 'twenty-one',
+            'partial' => 'sevdesk-invoice-authority.tpl',
+            'contract' => [
+                'authority',
+                'state',
+                'invoiceNumber',
+                'downloadUrl',
+                'sevdeskRelatedDocuments',
+            ],
+        ];
+        self::assertTrue(WhmcsGateway::validThemeAdapterManifest($manifest, 'twenty-one'));
+        $manifest['contractVersion'] = 1;
+        self::assertFalse(WhmcsGateway::validThemeAdapterManifest($manifest, 'twenty-one'));
     }
 
     public function testThemeAdapterManifestRejectsUnsafePartialPath(): void

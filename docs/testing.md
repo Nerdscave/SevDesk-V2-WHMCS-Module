@@ -8,13 +8,19 @@ Die Tests verwenden ausschließlich synthetische Kunden, Invoices und API-Fixtur
 
 ## Aktueller automatisierter Nachweis
 
-- Die schnelle Unit-/Contract-/Kompositionstestsuite ist lokal grün;
+- Unter PHP 8.3.32 sind 886 Unit-/Contract-/Kompositionstests mit 4.649
+  Assertions grün;
 - PHP-Lint und PSR-12 laufen über den vollständigen Modul- und Testbaum;
 - PHPStan analysiert den vollständigen PHP-Modulcode auf Level 6;
 - Unit-/Contract-Tests decken Dokumentzielresolver, Rule-19-Gates, Invoice-Payload,
   Invoice-Reconciliation, PDF-Prüfung, die native ZUGFeRD-Auswahl, XML-Prüfung
   und den einmaligen In-Memory-Mailkontext ab;
-- Die MariaDB-Integrationstests prüfen eine kleine synthetische Legacy-Struktur, echte Unique-Constraints, Deduplizierung, Candidate-/Remote-ID-Erhalt und parallele Claims;
+- rc.9 ergänzt Tests für die Lifecycle-Matrix, positive unbesteuerte Late Fees,
+  exakte `MA`-/`SR`-/Rule-22-Verträge, Related-Document-Recovery und die
+  sichere Rückstufung definitiv abgelehnter Writes;
+- 129 MariaDB-Integrationstests mit 1.752 Assertions prüfen eine kleine
+  synthetische Legacy-Struktur, echte Unique-Constraints, Deduplizierung,
+  Candidate-/Remote-ID-Erhalt und parallele Claims;
 - Dieselbe Suite deckt sichere und riskante Lease-/Throwable-Recovery, den globalen Auth-Stopp, WHMCS-Kundenwährungen, Teilzahlungs-Pagination, Mapping-Revalidation und einen 1.000-Item-Lauf mit Fehler in der Mitte ab;
 - Ohne konfigurierten Server meldet die lokale MariaDB-Suite ihre Tests als `skipped`. In CI und bei einem Lauf über `tools/test-mariadb.sh` sind sie verpflichtend.
 
@@ -91,9 +97,11 @@ Schnelle Tests ohne WHMCS-Datenbank oder Netzwerk für:
 - Rule-3-Nachweise normalisieren die EU-USt-ID und verlangen das zum
   Rechnungsland passende Präfix. Tests decken auch das griechische `EL`-Präfix,
   Platzhalter und Länderabweichungen ab;
-- `LateFee` blockiert Worker und Dry-run vor Steuerklassifikation, Kontakt,
-  PDF und Beleg-Write; nach einem möglichen Write bleibt derselbe stabile Code
-  mit dem vorhandenen Checkpoint `ambiguous`;
+- positive, unbesteuerte `LateFee` wird nur bei freigegebenem rc.9-Profil
+  deterministisch aus dem Primärsnapshot entfernt und getrennt eingefroren.
+  Negative, besteuerte, veränderte oder nicht freigegebene Gebühren blockieren
+  Worker und Dry-run vor Kontakt, PDF und Beleg-Write; nach einem möglichen
+  Write bleibt der vorhandene Checkpoint `ambiguous`;
 - reine Sammelzahlungscontainer, Voll- und Teilguthaben an exakt verknüpften Originalrechnungen sowie fehlende, doppelte oder widersprüchliche Elternbelege;
 - Änderung von Parent, Fingerprint, Guthaben oder Dokumentbrutto vor der Dokumententscheidung sowie während PDF-, Kontakt- oder E-Rechnungs-I/O: unmittelbar vor dem Beleg-POST dauerhaft blockiert; nach einem möglichen Write `ambiguous`, jeweils ohne zweiten Remote-Write;
 - ein Hook-Job darf seine bestätigte Parent-ID weder verlieren noch zu einem später passenden Parent oder einer gewöhnlichen Rechnung wechseln. Trifft ein Paid-Hook auf einen wartenden Hybridjob, wird dieselbe Parent-ID übernommen; eine abweichende ID setzt einen nicht überschreibbaren Konflikt;
@@ -268,6 +276,41 @@ In einer Testinstallation mit WHMCS 8.13.4 und PHP 8.3:
 - sicherstellen, dass Hook-Fehler niemals den WHMCS-Ablauf abbrechen.
 - sicherstellen, dass der Mail-Hook keine sevDesk-Abfrage ausführt und in CLI-/Cron-Ausführung funktioniert. Der eigenständige Worker muss `hooks.php` vor dem Runner laden. Ohne Hook darf er keinen WHMCS-Versand starten; ein nicht verbrauchter Kontext muss in `whmcs_email_attachment_not_consumed` enden.
 
+### 4a. Invoice-Lifecycle, Mahnung und Late Fees
+
+Die rc.9-Matrix muss mindestens folgende Fälle abdecken:
+
+- `after_payment_proforma` bleibt bei Upgrade und Migration erhalten;
+- `issue_on_creation` ist nur mit `invoice_only`, sevDesk-Hoheit, Proforma aus,
+  Paid-Nummerierung aus, unverändertem Rechnungsdatum, Adaptervertrag v2 und
+  bestätigtem Direkt-Canary möglich;
+- eine offene Direktbetriebs-Invoice wird einmal erstellt und bei einem
+  späteren `InvoicePaid` nicht erneut versandt;
+- eine bewusst nicht angeforderte Originalmail führt nur zu `sendBy`;
+- die WHMCS-Core-Rechnungs- und Mahnmail wird jeweils genau einmal blockiert,
+  während der zugehörige Hook weiterhin einen deduplizierten Job erzeugt;
+- eine Mahnung benötigt Originalzustellung, Status `Unpaid`, unveränderte
+  Nummer, Primärfingerprint und offenen Betrag sowie eine neue Stufe;
+- Teilzahlung, Payment unmittelbar vor Versand, Guthaben, Refund,
+  Cancellation und `UpdateInvoiceTotal` stoppen den Write;
+- die erzeugte `MA` stimmt bei Parent, Kontakt, Stufe, Frist,
+  `reminderDebit`, `reminderCharge`, `reminderTotal` und PDF exakt überein;
+- eine unveränderte unbezahlte Invoice erzeugt hinter dem Canary genau eine
+  `SR`; ohne nachgewiesenen Originalversand bleibt sie mailfrei;
+- ZUGFeRD-Storno verlangt ein separates Gate und prüft PDF und XML;
+- eine positive, unbesteuerte `LateFee` wird aus der Primär-Invoice entfernt;
+  negative, besteuerte oder veränderte Gebühren bleiben blockiert;
+- Buchhaltungsquelle `reminder` und `rule22_voucher` schließen einander aus;
+- der Rule-22-Voucher setzt aktuelle `REVENUE`-Guidance, exakt das bestätigte
+  Konto, Rule 22 und 0 % voraus;
+- Grundrechnung und Gebührenbeleg lösen im Booking-Service die Meldung
+  „manuelle Zahlungsaufteilung erforderlich“ aus;
+- Timeout oder Transportabbruch nach Create, Cancel oder Versand bleibt
+  `ambiguous`; ein definitives 4xx/422 darf nur auf den letzten sicheren
+  Checkpoint zurückgehen;
+- Recovery akzeptiert nur ein strukturell vollständiges, exakt passendes
+  Zusatzdokument. Gemischte, volle oder unvollständige Listen blockieren.
+
 ### 5. End-to-End im sevDesk-Testmandanten
 
 Für diese Tests ist ein separater Mandant mit sevDesk-Update 2.0 erforderlich. Die Tests legen dort echte Testobjekte an. Anschließend werden die Objekte gelöscht oder eindeutig als Testdaten gekennzeichnet.
@@ -302,6 +345,37 @@ Der getrennte ZUGFeRD-Canary prüft zusätzlich:
 - `sendViaEmail(sendXml=false)` und authentifizierter Kundendownload mit exakt der geprüften sevDesk-/ZUGFeRD-PDF;
 - zwei eigene Kundendownloads mit erwartetem SHA-256, abgewiesener Cross-Client-Zugriff und ein delegierter Benutzer ohne Rechnungsrecht;
 - Recovery nach Create, XML-/PDF-Abruf, Öffnung und Versand ohne zweiten Write.
+
+### Live-Gate 1: mailfreier Late-Fee-Nachlauf
+
+1. Eine synthetische bezahlte WHMCS-Invoice mit positiver, unbesteuerter
+   `LateFee` anlegen.
+2. Die verkürzte Grundrechnung ohne Kundenmail erstellen und ihren Readback
+   vollständig prüfen.
+3. Den `createInvoiceReminder`-Factory-Pfad und die buchhalterische Wirkung von
+   `reminderCharge` im verbundenen Mandanten untersuchen.
+4. Genau eine Buchhaltungsquelle wählen. Bei fehlender oder nicht exakter
+   MA-Wirkung den Rule-22-Voucher mit aktueller Guidance verwenden.
+5. Betrag, Parent, Marker, PDF, Recovery und ausbleibenden Mailversand belegen.
+6. Erst danach bekannte historische Late-Fee-Fälle gemeinsam und mailfrei
+   einreihen.
+
+### Live-Gate 2: Direktbetrieb
+
+1. WHMCS ohne Proforma, Paid-Nummerierung und Rechnungsdatum-auf-Zahlung
+   betreiben.
+2. Eine offene Invoice erzeugen: keine WHMCS-Rechnungsmail, genau eine
+   sevDesk-Mail und funktionierender Kundendownload.
+3. Erinnerung ohne Gebühr und Mahnung mit Gebühr über die echten
+   WHMCS-Automationstermine auslösen.
+4. Teilzahlung sowie Zahlung unmittelbar vor Mahnversand als Race prüfen.
+5. Eine versandte unbezahlte Rechnung mit genau einer `SR`-Mail stornieren.
+6. Ein nicht versandtes Original stornieren und die `SR` mailfrei lassen.
+7. E-Invoice- und Rule-19-Varianten getrennt prüfen.
+
+Beide Gates verwenden ausschließlich synthetische Testkunden. Ein gesetztes
+Konfigurationsflag ohne Protokoll, Mailnachweis und Remote-Readback zählt nicht
+als bestandener Canary.
 
 Vor dem Rabatt-Canary läuft ein eigener, rabattfreier Rule-11-Invoice-Canary. Die aktuelle `ReceiptGuidance` muss mindestens ein `REVENUE`-Konto mit Rule 11 und 0 % anbieten. Danach werden Create, exakter Readback, `sendBy`, finale PDF und eine absichtlich unterbrochene Recovery geprüft. Ein bloß erstellter Draft reicht nicht: Der frühere Live-Lauf scheiterte erst beim Öffnen mit Code 7100. Der Canary bleibt deshalb aus, bis der vollständige Lifecycle im aktuell verbundenen Mandanten funktioniert.
 
@@ -612,8 +686,21 @@ Ein Release darf erst freigegeben werden, wenn:
 12. Übergangsinventur, Legacy-Sammeltypisierung, sicheres Unlink, alter Voucher-Requeue und mailfreier Altbestands-Backfill in der Zielumgebung geprüft wurden.
 13. für einen Drop-in-Wechsel die Funktionsmatrix gegen den realen Altbetrieb geprüft und ein Dateirückwechsel sowohl vor als auch nach einem synthetischen Invoice-Mapping geprobt beziehungsweise nach Invoice-Beginn nachweislich blockiert wurde.
 14. bei Verwendung fester `PromoHosting`-Rabatte für jede tatsächlich genutzte Rule-/Rate-Capability der separate Canary die negative `InvoicePos`, `discountSave=null`, Capability-Key, vollständigen Rabattmarker, exakte positive und negative Positionen, `sumNet`, `sumTax`, `sumGross`, `sumDiscounts=0`, PDF und read-only Recovery bestätigt hat. Rule 11 benötigt zusätzlich seinen rabattfreien Invoice-Canary und die aktuelle `REVENUE`-Guidance.
-15. das Positivlisten-Releasearchiv die eigenständige `UPGRADE.md` und die GPL-Lizenz enthält, aber weder Tests, `vendor/` noch lokale Arbeitsdaten. Die Release Notes werden separat am GitHub-Pre-Release veröffentlicht.
+15. Live-Gate 1 die verkürzte Primär-Invoice, den MA-Factory-Pfad, genau eine
+    Late-Fee-Buchhaltungsquelle, Recovery und den ausbleibenden Kundenversand
+    belegt hat.
+16. Live-Gate 2 unter WHMCS 8.13.4 Direktinvoice, einmaligen sevDesk-Versand,
+    Kundendownload, drei Mahnstufen, Teilzahlungs-/Payment-Race und Storno mit
+    und ohne vorherigen Originalversand belegt hat. Rule 19 und ZUGFeRD werden
+    getrennt geprüft.
+17. das Positivlisten-Releasearchiv die eigenständige `UPGRADE.md` und die GPL-Lizenz enthält, aber weder Tests, `vendor/` noch lokale Arbeitsdaten. Die Release Notes werden separat am GitHub-Pre-Release veröffentlicht.
 
-`2.1.0-rc.8` darf als klar gekennzeichnete GitHub-Vorabversion veröffentlicht werden, sobald die automatisierten Repository-Checks und der Archivscan grün sind. Das ist keine pauschale Produktivfreigabe. Ein kontrollierter Nachlauf darf nur die Steuer- und Rabatt-Capabilities verwenden, deren Einzelnachweise im verbundenen Mandanten bestanden sind. Die finale `2.1.0` bleibt bis zu allen oben genannten Zielumgebungs- und Canary-Nachweisen gesperrt.
+`2.1.0-rc.9` darf als klar gekennzeichnete GitHub-Vorabversion veröffentlicht
+werden, sobald die automatisierten Repository-Checks und der Archivscan grün
+sind. Das ist keine pauschale Produktivfreigabe. Ein kontrollierter Nachlauf
+darf nur die Steuer-, Rabatt- und Late-Fee-Capabilities verwenden, deren
+Einzelnachweise im verbundenen Mandanten bestanden sind. Die finale `2.1.0`
+bleibt bis zu allen oben genannten Zielumgebungs- und Canary-Nachweisen
+gesperrt.
 
 Offene Punkte in Steuerlogik, Idempotenz oder Mappingmigration blockieren auch eine Vorabversion.

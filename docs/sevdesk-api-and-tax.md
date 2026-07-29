@@ -46,6 +46,8 @@ Vor dem ersten Write und im Health Check liest das Modul `/Tools/bookkeepingSyst
 | finale Invoice-PDF abrufen | `GET /Invoice/{id}/getPdf` |
 | native E-Rechnungs-XML lesen | `GET /Invoice/{id}/getXml` |
 | Invoice-Zahlung buchen | `PUT /Invoice/{id}/bookAmount` plus typabhängige Read-/Log-Endpunkte |
+| Mahnung erzeugen | dokumentierter `Invoice`-Factory-Pfad `createInvoiceReminder`, danach normaler Invoice-Readback |
+| Invoice stornieren | `PUT /Invoice/{id}/cancelInvoice`, danach Readback der erzeugten `SR` |
 
 Invoice-Erstellung, Öffnen, PDF und Versand sind getrennte Schritte. Erfolg eines Schritts beweist keinen späteren Schritt.
 
@@ -65,8 +67,11 @@ Korrektur-Create und `bookAmount`.
 | `invoice_for_oss` | Rule 19 als Invoice, sonst freigegebener Voucher-Pfad |
 | `invoice_only` | alle im Invoice-Vertrag freigegebenen Rules als Invoice |
 
-`document_authority=sevdesk` ist nur mit `invoice_only` zulässig. Invoice-Ziele sind immer paid-only und
-verlangen eine effektive WHMCS-Rechnungsnummer. Dafür verwendet das Modul das getrimmte `invoicenum`; ist es
+`document_authority=sevdesk` ist nur mit `invoice_only` zulässig. Im Upgrade-Default
+`after_payment_proforma` bleiben Invoice-Ziele paid-only. Der gesondert
+freizugebende Lebenszyklus `issue_on_creation` erlaubt ausschließlich
+sevDesk-geführte Invoices bereits mit Status `Unpaid`. Beide Wege verlangen
+eine effektive WHMCS-Rechnungsnummer. Dafür verwendet das Modul das getrimmte `invoicenum`; ist es
 bei einer Legacy-Rechnung leer, gilt die unveränderliche interne Invoice-ID als WHMCS-Rechnungsnummer. Diese
 Auflösung ist rein lesend und füllt `tblinvoices.invoicenum` nicht nachträglich.
 
@@ -295,6 +300,50 @@ Rule 19 sowie Rules 18/20, Behördenfälle und historische Backfills werden nie 
 
 Nach `invoice_write_requested`, `invoice_open_write_requested` oder `invoice_delivery_write_requested` ist ein Transportfehler potenziell nicht wiederholbar. Recovery darf dann nur GETs ausführen. Ein fehlender Nachweis oder ein fehlendes Mapping nach einem späteren Write bleibt `ambiguous`; es gibt keinen Rückfall auf `saveInvoice`. Volle 1.000er-Seiten bei Kandidaten oder Positionen gelten als abgeschnitten und nicht beweiskräftig.
 
+### Mahnung, Stornorechnung und Late-Fee-Beleg
+
+`createInvoiceReminder` wird nur nach einem eigenen Mandanten-Canary verwendet.
+Das Modul konstruiert keine eigene `MA`, sondern prüft das von sevDesk erzeugte
+Dokument. Pflicht sind die exakte Eltern-Invoice, derselbe Kontakt, die
+WHMCS-Mahnstufe und -frist sowie centgenaue Werte für `reminderDebit`,
+`reminderCharge` und `reminderTotal`. Auch die finale PDF gehört zum Vertrag.
+Eine unklare oder abweichende Antwort wird nicht versandt.
+
+Vor jeder Mahnung werden Grundrechnung, WHMCS-Status und Forderungsfingerprint
+erneut gelesen. Die Rechnung muss `Unpaid` und unverändert sein. Der offene
+Betrag muss zum eingefrorenen Wert passen; Zahlungen, Guthaben, Refunds,
+Cancellation und Teilzahlungen blockieren. Eine Stufe darf nur einmal
+existieren. Erst nach nachgewiesenem Originalversand darf `sendViaEmail` für die
+Mahnung folgen.
+
+`cancelInvoice` ist ausschließlich für eine offene, unveränderte
+Direktbetriebs-Invoice vorgesehen. Die zurückgegebene `SR` muss Elternbeleg,
+Kontakt und Betrag exakt spiegeln. Bei einer ZUGFeRD-Grundrechnung werden
+zusätzlich E-Invoice-Flag, PDF und XML geprüft. Nur wenn die Original-Invoice
+nachweislich per sevDesk-Mail zugestellt wurde, darf auch die `SR` versandt
+werden. Ein möglicherweise ausgeführter Cancel- oder Mail-Write wird nie blind
+wiederholt.
+
+Positive, unbesteuerte WHMCS-`LateFee`-Positionen werden aus der normalen
+Leistungs-Invoice entfernt. Der zugrunde liegende WHMCS-Vertrag, die verkürzte
+Primär-Invoice und die Gebührenpositionen werden getrennt gehasht. Andere,
+negative oder besteuerte Gebühren bleiben blockiert.
+
+Die Gebühr besitzt genau eine Erlösquelle:
+
+- `reminder`, wenn ein gesonderter Canary beweist, dass `reminderCharge` in
+  diesem sevDesk-Mandanten bereits buchhalterisch wirksam ist;
+- `rule22_voucher`, wenn nach Zahlung ein positiver Revenue-Voucher mit Rule 22,
+  0 % und dem im Setup bestätigten `accountDatev` erzeugt wird.
+
+Der Rule-22-Pfad liest unmittelbar vor Create die aktuelle
+`ReceiptGuidance/forRevenue`. Genau das konfigurierte numerische Konto muss
+`REVENUE`, Rule 22 und 0 % erlauben. Der Voucher trägt Betrag, Parent-ID und
+stabilen WHMCS-Marker, wird nach Create samt Positionen exakt zurückgelesen und
+bleibt mailfrei. Eine `MA` darf in dieser Konfiguration nur das Mahndokument
+sein; sie ersetzt den Voucher nicht. Bei Buchhaltungsquelle `reminder` ist es
+umgekehrt und ein zusätzlicher Voucher verboten.
+
 ## Steuerregeln in sevDesk-Update 2.0
 
 | ID | Code/Fall | API-/Modulstatus |
@@ -310,6 +359,7 @@ Nach `invoice_write_requested`, `invoice_open_write_requested` oder `invoice_del
 | 19 | OSS elektronische Leistungen | nur Invoice, nur bestätigtes digitales EU-B2C-Profil |
 | 20 | OSS-Sonderfall | in OSS-v1 blockiert |
 | 21 | Reverse Charge nach § 18b UStG | in dieser Invoice-/Voucher-Freigabe blockiert |
+| 22 | Mahngebühr | ausschließlich separater, mailfreier Revenue-Voucher hinter Late-Fee-Canary und aktueller Guidance |
 
 Die Tabelle ist kein Steuerberatungsergebnis. Sie beschreibt API-Fähigkeiten und die Fail-Closed-Grenze des Moduls.
 
@@ -338,7 +388,8 @@ Nach dem Kleinunternehmer-Stichtag akzeptiert Rule 1 nur noch 7 % oder 19 %. Das
 | exakt bewiesene WHMCS-Sammelzahlung | Container ohne Umsatzexport; Originalrechnungen mit vollständigem Dokumentbruttobetrag |
 | gewöhnliches Guthaben ohne `Invoice`-Verknüpfung | nur als ausdrücklich bestätigter Voucher-Einzelexport über den vollständigen Dokumentbruttobetrag |
 | unklare Sammelzahlung oder anderer Guthabenfall | blockiert, manuelle Prüfung |
-| WHMCS-Position vom Typ `LateFee` | blockiert; eigener steuerlicher Grund und separate fachliche Behandlung erforderlich |
+| positive, unbesteuerte WHMCS-Position vom Typ `LateFee` | nur hinter rc.9-Gates aus der Leistungs-Invoice entfernen; genau eine Buchhaltungsquelle über `MA` oder Rule-22-Voucher |
+| negative, besteuerte oder veränderte `LateFee` | blockiert; manuelle Prüfung |
 | genau ein struktureller `PromoHosting`-Rabatt mit passender Rule-/Rate-Capability und Canary | negative `InvoicePos` in `invoice_only`, `discountSave=null`; keine E-Rechnung |
 | Null-/Negativbetrag, andere negative Position, Refund oder Storno | normaler Export blockiert oder eigener bestätigter Voucher-Korrekturpfad |
 | Fremdwährung | blockiert, bis separat freigegeben |
@@ -392,7 +443,7 @@ Erlaubt ein Voucher-Konto laut Guidance nur `AUSFUHREN`, muss jede andere Rule l
   Remote-Werte dagegen exakt in normalisierten Minor Units; eine Abweichung von
   einem Cent blockiert den Write beziehungsweise die Bestätigung.
 - Invoice- und Voucher-Payload müssen denselben gefrorenen Netto-/Bruttomodus abbilden.
-- Negative Positionen bleiben im normalen Export verboten. Einzige Ausnahme ist der oben beschriebene feste `PromoHosting`-Rabatt; er wird als exakt geprüfte negative `InvoicePos` übertragen. `discountSave` bleibt leer.
+- Negative Positionen bleiben im normalen Export verboten. Einzige Ausnahme ist der oben beschriebene feste `PromoHosting`-Rabatt; er wird als exakt geprüfte negative `InvoicePos` übertragen. `discountSave` bleibt leer. Eine positive, unbesteuerte `LateFee` wird nicht als Invoice-Position übertragen, sondern folgt ausschließlich dem getrennten Mahngebührenvertrag.
 - Leere und Nullsummen-Rechnungen sind Prüffälle.
 - Beschreibungen sind Dokumentinhalt, aber kein Klassifikationssignal und kein Joblogfeld.
 

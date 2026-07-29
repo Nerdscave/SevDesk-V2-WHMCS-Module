@@ -12,6 +12,7 @@ use WHMCS\Module\Addon\SevDesk\Support\AdminAssets;
 use WHMCS\Module\Addon\SevDesk\Support\AdminInvoiceControls;
 use WHMCS\Module\Addon\SevDesk\Support\ClientDocumentPresenter;
 use WHMCS\Module\Addon\SevDesk\Support\DocumentDeliveryContext;
+use WHMCS\Module\Addon\SevDesk\Support\DirectDeliveryIntentContext;
 use WHMCS\Module\Addon\SevDesk\Support\EmailAttachmentContext;
 use WHMCS\Module\Addon\SevDesk\Support\InvoiceEmailGuardContext;
 use WHMCS\Module\Addon\SevDesk\Support\QuickExportGuard;
@@ -46,6 +47,15 @@ function sevdesk_automatic_enqueue_enabled(Application $application): bool
     if (
         (string) $application->config->get('e_invoice_mode', 'off') !== 'off'
         && !$application->config->bool('e_invoice_canary_confirmed')
+    ) {
+        return false;
+    }
+    if (
+        (string) $application->config->get(
+            'invoice_lifecycle_mode',
+            MappingRepository::LIFECYCLE_AFTER_PAYMENT_PROFORMA,
+        ) === MappingRepository::LIFECYCLE_ISSUE_ON_CREATION
+        && !$application->config->bool('direct_invoice_canary_confirmed')
     ) {
         return false;
     }
@@ -146,6 +156,11 @@ function sevdesk_enqueue_invoice(array $vars, string $event): void
         $ossProfile = (string) $application->config->get('oss_profile', 'blocked');
         $euB2cMode = (string) $application->config->get('eu_b2c_mode', 'blocked');
         $eInvoiceMode = (string) $application->config->get('e_invoice_mode', 'off');
+        $invoiceLifecycle = (string) $application->config->get(
+            'invoice_lifecycle_mode',
+            MappingRepository::LIFECYCLE_AFTER_PAYMENT_PROFORMA,
+        );
+        $lateFeeMode = (string) $application->config->get('late_fee_mode', 'blocked');
         $storedEInvoiceActiveFrom = (string) $application->config->get('e_invoice_active_from', '');
         $eInvoiceActiveFrom = DateTimeImmutable::createFromFormat('!d-m-Y', $storedEInvoiceActiveFrom);
         $requestedEInvoiceActiveFrom = $eInvoiceActiveFrom instanceof DateTimeImmutable
@@ -156,8 +171,19 @@ function sevdesk_enqueue_invoice(array $vars, string $event): void
             ? (string) $application->config->get('invoice_delivery_channel', 'sevdesk')
             : null;
         $onlyPaid = $application->config->bool('import_only_paid', true);
-        if ($mode === 'invoice_only' && $event !== 'InvoicePaid') {
-            return;
+        if ($mode === 'invoice_only') {
+            if (
+                $invoiceLifecycle === MappingRepository::LIFECYCLE_ISSUE_ON_CREATION
+                && $event !== 'InvoiceCreated'
+            ) {
+                return;
+            }
+            if (
+                $invoiceLifecycle !== MappingRepository::LIFECYCLE_ISSUE_ON_CREATION
+                && $event !== 'InvoicePaid'
+            ) {
+                return;
+            }
         }
         if ($mode === 'voucher_only' && (($event === 'InvoicePaid') === !$onlyPaid)) {
             return;
@@ -169,6 +195,9 @@ function sevdesk_enqueue_invoice(array $vars, string $event): void
         if ($invoiceId < 1) {
             return;
         }
+        $directDeliveryRequested = $event === 'InvoiceCreated'
+            && $invoiceLifecycle === MappingRepository::LIFECYCLE_ISSUE_ON_CREATION
+            && DirectDeliveryIntentContext::consume($invoiceId);
 
         $massPaymentContext = $event === 'InvoicePaid'
             ? sevdesk_mass_payment_hook_context($application, $invoiceId)
@@ -188,6 +217,8 @@ function sevdesk_enqueue_invoice(array $vars, string $event): void
                 'trigger' => $event,
                 'requestedExportMode' => $mode,
                 'requestedDocumentAuthority' => $documentAuthority,
+                'requestedInvoiceLifecycleMode' => $invoiceLifecycle,
+                'requestedLateFeeMode' => $lateFeeMode,
                 'requestedOssProfile' => $ossProfile,
                 'requestedEuB2cMode' => $euB2cMode,
                 'requestedDeliveryChannel' => $deliveryChannel,
@@ -211,8 +242,12 @@ function sevdesk_enqueue_invoice(array $vars, string $event): void
                     'invoice_unity_id',
                     '',
                 )),
-                'delivery_requested' => $event === 'InvoicePaid'
-                    && $documentAuthority === 'sevdesk',
+                'delivery_requested' => $documentAuthority === 'sevdesk'
+                    && (
+                        ($event === 'InvoicePaid'
+                            && $invoiceLifecycle !== MappingRepository::LIFECYCLE_ISSUE_ON_CREATION)
+                        || $directDeliveryRequested
+                    ),
             ];
             if (
                 $massPaymentContainerInvoiceId !== null
@@ -321,8 +356,47 @@ function sevdesk_prepare_paid_invoice_email_guard(array $vars): void
     }
 }
 
+/**
+ * Blocks the initial WHMCS Invoice PDF before InvoiceCreated queues the direct
+ * sevDesk document. The attempted email is remembered only in this request.
+ *
+ * @param array<string,mixed> $vars
+ */
+function sevdesk_prepare_created_invoice_email_guard(array $vars): void
+{
+    $invoiceId = (int) ($vars['invoiceid'] ?? 0);
+    try {
+        if ($invoiceId < 1) {
+            return;
+        }
+        $application = Application::instance();
+        if (
+            !$application->config->bool('module_active')
+            || (string) $application->config->get(Config::RUNTIME_SIGNATURE_SETTING, '')
+                !== Config::RUNTIME_SIGNATURE
+            || (string) $application->config->get('export_mode', 'voucher_only') !== 'invoice_only'
+            || (string) $application->config->get('document_authority', 'whmcs') !== 'sevdesk'
+            || (string) $application->config->get(
+                'invoice_lifecycle_mode',
+                MappingRepository::LIFECYCLE_AFTER_PAYMENT_PROFORMA,
+            ) !== MappingRepository::LIFECYCLE_ISSUE_ON_CREATION
+        ) {
+            return;
+        }
+        InvoiceEmailGuardContext::register($invoiceId);
+        DirectDeliveryIntentContext::prepare($invoiceId);
+    } catch (Throwable $error) {
+        if (function_exists('logActivity')) {
+            logActivity(
+                'sevdesk could not prepare the created Invoice email guard for invoice '
+                . max(0, $invoiceId) . ': ' . get_class($error),
+            );
+        }
+    }
+}
+
 /** @param array<string, mixed> $vars */
-function sevdesk_enqueue_review(array $vars, string $reason): void
+function sevdesk_enqueue_review(array $vars, string $reason, bool $retainForIssuedDirectInvoice = false): void
 {
     $invoiceId = (int) ($vars['invoiceid'] ?? 0);
     try {
@@ -330,7 +404,20 @@ function sevdesk_enqueue_review(array $vars, string $reason): void
             return;
         }
         $application = Application::instance();
-        if (!sevdesk_automatic_enqueue_enabled($application)) {
+        $automaticEnabled = sevdesk_automatic_enqueue_enabled($application);
+        $issuedDirectInvoice = false;
+        if ($retainForIssuedDirectInvoice && $invoiceId > 0) {
+            $mapping = $application->mappings->findCompleteByInvoiceAndType(
+                $invoiceId,
+                MappingRepository::DOCUMENT_TYPE_INVOICE,
+            );
+            $issuedDirectInvoice = $mapping !== null
+                && trim((string) ($mapping->document_authority ?? ''))
+                    === MappingRepository::DOCUMENT_AUTHORITY_SEVDESK
+                && trim((string) ($mapping->invoice_lifecycle_mode ?? ''))
+                    === MappingRepository::LIFECYCLE_ISSUE_ON_CREATION;
+        }
+        if (!$automaticEnabled && !$issuedDirectInvoice) {
             return;
         }
         if ($invoiceId < 1) {
@@ -345,6 +432,282 @@ function sevdesk_enqueue_review(array $vars, string $reason): void
         if (function_exists('logActivity')) {
             logActivity(
                 'sevdesk could not enqueue accounting review for invoice '
+                . max(0, $invoiceId) . ': ' . get_class($error),
+            );
+        }
+    }
+}
+
+/** @param array<string,mixed> $vars */
+function sevdesk_enqueue_invoice_reminder(array $vars): void
+{
+    $invoiceId = (int) ($vars['invoiceid'] ?? 0);
+    try {
+        if (
+            $invoiceId < 1
+            || !defined(Migrator::class . '::RELATED_DOCUMENTS_TABLE')
+            || !Capsule::schema()->hasTable(Migrator::RELATED_DOCUMENTS_TABLE)
+        ) {
+            return;
+        }
+        $application = Application::instance();
+        if (
+            !sevdesk_automatic_enqueue_enabled($application)
+            || (string) $application->config->get(
+                'invoice_lifecycle_mode',
+                MappingRepository::LIFECYCLE_AFTER_PAYMENT_PROFORMA,
+            ) !== MappingRepository::LIFECYCLE_ISSUE_ON_CREATION
+            || (string) $application->config->get('dunning_mode', 'off')
+                !== 'whmcs_schedule_sevdesk_delivery'
+            || !$application->config->bool('dunning_canary_confirmed')
+        ) {
+            return;
+        }
+        $level = sevdesk_dunning_level($vars);
+        if ($level === null) {
+            sevdesk_enqueue_review($vars, 'unknown_invoice_payment_reminder_level');
+
+            return;
+        }
+        $mapping = $application->mappings->findCompleteByInvoiceAndType(
+            $invoiceId,
+            MappingRepository::DOCUMENT_TYPE_INVOICE,
+        );
+        if (
+            $mapping === null
+            || trim((string) ($mapping->document_authority ?? ''))
+                !== MappingRepository::DOCUMENT_AUTHORITY_SEVDESK
+            || trim((string) ($mapping->invoice_lifecycle_mode ?? ''))
+                !== MappingRepository::LIFECYCLE_ISSUE_ON_CREATION
+        ) {
+            sevdesk_enqueue_review($vars, 'invoice_reminder_without_direct_mapping');
+
+            return;
+        }
+        $fingerprint = $application->whmcs->localDunningFingerprint($invoiceId);
+        $primaryFingerprint = $application->jobs->issuedPrimaryContractFingerprint($invoiceId);
+        if ($primaryFingerprint === null) {
+            sevdesk_enqueue_review($vars, 'issued_primary_contract_missing');
+
+            return;
+        }
+        $application->jobs->create('invoice_dunning', [[
+            'invoice_id' => $invoiceId,
+            'action' => 'create_invoice_reminder',
+            'dedupe_key' => 'invoice_reminder:' . $invoiceId . ':' . $level . ':' . $fingerprint,
+            'candidate' => [
+                'dunningLevel' => $level,
+                'reminderDeadline' => $application->whmcs->reminderDeadline($invoiceId, $level),
+                'localDunningFingerprint' => $fingerprint,
+                'primaryInvoiceContractFingerprint' => $primaryFingerprint,
+                'delivery_requested' => true,
+            ],
+        ]], [
+            'trigger' => 'InvoicePaymentReminder',
+            'dunning_level' => $level,
+        ]);
+    } catch (Throwable $error) {
+        if (function_exists('logActivity')) {
+            logActivity(
+                'sevdesk could not enqueue InvoicePaymentReminder for invoice '
+                . max(0, $invoiceId) . ': ' . get_class($error),
+            );
+        }
+    }
+}
+
+/**
+ * Direct-mode invoices already own their primary sevDesk mapping when payment
+ * arrives. A separated LateFee therefore needs its own paid-only job instead
+ * of another primary export.
+ *
+ * @param array<string,mixed> $vars
+ */
+function sevdesk_enqueue_paid_late_fee(array $vars): void
+{
+    $invoiceId = (int) ($vars['invoiceid'] ?? 0);
+    try {
+        if (
+            $invoiceId < 1
+            || !defined(Migrator::class . '::RELATED_DOCUMENTS_TABLE')
+            || !Capsule::schema()->hasTable(Migrator::RELATED_DOCUMENTS_TABLE)
+        ) {
+            return;
+        }
+        $application = Application::instance();
+        if (
+            !sevdesk_automatic_enqueue_enabled($application)
+            || (string) $application->config->get('export_mode', 'voucher_only') !== 'invoice_only'
+            || (string) $application->config->get(
+                'invoice_lifecycle_mode',
+                MappingRepository::LIFECYCLE_AFTER_PAYMENT_PROFORMA,
+            ) !== MappingRepository::LIFECYCLE_ISSUE_ON_CREATION
+            || (string) $application->config->get('late_fee_mode', 'blocked')
+                !== 'reminder_then_rule22'
+        ) {
+            return;
+        }
+        $contract = $application->whmcs->invoiceExportContract($invoiceId);
+        $lateFee = is_array($contract['lateFee'] ?? null) ? $contract['lateFee'] : null;
+        $fingerprint = strtolower(trim((string) ($lateFee['fingerprint'] ?? '')));
+        $amountMinor = $lateFee['amountMinor'] ?? null;
+        if (
+            $lateFee === null
+            || preg_match('/^[a-f0-9]{64}$/', $fingerprint) !== 1
+            || !is_int($amountMinor)
+            || $amountMinor <= 0
+        ) {
+            return;
+        }
+        $voucherDate = $application->whmcs->invoiceDatePaid($invoiceId);
+        if ($voucherDate === null) {
+            sevdesk_enqueue_review($vars, 'late_fee_payment_date_missing');
+
+            return;
+        }
+        $primaryFingerprint = $application->jobs->issuedPrimaryContractFingerprint($invoiceId);
+        if ($primaryFingerprint === null) {
+            sevdesk_enqueue_review($vars, 'issued_primary_contract_missing');
+
+            return;
+        }
+        $application->jobs->create('late_fee_accounting', [[
+            'invoice_id' => $invoiceId,
+            'action' => 'export_late_fee_voucher',
+            'dedupe_key' => 'late_fee_voucher:' . $invoiceId . ':' . $fingerprint,
+            'candidate' => [
+                'whmcsInvoiceContractFingerprint' => (string) $contract['fingerprint'],
+                'primaryInvoiceContractFingerprint' => $primaryFingerprint,
+                'lateFeeFingerprint' => $fingerprint,
+                'lateFeeAmountMinor' => $amountMinor,
+                'lateFeeVoucherDate' => $voucherDate,
+                'localDunningFingerprint' => $application->whmcs->localDunningFingerprint($invoiceId),
+                'historicalBackfill' => false,
+                'delivery_requested' => false,
+            ],
+        ]], [
+            'trigger' => 'InvoicePaid',
+            'mail_free' => true,
+        ]);
+    } catch (Throwable $error) {
+        if (function_exists('logActivity')) {
+            logActivity(
+                'sevdesk could not enqueue paid LateFee for invoice '
+                    . max(0, $invoiceId) . ': ' . get_class($error),
+            );
+        }
+    }
+}
+
+/** @param array<string,mixed> $vars */
+function sevdesk_dunning_level(array $vars): ?int
+{
+    $raw = strtolower(trim((string) (
+        $vars['type']
+        ?? $vars['remindertype']
+        ?? $vars['level']
+        ?? ''
+    )));
+    if (preg_match('/^[1-3]$/', $raw) === 1) {
+        return (int) $raw;
+    }
+    foreach (
+        [
+        1 => ['first', '1st', 'firstoverdue', 'first overdue'],
+        2 => ['second', '2nd', 'secondoverdue', 'second overdue'],
+        3 => ['third', '3rd', 'thirdoverdue', 'third overdue'],
+        ] as $level => $markers
+    ) {
+        foreach ($markers as $marker) {
+            if (str_contains($raw, $marker)) {
+                return $level;
+            }
+        }
+    }
+
+    return null;
+}
+
+/** @param array<string,mixed> $vars */
+function sevdesk_handle_invoice_cancellation(array $vars): void
+{
+    $invoiceId = (int) ($vars['invoiceid'] ?? 0);
+    try {
+        if ($invoiceId < 1 || !Capsule::schema()->hasTable(Migrator::JOBS_TABLE)) {
+            return;
+        }
+        $application = Application::instance();
+        $mapping = $application->mappings->findByInvoice($invoiceId);
+        if ($mapping === null) {
+            $application->jobs->cancelUnstartedPrimaryExport($invoiceId);
+
+            return;
+        }
+        if (
+            trim((string) ($mapping->document_type ?? ''))
+                !== MappingRepository::DOCUMENT_TYPE_INVOICE
+            || trim((string) ($mapping->document_authority ?? ''))
+                !== MappingRepository::DOCUMENT_AUTHORITY_SEVDESK
+            || trim((string) ($mapping->invoice_lifecycle_mode ?? ''))
+                !== MappingRepository::LIFECYCLE_ISSUE_ON_CREATION
+        ) {
+            sevdesk_enqueue_review($vars, 'invoice_cancelled');
+
+            return;
+        }
+        if (trim((string) ($mapping->document_ready_at ?? '')) === '') {
+            sevdesk_enqueue_review($vars, 'unpublished_sevdesk_draft_cleanup_required');
+
+            return;
+        }
+        if (
+            !sevdesk_automatic_enqueue_enabled($application)
+            || !$application->config->bool('cancellation_canary_confirmed')
+        ) {
+            sevdesk_enqueue_review($vars, 'invoice_cancellation_canary_missing', true);
+
+            return;
+        }
+        $fingerprint = $application->whmcs->localDunningFingerprint($invoiceId);
+        $primaryFingerprint = $application->jobs->issuedPrimaryContractFingerprint($invoiceId);
+        if ($primaryFingerprint === null) {
+            sevdesk_enqueue_review($vars, 'issued_primary_contract_missing');
+
+            return;
+        }
+        $application->jobs->create('invoice_cancellation', [[
+            'invoice_id' => $invoiceId,
+            'action' => 'cancel_invoice',
+            'dedupe_key' => 'cancel_invoice:' . $invoiceId . ':' . $fingerprint,
+            'candidate' => [
+                'localDunningFingerprint' => $fingerprint,
+                'primaryInvoiceContractFingerprint' => $primaryFingerprint,
+                'delivery_requested' => $mapping->delivered_at !== null,
+            ],
+        ]], ['trigger' => 'InvoiceCancelled']);
+    } catch (Throwable $error) {
+        if (function_exists('logActivity')) {
+            logActivity(
+                'sevdesk could not handle InvoiceCancelled for invoice '
+                . max(0, $invoiceId) . ': ' . get_class($error),
+            );
+        }
+    }
+}
+
+/** @param array<string,mixed> $vars */
+function sevdesk_freeze_related_document_actions(array $vars, string $reason): void
+{
+    $invoiceId = (int) ($vars['invoiceid'] ?? 0);
+    try {
+        if ($invoiceId < 1 || !Capsule::schema()->hasTable(Migrator::ITEMS_TABLE)) {
+            return;
+        }
+        Application::instance()->jobs->freezeRelatedDocumentActions($invoiceId, $reason);
+    } catch (Throwable $error) {
+        if (function_exists('logActivity')) {
+            logActivity(
+                'sevdesk could not freeze related document actions for invoice '
                 . max(0, $invoiceId) . ': ' . get_class($error),
             );
         }
@@ -445,6 +808,40 @@ function sevdesk_client_invoice_variables(array $vars): array
         $webRoot = rtrim((string) ($vars['WEB_ROOT'] ?? ''), '/');
         $downloadUrl = ($webRoot === '' ? '' : $webRoot . '/')
             . 'index.php?m=sevdesk&a=download&id=' . rawurlencode((string) $invoiceId);
+        $relatedDocuments = [];
+        if (
+            defined(Migrator::class . '::RELATED_DOCUMENTS_TABLE')
+            && Capsule::schema()->hasTable(Migrator::RELATED_DOCUMENTS_TABLE)
+        ) {
+            foreach ($application->relatedDocuments->forInvoice($invoiceId) as $related) {
+                $role = trim((string) ($related->role ?? ''));
+                if (
+                    !in_array($role, ['reminder', 'cancellation', 'late_fee_voucher'], true)
+                    || (
+                        $role !== 'late_fee_voucher'
+                        && trim((string) ($related->document_ready_at ?? '')) === ''
+                    )
+                ) {
+                    continue;
+                }
+                $level = (int) ($related->dunning_level ?? 0);
+                $download = '';
+                if ($role !== 'late_fee_voucher') {
+                    $download = ($webRoot === '' ? '' : $webRoot . '/')
+                        . 'index.php?m=sevdesk&a=downloadRelated&id='
+                        . rawurlencode((string) $invoiceId)
+                        . '&role=' . rawurlencode($role)
+                        . '&level=' . rawurlencode((string) $level);
+                }
+                $relatedDocuments[] = [
+                    'role' => $role,
+                    'dunningLevel' => $level,
+                    'documentNumber' => trim((string) ($related->document_number ?? '')),
+                    'delivered' => trim((string) ($related->delivered_at ?? '')) !== '',
+                    'downloadUrl' => $download,
+                ];
+            }
+        }
 
         return [
             'sevdeskDocument' => ClientDocumentPresenter::present(
@@ -453,7 +850,13 @@ function sevdesk_client_invoice_variables(array $vars): array
                 $mapping,
                 $documentContext['itemStatus'] ?? null,
                 $downloadUrl,
+                trim((string) (
+                    $mapping->invoice_lifecycle_mode
+                    ?? $documentContext['invoiceLifecycleMode']
+                    ?? MappingRepository::LIFECYCLE_AFTER_PAYMENT_PROFORMA
+                )),
             ),
+            'sevdeskRelatedDocuments' => $relatedDocuments,
         ];
     } catch (Throwable $error) {
         if (function_exists('logActivity')) {
@@ -492,11 +895,7 @@ function sevdesk_email_pre_send(array $vars): array
         }
 
         $application = Application::instance();
-        if (
-            !$application->config->bool('module_active')
-            || (string) $application->config->get(Config::RUNTIME_SIGNATURE_SETTING, '')
-                !== Config::RUNTIME_SIGNATURE
-        ) {
+        if (!$application->config->bool('module_active')) {
             return $guardApplies ? ['abortsend' => true] : [];
         }
 
@@ -507,7 +906,39 @@ function sevdesk_email_pre_send(array $vars): array
         if (!$isInvoiceTemplate) {
             return $hasActiveAttachmentContext ? ['abortsend' => true] : [];
         }
+        $directNewInvoice = (string) $application->config->get(
+            'export_mode',
+            'voucher_only',
+        ) === 'invoice_only'
+            && (string) $application->config->get('document_authority', 'whmcs') === 'sevdesk'
+            && (string) $application->config->get(
+                'invoice_lifecycle_mode',
+                MappingRepository::LIFECYCLE_AFTER_PAYMENT_PROFORMA,
+            ) === MappingRepository::LIFECYCLE_ISSUE_ON_CREATION;
+        if ($directNewInvoice) {
+            // InvoiceCreated is documented to run after the initial email. For
+            // autogen there is no guaranteed InvoiceCreationPreEmail hook.
+            // Persist the delivery intent before suppressing the Core mail;
+            // InvoiceCreated later hits the same dedupe key and cannot create a
+            // second accounting action. This performs local database work only.
+            InvoiceEmailGuardContext::register($invoiceId);
+            DirectDeliveryIntentContext::request($invoiceId);
+            sevdesk_enqueue_invoice(['invoiceid' => $invoiceId], 'InvoiceCreated');
+            $hasPaidInvoiceGuard = true;
+            $guardApplies = true;
+        }
+        if (
+            (string) $application->config->get(Config::RUNTIME_SIGNATURE_SETTING, '')
+                !== Config::RUNTIME_SIGNATURE
+        ) {
+            return $guardApplies ? ['abortsend' => true] : [];
+        }
         $mapping = $application->mappings->findByInvoice($invoiceId);
+        if ($mapping === null && $hasPaidInvoiceGuard) {
+            if (!$directNewInvoice) {
+                DirectDeliveryIntentContext::confirm($invoiceId);
+            }
+        }
         $typedInvoiceMapping = $mapping !== null
             && ($mapping->document_type ?? null) === MappingRepository::DOCUMENT_TYPE_INVOICE;
         if ($typedInvoiceMapping && !$hasConfirmedWhmcsAuthority) {
@@ -598,11 +1029,23 @@ add_hook('AdminAreaFooterOutput', 1, static function (): string {
     }
 });
 
+add_hook('InvoiceCreationPreEmail', 1, static fn (array $vars) => sevdesk_prepare_created_invoice_email_guard($vars));
 add_hook('InvoiceCreated', 1, static fn (array $vars) => sevdesk_enqueue_invoice($vars, 'InvoiceCreated'));
 add_hook('InvoicePaidPreEmail', 1, static fn (array $vars) => sevdesk_prepare_paid_invoice_email_guard($vars));
-add_hook('InvoicePaid', 1, static fn (array $vars) => sevdesk_enqueue_invoice($vars, 'InvoicePaid'));
-add_hook('InvoiceRefunded', 1, static fn (array $vars) => sevdesk_enqueue_review($vars, 'invoice_refunded'));
-add_hook('InvoiceCancelled', 1, static fn (array $vars) => sevdesk_enqueue_review($vars, 'invoice_cancelled'));
+add_hook('InvoicePaid', 1, static function (array $vars): void {
+    sevdesk_enqueue_invoice($vars, 'InvoicePaid');
+    sevdesk_enqueue_paid_late_fee($vars);
+});
+add_hook('InvoicePaymentReminder', 1, static fn (array $vars) => sevdesk_enqueue_invoice_reminder($vars));
+add_hook('AddInvoiceLateFee', 1, static fn (array $vars) =>
+    sevdesk_freeze_related_document_actions($vars, 'late_fee_contract_changed'));
+add_hook('UpdateInvoiceTotal', 1, static function (array $vars): void {
+    sevdesk_freeze_related_document_actions($vars, 'invoice_total_changed');
+    sevdesk_enqueue_review($vars, 'issued_invoice_total_changed', true);
+});
+add_hook('InvoiceRefunded', 1, static fn (array $vars) =>
+    sevdesk_enqueue_review($vars, 'invoice_refunded', true));
+add_hook('InvoiceCancelled', 1, static fn (array $vars) => sevdesk_handle_invoice_cancellation($vars));
 add_hook('AddTransaction', 1, static fn (array $vars) => sevdesk_enqueue_transaction_review($vars));
 add_hook('ClientAreaPageViewInvoice', 1, static fn (array $vars): array => sevdesk_client_invoice_variables($vars));
 add_hook('EmailPreSend', 1, static fn (array $vars): array => sevdesk_email_pre_send($vars));

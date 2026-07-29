@@ -108,6 +108,35 @@ Der persistierte Jobsnapshot enthält nur IDs, E-Invoice-Flag und SHA-256-Werte.
 
 Rule 19 bleibt eine normale Invoice. Rules 18/20, B2G/XRechnung, historische E-Rechnungs-Backfills und eine nachträgliche Umwandlung bestehender Dokumente sind ausgeschlossen. Dasselbe gilt für ZUGFeRD mit angewendetem WHMCS-Guthaben, auch wenn die zugrunde liegende Sammelzahlung exakt bewiesen ist. Dafür fehlt ein eigener Create-/XML-Canary; ein stiller Rückfall auf eine PDF-Invoice findet nicht statt.
 
+## Architekturentscheidung: Invoice-Lebenszyklus und Mahnverfahren
+
+**Status:** in rc.9 implementiert, standardmäßig ausgeschaltet. Der bisherige Ablauf bleibt `after_payment_proforma`. Direktbetrieb, Mahnversand, Storno und Late-Fee-Buchung benötigen getrennte Live-Canaries.
+
+Jedes neue Invoice-Mapping friert einen von zwei Lebenszyklen ein. `after_payment_proforma` erzeugt die Endrechnung erst nach vollständiger Zahlung; WHMCS bleibt vor Zahlung mit seiner Proforma sichtbar. `issue_on_creation` erzeugt die offene sevDesk-Invoice direkt nach dem WHMCS-Create. Dieser Modus ist nur mit `invoice_only`, sevDesk-Hoheit und unveränderlichen WHMCS-Rechnungsdaten zulässig. Proforma, fortlaufende Paid-Nummern und „Set Invoice Date on Payment“ müssen aus sein. Bestehende Mappings behalten ihren bisherigen Lebenszyklus.
+
+Im Direktbetrieb bleibt WHMCS die Forderungsquelle. Es entscheidet über Rechnungsstatus, Fälligkeit, Mahnstufe und Zahlung, schreibt aber keine kundenseitige Endrechnung. `EmailPreSend` blockiert die parallele WHMCS-Rechnungs- oder Mahnmail und speichert lediglich die lokale Versandabsicht. `InvoiceCreated`, `InvoicePaymentReminder`, `InvoicePaid`, `InvoiceCancelled`, `InvoiceRefunded` und `UpdateInvoiceTotal` planen kurze, deduplizierte Jobs oder frieren weitere Aktionen ein. Jeder Worker liest WHMCS und das sevDesk-Grunddokument unmittelbar vor dem Write erneut.
+
+Der Direktbetrieb akzeptiert für die Erstausgabe nur `Unpaid` und `Paid`. Bei `Paid` wird eine bereits zugestellte Invoice nicht erneut versandt. Eine Mahnung setzt den unveränderten Primärfingerprint, eine nachweislich zugestellte Grundrechnung, denselben offenen Betrag, Status `Unpaid`, keine Teilzahlung und eine noch nicht erzeugte Mahnstufe voraus. Ein Payment-, Credit-, Refund-, Cancellation- oder Update-Rennen endet vor dem Versand. Es gibt weder automatische Zahlungsbuchung noch einen Mail- oder PDF-Fallback.
+
+Eine unbezahlte, unveränderte und bereits geöffnete Direktbetriebs-Invoice darf hinter dem Storno-Canary über `cancelInvoice` storniert werden. Die erzeugte `SR` wird anhand von Elternbeleg, Kontakt, Betrag und PDF geprüft. Bei ZUGFeRD kommen E-Invoice-Flag, XML-Prüfung und XML-Hash hinzu. Die `SR` wird nur versandt, wenn auch die Grundrechnung nachweislich per sevDesk-Mail zugestellt wurde. Ein unversandtes Draft wird mangels bestätigtem Delete-Vertrag nicht gelöscht, sondern als Aufräumfall angezeigt.
+
+Materielle Änderungen nach Ausgabe, Teilzahlungen, `Paid`, `Refunded`, `Collections`, Chargebacks und Credit-Note-Fälle werden nicht automatisch korrigiert. `UpdateInvoiceTotal` friert noch ausstehende Mahn-, Storno- und Gebührenaktionen ein. Die lokale Prüfhistorie bleibt auch bei ausgeschalteter Synchronisation erhalten, wenn bereits ein Direktbetriebs-Mapping besteht.
+
+### Late Fees und genau eine Erlösquelle
+
+Eine positive, unbesteuerte WHMCS-Position vom Typ `LateFee` ist keine Hosting-Leistung. Mit `late_fee_mode=reminder_then_rule22` wird sie aus der Primär-Invoice entfernt und durch Betrag, Position und WHMCS-Vertrag gehasht. Andere, negative, besteuerte oder veränderte Gebühren stoppen den Ablauf.
+
+sevDesk entscheidet über die konkrete Darstellung seiner `MA`. Der Worker übergibt deshalb keine erfundene Mahnrechnung, sondern ruft den dokumentierten Factory-Pfad auf und prüft danach Eltern-Invoice, Kontakt, Stufe, Frist, `reminderDebit`, `reminderCharge`, `reminderTotal` und PDF centgenau. Ob die Mahngebühr dort bereits buchhalterisch wirksam ist, ist ein Mandanten-Canary und keine Annahme des Codes.
+
+Das Setup verlangt genau eine Buchhaltungsquelle:
+
+- `reminder`: nur nach einem Canary, der die Gebühr in der `MA` und ihre buchhalterische Wirkung bestätigt;
+- `rule22_voucher`: nach Zahlung ein separater positiver Revenue-Voucher mit Rule 22, 0 %, aktuellem `REVENUE`-Konto aus `ReceiptGuidance` und Markerbezug zur WHMCS-Invoice.
+
+Bei der zweiten Variante ist die `MA` nur Mahndokument. Der Rule-22-Voucher bleibt mailfrei und besitzt bewusst keinen Kunden-PDF-Vertrag. Bei der ersten Variante wird kein zusätzlicher Gebührenvoucher erzeugt. Eine Cancellation mit einer bereits erzeugten Gebühren-Mahnung bleibt unabhängig von der Buchhaltungsquelle ein Prüffall, solange kein bestätigter Weg auch die Gebührenforderung und das Mahndokument ausgleicht.
+
+Der Buchungsassistent darf eine Zahlung nicht vollständig auf die um Late Fees verkürzte Grundrechnung buchen. Sobald eine aktuelle Late Fee oder ein zugehöriger Gebührenvoucher besteht, verlangt er eine manuelle Aufteilung.
+
 ## Architekturentscheidung: WHMCS-Sammelzahlungen und Invoice-Rabatte
 
 **Status:** implementiert, jeder Rabatt-Write bleibt bis zum Canary seiner konkreten Capability gesperrt.
@@ -136,7 +165,7 @@ Diese Form ist eine bewusst enge Architekturkorrektur. Im Rule-1-Live-Canary bes
 
 Alle fünf Rabatt-Gates sind bei Installation und Upgrade aus. Die Settings für Rules 1, 17 und 19 enthalten nach der Bestätigung den exakten Capability-Key statt eines einfachen `on`; Rule 19 speichert den geprüften Zielsteuersatz zusätzlich. Der deutsche Rule-1-Fall und die bestätigte EU-B2C-Inlandsbesteuerung besitzen getrennte Settings. Gleiche Rule und gleicher Steuersatz reichen nicht aus, weil auch Steuerprofil und Länderklasse zum Vertrag gehören. Ein Wechsel des WHMCS-Steuermodus macht den gespeicherten Schlüssel ungültig. Der Worker friert diesen Capability-Key und einen SHA-256 über Anzahl, Text, Betrag, Typ, Relation, Steuerkennzeichen, Netto-/Bruttomodus und Steuersatz vor `invoice_write_requested` ein. Ein älterer Rule-11-Job ohne Capability-Key darf nur vor einem möglichen Write um den deterministisch gleichen Schlüssel ergänzt werden. Nach einem möglichen Write führt ein fehlender oder abweichender Schlüssel zu `ambiguous`.
 
-Der Rabatt-Fingerprint steht außerdem als `[WHMCS-DISCOUNT:<sha256>]` neben dem normalen Invoice-Marker. Readback und Recovery verlangen Marker, Capability-Key, alle positiven und negativen Positionen sowie `sumNet`, `sumTax` und `sumGross` exakt in Minor Units. `sumDiscounts` muss numerisch 0 sein, weil der Rabatt vollständig in den Positionen steckt. Eine Drift führt nach einem möglichen Write zu `ambiguous`. Mehrere Rabatte, andere negative Positionen, `LateFee` und E-Rechnungen mit Rabatt bleiben blockiert.
+Der Rabatt-Fingerprint steht außerdem als `[WHMCS-DISCOUNT:<sha256>]` neben dem normalen Invoice-Marker. Readback und Recovery verlangen Marker, Capability-Key, alle positiven und negativen Positionen sowie `sumNet`, `sumTax` und `sumGross` exakt in Minor Units. `sumDiscounts` muss numerisch 0 sein, weil der Rabatt vollständig in den Positionen steckt. Eine Drift führt nach einem möglichen Write zu `ambiguous`. Mehrere Rabatte, andere negative Positionen, eine nicht getrennte oder veränderte `LateFee` und E-Rechnungen mit Rabatt bleiben blockiert.
 
 Die drei Dokumentsummen sind kein reiner Rabattvertrag. Auch eine rabattfreie
 Invoice muss `sumNet`, `sumTax` und `sumGross` liefern und centgenau zum
@@ -289,7 +318,7 @@ Der bestehende Pfad bleibt fachlich unverändert:
 
 ### Invoice-Pfad
 
-1. Mapping, Paid-Status, effektive Nummer, Tax Rule, Land, Währung, positive Positionen, optional genau eine freigegebene negative Rabattposition, SevUser und Unity prüfen. Ein Rabatt braucht zusätzlich den passenden Capability-Key und Canary; `LateFee` blockiert unabhängig von Rule und Datum. Für jede Invoice wird genau eine passende `StaticCountry`-ID lesend aufgelöst; kein oder mehr als ein eindeutiger Treffer blockiert vor dem Write. Unmittelbar vor `invoice_write_requested` müssen auch die im Job eingefrorenen SevUser- und Unity-IDs noch im Mandanten vorhanden sein.
+1. Mapping, lifecycle-gemäßen Status, effektive Nummer, Tax Rule, Land, Währung, positive Positionen, optional genau eine freigegebene negative Rabattposition, SevUser und Unity prüfen. Ein Rabatt braucht zusätzlich den passenden Capability-Key und Canary. Eine positive, unbesteuerte `LateFee` darf nur im getrennten rc.9-Pfad aus dem Primärsnapshot entfernt werden; alle anderen Gebühren blockieren. Für jede Invoice wird genau eine passende `StaticCountry`-ID lesend aufgelöst; kein oder mehr als ein eindeutiger Treffer blockiert vor dem Write. Unmittelbar vor `invoice_write_requested` müssen auch die im Job eingefrorenen SevUser- und Unity-IDs noch im Mandanten vorhanden sein.
 2. Kontakt eindeutig auflösen.
 3. normale Invoice `RE` im Draft-Status 100 mit unveränderter WHMCS-Nummer, Marker und vollständiger WHMCS-Rechnungsadresse erstellen. `takeDefaultAddress=false` entkoppelt das Dokument von einer möglicherweise fehlenden sevDesk-Kontaktadresse; der bestehende Kontakt wird nicht geändert. Vor dem Write werden nur Länder-ID und PII-freier Adresshash eingefroren.
 4. Invoice und Positionen erneut lesen; ID, Nummer, Kontakt, Rule, Status, Währung, Netto/Brutto, Empfängeradresse, Positionen und Summen exakt vergleichen. Rule 19 verlangt außerdem einen zum eingefrorenen Zielland passenden Ländercode.
@@ -313,17 +342,32 @@ WHMCS-PDF und WHMCS-Endrechnungslink bleiben maßgeblich. Die sevDesk-Invoice wi
 Der Setupwechsel ist nur zulässig, wenn:
 
 - `export_mode=invoice_only`;
-- WHMCS-Proforma aktiviert ist;
 - ein Adapter-Manifest installiert ist;
 - der Betreiber den Theme-Eingriff ausdrücklich bestätigt;
 - der Invoice-Canary bestätigt ist;
 - Versandkonfiguration und Referenzen gültig sind.
 
-Der Worker prüft Canary, SevUser, Unity sowie bei sevDesk-Hoheit Proforma, aktives Theme-Manifest, Betreiberbestätigung und den eingefrorenen Versandkanal unmittelbar vor dem ersten Invoice-/Versand-Write erneut. Fehlt eine Voraussetzung nach einem möglichen Write, bleibt das Item `ambiguous`; davor wird es ohne Remote-Write beendet.
+Bei `after_payment_proforma` muss WHMCS-Proforma aktiv sein. Bei
+`issue_on_creation` muss sie aus sein; zusätzlich sind Paid-Nummerierung und
+Rechnungsdatum-auf-Zahlung ausgeschaltet, Adaptervertrag v2 und
+Direktbetriebs-Canary bestätigt. Der Worker prüft Canary, SevUser, Unity sowie
+die lifecycle-spezifischen WHMCS-Einstellungen, aktives Theme-Manifest,
+Betreiberbestätigung und den eingefrorenen Versandkanal unmittelbar vor dem
+ersten Invoice-/Versand-Write erneut. Fehlt eine Voraussetzung nach einem
+möglichen Write, bleibt das Item `ambiguous`; davor wird es ohne Remote-Write
+beendet.
 
 Die SevUser-/Unity-Prüfung gehört ausschließlich zum frischen Create-Pfad. Sobald ein Invoice-Write begonnen hat, fragt die Recovery diese veränderlichen Referenzlisten nicht erneut ab, sondern prüft das vorhandene Dokument gegen die eingefrorenen IDs.
 
-Vor Zahlung zeigt WHMCS die normale Proforma. Nach Zahlung zeigt der Adapter zunächst einen neutralen Pending-Zustand. Nach `document_ready_at` ersetzt der sevDesk-Download die sichtbaren WHMCS-Endrechnungslinks. Presenter und PDF-Proxy verlangen dafür zusätzlich den lokalen Status `Paid`; eine später auf `Refunded` gesetzte, zuvor fertiggestellte Rechnung bleibt als Originalbeleg abrufbar. Der Proxy prüft den Status vor und nach dem sevDesk-PDF-Abruf, damit eine zwischenzeitlich zurückgesetzte Rechnung keine Endrechnung ausliefert. Andere Zustände liefern keine sevDesk-Endrechnung aus. Im Failure-Zustand wird ebenfalls keine ungeprüfte Endrechnung angeboten.
+Im Proforma-Lebenszyklus zeigt WHMCS vor Zahlung die normale Proforma. Nach
+Zahlung zeigt der Adapter zunächst einen neutralen Pending-Zustand. Nach
+`document_ready_at` ersetzt der sevDesk-Download die sichtbaren
+WHMCS-Endrechnungslinks. Im Direktbetrieb gilt derselbe Ablauf bereits für
+`Unpaid`; die Invoice wird bei Zahlung nicht erneut zugestellt. Eine später auf
+`Refunded` gesetzte, zuvor fertiggestellte Rechnung bleibt als Originalbeleg
+abrufbar. Der Proxy prüft Status, Lebenszyklus und Eigentümer vor und nach dem
+sevDesk-PDF-Abruf. Im Failure-Zustand wird keine ungeprüfte Endrechnung
+angeboten.
 
 Der Adaptervertrag erhält mindestens `authority`, `state`, `invoiceNumber` und `downloadUrl`. Die gebündelte Twenty-One-Referenzintegration entfernt bei bezahlten Invoice-only-Fällen alle normalen sichtbaren WHMCS-Endrechnungslinks. Ohne WHMCS-Core-Änderung kann ein direkt erratener Core-PDF-Endpunkt technisch weiter bestehen; zugesichert sind Kundenoberfläche und vom Modul gesteuerte E-Mail-Auslieferung.
 
@@ -371,6 +415,7 @@ Bulk- und historische Imports setzen keine automatische Zustellung. Eine später
 | `sevdesk_id` | Remote-ID, weiterhin eindeutig |
 | `document_type` | `voucher`, `invoice` oder bei ungeprüftem Legacy-Bestand `NULL` |
 | `document_authority` | `whmcs`, `sevdesk` oder bei ungeprüftem Legacy-Bestand `NULL` |
+| `invoice_lifecycle_mode` | `after_payment_proforma`, `issue_on_creation` oder bei älterem Bestand `NULL` |
 | `document_number` | bestätigte Dokumentnummer |
 | `document_ready_at` | finale kundenseitig verwendbare Invoice-PDF geprüft |
 | `delivered_at` | Versand-Write nachweisbar abgeschlossen beziehungsweise übergeben |
@@ -384,12 +429,40 @@ Für neue Dokumente des Rewrites ist der Marker Pflicht. Bei Belegen des Origina
 
 Ein Korrektur-Voucher ersetzt das Originalmapping nicht. Seine Marker und Remote-ID bleiben am abgeschlossenen `correction_voucher`-Item. Eine Zahlungsbuchung verändert das Mapping ebenfalls nicht.
 
+### `mod_sevdesk_related_documents`
+
+Die additive Tabelle ordnet Zusatzdokumente einer bestehenden WHMCS-Invoice zu:
+
+| Spalte | Bedeutung |
+| --- | --- |
+| `invoice_id` | interne WHMCS-Invoice-ID |
+| `role` | `reminder`, `cancellation` oder `late_fee_voucher` |
+| `dunning_level` | WHMCS-Mahnstufe 1 bis 3, sonst 0 |
+| `sevdesk_id` | eindeutige Remote-ID |
+| `parent_sevdesk_id` | bestätigte ID der Grundrechnung |
+| `document_number` | von sevDesk bestätigte Dokumentnummer |
+| `amount_minor` | relevanter Betrag in Cent |
+| `fingerprint` | unveränderlicher Forderungs- und Rollenvertrag |
+| `pdf_sha256`, `xml_sha256` | Hashwerte geprüfter Dokumente, keine Kopien |
+| `delivery_status` | `not_requested`, `delivered` oder `ambiguous` |
+| `document_ready_at`, `delivered_at` | technische Abschlusszeitpunkte |
+
+Invoice-ID, Rolle und Mahnstufe sind gemeinsam eindeutig. Die Tabelle enthält keine Anschrift, Mailadresse, PDF, XML oder API-Rohantwort. Die Primärzuordnung bleibt ausschließlich `mod_sevdesk`.
+
 ### `tbladdonmodules`
 
 Funktionale Legacy-Einstellungen bleiben erhalten. Hinzu kommen insbesondere:
 
 - `export_mode`: `voucher_only`, `invoice_for_oss`, `invoice_only`;
 - `document_authority`: `whmcs`, `sevdesk`;
+- `invoice_lifecycle_mode`: `after_payment_proforma`, `issue_on_creation`;
+- `dunning_mode`: `off`, `whmcs_schedule_sevdesk_delivery`;
+- `late_fee_mode`: `blocked`, `reminder_then_rule22`;
+- `late_fee_accounting_source`: `rule22_voucher`, `reminder`;
+- `direct_invoice_canary_confirmed`, `dunning_canary_confirmed`, `cancellation_canary_confirmed`;
+- `e_invoice_cancellation_canary_confirmed`;
+- `late_fee_rule22_canary_confirmed`, `late_fee_reminder_accounting_canary_confirmed`;
+- `late_fee_rule22_account_datev_id`;
 - `oss_profile`: `blocked`, `rule19_digital_services_confirmed`;
 - `invoice_canary_confirmed`;
 - `small_business_invoice_canary_confirmed`;
@@ -403,6 +476,8 @@ Funktionale Legacy-Einstellungen bleiben erhalten. Hinzu kommen insbesondere:
 - `invoice_delivery_channel`;
 - `whmcs_invoice_email_template`;
 - `sevdesk_email_subject`, `sevdesk_email_body`;
+- `sevdesk_reminder_subject`, `sevdesk_reminder_body`;
+- `sevdesk_cancellation_subject`, `sevdesk_cancellation_body`;
 - `theme_adapter_confirmed`;
 - `customer_number_contact_creation_confirmed` als standardmäßig deaktiviertes Gate für neue Kontakte nach leerer exakter Kundennummernsuche.
 
@@ -410,7 +485,7 @@ Operative Werte werden ausschließlich über die CSRF-geschützte Setupseite ge�
 
 ## Persistente Jobdaten
 
-Die vorhandenen Tabellen `mod_sevdesk_jobs` und `mod_sevdesk_job_items` bleiben ausreichend. Neue Exporte verwenden `action=export_document`. `export_voucher` und `reconcile_voucher` bleiben für bestehende Jobs und Recovery lesbar.
+Die vorhandenen Tabellen `mod_sevdesk_jobs` und `mod_sevdesk_job_items` bleiben ausreichend. Neue Exporte verwenden `action=export_document`. `export_voucher` und `reconcile_voucher` bleiben für bestehende Jobs und Recovery lesbar. Zusatzdokumente verwenden `create_invoice_reminder`, `cancel_invoice` und `export_late_fee_voucher`.
 
 Der Dedupe-Key bleibt absichtlich `export_voucher:<invoiceId>` für beide neuen Zieltypen. Dadurch können ein alter Voucherjob und ein neuer Invoicejob nie parallel unterschiedliche Remote-Dokumente für dieselbe WHMCS-Invoice erzeugen.
 
@@ -520,6 +595,31 @@ finished
 
 Booking und Korrektur behalten `booking_write_requested`, `booking_completed`, `correction_voucher_write_requested`, `correction_voucher_created` und `correction_mapping_persisted`.
 
+Mahn-, Storno- und Gebührenjobs verwenden:
+
+```text
+reminder_create_requested
+reminder_created
+reminder_verified
+reminder_mapping_persisted
+reminder_delivery_write_requested
+reminder_delivery_delivered
+
+cancellation_write_requested
+cancellation_created
+cancellation_verified
+cancellation_mapping_persisted
+cancellation_delivery_write_requested
+cancellation_delivery_delivered
+
+late_fee_voucher_write_requested
+late_fee_voucher_created
+late_fee_voucher_verified
+late_fee_voucher_mapping_persisted
+```
+
+Ihre Dedupe-Keys enthalten Invoice-ID, Rolle, Mahnstufe und Forderungsfingerprint. Nach einem definitiven, nachweislich abgelehnten Write darf der Handler auf den letzten sicheren Checkpoint zurückgehen. Nach Timeout, Transportabbruch oder einer unklaren Mailantwort bleibt der riskante Checkpoint samt Dedupe-Key erhalten und die Recovery liest ausschließlich.
+
 `invoice_payment_pending` ist kein Remote-Write-Checkpoint. Er wird nur im Hybridmodus verwendet, wenn ein Rule-19-Ziel beim ersten Lauf noch unbezahlt ist. Trifft `InvoicePaid` ein, während das gemeinsame Cross-Type-Dedupe-Item noch läuft, markiert der Enqueue-Versuch den aktiven Besitzer unter derselben Datenbanktransaktion. Beendet dieser gerade den Pending-Lauf, wird dasselbe Item einmal mit weiterhin reserviertem Dedupe-Key in `retry_wait` gestellt. Trifft das Ereignis erst nach Freigabe des Keys ein, kann es selbst ein neues Item anlegen. Dadurch geht der Zahlungsübergang nicht verloren und es entsteht trotzdem nie ein paralleles Voucher-/Invoice-Ziel.
 
 Vor einem sicher wiederholbaren Schritt darf eine abgelaufene Lease zu `retry_wait` führen. Nach einem möglicherweise ausgeführten Create-, Open-, Book- oder Versand-Write wird ausschließlich gelesen. Kontaktprüfung darf dabei einen späteren Invoice-Checkpoint nicht auf `contact_linked` zurückstufen. Kann der Ausgang nicht exakt bewiesen werden, bleibt das Item `ambiguous`; der Dedupe-Key bleibt reserviert.
@@ -571,7 +671,8 @@ WHMCS-Kundenguthaben bleibt ein eigener Sonderfall. Eine vollständig bewiesene 
 
 | Fehler | Verhalten |
 | --- | --- |
-| Invoice-Ziel vor Zahlung oder ohne auswertbare effektive Nummer | `skipped`/blockiert, kein Remote-Write |
+| Invoice-Ziel im Proforma-Lebenszyklus vor Zahlung oder ohne auswertbare effektive Nummer | `skipped`/blockiert, kein Remote-Write |
+| Direktbetriebs-Invoice mit anderem Status als `Unpaid`/`Paid` | blockiert; nach möglichem Write `ambiguous` |
 | Rule 19 ohne Profil/Canary oder in `voucher_only` | lokaler Prüffall, kein Remote-Write |
 | Rule 18/20, gemischt oder unklar | `permanent_failed` mit verständlichem Code |
 | Mapping ohne Typ | Legacy-Review; kein typabhängiger Write |
@@ -582,7 +683,8 @@ WHMCS-Kundenguthaben bleibt ein eigener Sonderfall. Eine vollständig bewiesene 
 | exakt bewiesene Originalrechnung mit Sammelguthaben | voller Dokumentbrutto; kombinierte Zahlung bleibt manuell zuzuordnen |
 | unklare Guthaben- oder Sammelzahlungsstruktur | `permanent_failed` vor Remote-I/O |
 | PromoHosting-Rabatt ohne passende Rule-/Rate-Capability, ohne Canary oder mit Schlüssel-/Fingerprint-/Summendrift | blockiert beziehungsweise nach möglichem Write `ambiguous` |
-| `LateFee` | unabhängig von Rule und Datum vor dem Remote-Write blockiert |
+| zulässige positive, unbesteuerte `LateFee` | aus Primär-Invoice entfernt; genau eine bestätigte `MA`- oder Rule-22-Erlösquelle |
+| andere oder veränderte `LateFee` | vor dem Remote-Write blockiert |
 | ZUGFeRD mit angewendetem Guthaben | blockiert, kein PDF-Fallback |
 | 400/409/422 | `permanent_failed`, Daten/Tax/Lifecycle prüfen |
 | 401/403 | globaler Auth-Alarm; keine weiteren Claims bis erfolgreicher Setup-Read |

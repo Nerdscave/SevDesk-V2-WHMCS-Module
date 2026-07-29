@@ -22,6 +22,8 @@ final class DocumentTargetResolver
 
     public const DELIVERY_SEVDESK = 'sevdesk';
     public const DELIVERY_WHMCS_TEMPLATE = 'whmcs_template';
+    public const LIFECYCLE_AFTER_PAYMENT_PROFORMA = 'after_payment_proforma';
+    public const LIFECYCLE_ISSUE_ON_CREATION = 'issue_on_creation';
 
     /** @var list<string> */
     private const INVOICE_TAX_RULES = ['1', '2', '3', '4', '5', '11', '17', '19'];
@@ -30,6 +32,7 @@ final class DocumentTargetResolver
         private readonly string $exportMode,
         private readonly string $documentAuthority,
         private readonly string $ossProfile,
+        private readonly bool $allowInvoiceBeforePayment = false,
     ) {
         if (
             !in_array($exportMode, [
@@ -212,7 +215,7 @@ final class DocumentTargetResolver
         string $code,
         string $message,
     ): DocumentTargetDecision {
-        if (!$invoicePaid) {
+        if (!$invoicePaid && !$this->allowInvoiceBeforePayment) {
             return $this->block(
                 $taxRuleId,
                 'invoice_requires_payment',

@@ -154,6 +154,8 @@ final class ExportJobHandler
                 $invoiceContract = $this->whmcs->invoiceExportContract($invoiceId);
                 $contractFailure = $this->freezeWhmcsInvoiceContract(
                     $invoiceContract['fingerprint'],
+                    $invoiceContract['primaryFingerprint'],
+                    $invoiceContract['lateFee'],
                     $candidate,
                     $item,
                     $persistCheckpoint,
@@ -263,7 +265,10 @@ final class ExportJobHandler
             $ordinaryVoucherCreditConfirmed = false;
             $fullGrossVoucherConfirmation = $this->creditTreatmentConfirmed($candidate, $item);
             $rawItemTypes = self::rawInvoiceItemTypes($rawInvoice);
-            if (InvoiceItemExportPolicy::containsLateFee($rawItemTypes)) {
+            if (
+                InvoiceItemExportPolicy::containsLateFee($rawItemTypes)
+                && !$this->lateFeeSeparationEnabled()
+            ) {
                 return $this->runtimePreflightFailure(
                     $item,
                     InvoiceItemExportPolicy::LATE_FEE_MESSAGE,
@@ -563,6 +568,8 @@ final class ExportJobHandler
             if (!$invoiceContractFrozen) {
                 $contractFailure = $this->freezeWhmcsInvoiceContract(
                     $invoiceContract['fingerprint'],
+                    $invoiceContract['primaryFingerprint'],
+                    $invoiceContract['lateFee'],
                     $candidate,
                     $item,
                     $persistCheckpoint,
@@ -687,7 +694,31 @@ final class ExportJobHandler
                 return $discountPreflight;
             }
 
-            if ($target->documentType === DocumentTargetDecision::DOCUMENT_INVOICE && $status !== 'Paid') {
+            if (
+                $target->documentType === DocumentTargetDecision::DOCUMENT_INVOICE
+                && $this->directIssueOnCreationSelected($candidate)
+                && !in_array($status, ['Unpaid', 'Paid'], true)
+            ) {
+                if (JobRepository::isRiskyCheckpoint((string) ($item->checkpoint ?? ''))) {
+                    return JobOutcome::ambiguous(
+                        'Der WHMCS-Status änderte sich nach einem möglichen Direkt-Invoice-Write. '
+                            . 'Der Remote-Zustand muss zuerst abgeglichen werden.',
+                        (string) ($item->checkpoint ?? 'invoice_write_requested'),
+                        $completeRemoteId,
+                        errorCode: 'direct_invoice_status_changed_after_write',
+                    );
+                }
+
+                return JobOutcome::permanentFailure(
+                    'Der Direktbetrieb verarbeitet bei der Ausgabe nur offene oder bereits bezahlte Rechnungen.',
+                    errorCode: 'direct_invoice_status_not_exportable',
+                );
+            }
+            if (
+                $target->documentType === DocumentTargetDecision::DOCUMENT_INVOICE
+                && $status !== 'Paid'
+                && !$this->directIssueOnCreationSelected($candidate)
+            ) {
                 if (JobRepository::isRiskyCheckpoint((string) ($item->checkpoint ?? ''))) {
                     return JobOutcome::ambiguous(
                         'Die Rechnung ist nach einem möglichen Invoice-Write nicht mehr vollständig bezahlt. '
@@ -723,7 +754,7 @@ final class ExportJobHandler
                 );
             }
 
-            return $this->exportInvoice(
+            $invoiceOutcome = $this->exportInvoice(
                 $item,
                 $candidate,
                 $initialMassPaymentStructure,
@@ -735,6 +766,19 @@ final class ExportJobHandler
                 $target,
                 $persistCheckpoint,
             );
+            if ($invoiceOutcome->status === 'succeeded') {
+                $queueFailure = $this->queueLateFeeVoucher(
+                    $invoice,
+                    $invoiceContract,
+                    $candidate,
+                    $invoiceOutcome->sevdeskId,
+                );
+                if ($queueFailure !== null) {
+                    return $queueFailure;
+                }
+            }
+
+            return $invoiceOutcome;
         } catch (InvoiceItemNormalizationException $exception) {
             return $this->discountPreflightFailure(
                 $item,
@@ -2013,6 +2057,11 @@ final class ExportJobHandler
             'targetDocumentType' => $snapshot['documentType'],
             'targetDocumentAuthority' => $snapshot['documentAuthority'],
             'targetExportMode' => $snapshot['exportMode'],
+            'targetInvoiceLifecycleMode' => self::invoiceLifecycleMode($candidate),
+            'targetLateFeeMode' => (string) (
+                $candidate['requestedLateFeeMode']
+                ?? InvoiceItemExportPolicy::LATE_FEE_MODE_BLOCKED
+            ),
             'targetOssProfile' => $snapshot['ossProfile'],
             'targetEuB2cMode' => self::documentEuB2cMode(
                 $candidate,
@@ -2178,8 +2227,25 @@ final class ExportJobHandler
                 'whmcs_email_attachment_unsupported',
             );
         }
-        $authorityReady = $this->whmcs->proformaInvoicingEnabled()
-            && $this->whmcs->themeAdapterManifestInstalled()
+        $directLifecycle = self::invoiceLifecycleMode($candidate)
+            === DocumentTargetResolver::LIFECYCLE_ISSUE_ON_CREATION;
+        if ($directLifecycle && $channel !== 'sevdesk') {
+            return $this->runtimePreflightFailure(
+                $item,
+                'Der Direktbetrieb darf ausschließlich den geprüften sevdesk-Mailkanal verwenden.',
+                'direct_invoice_delivery_channel_invalid',
+            );
+        }
+        $lifecycleReady = $directLifecycle
+            ? (
+                !$this->whmcs->proformaInvoicingEnabled()
+                && !$this->whmcs->sequentialPaidInvoiceNumberingEnabled()
+                && !$this->whmcs->setInvoiceDateOnPaymentEnabled()
+                && $this->config->bool('direct_invoice_canary_confirmed')
+            )
+            : $this->whmcs->proformaInvoicingEnabled();
+        $authorityReady = $lifecycleReady
+            && $this->whmcs->themeAdapterManifestInstalled($directLifecycle ? 2 : 1)
             && $this->config->bool('theme_adapter_confirmed')
             && in_array($channel, ['sevdesk', 'whmcs_template'], true);
         if ($authorityReady && $channel === 'whmcs_template') {
@@ -2196,7 +2262,7 @@ final class ExportJobHandler
         if (!$authorityReady) {
             return $this->runtimePreflightFailure(
                 $item,
-                'Proforma, Theme-Adapter und eingefrorener Versandkanal wurden vor dem Invoice-Write nicht bestätigt.',
+                'Lebenszyklus, WHMCS-Nummerierung, Theme-Adapter und Versandkanal wurden vor dem Invoice-Write nicht bestätigt.',
                 'sevdesk_authority_prerequisites_missing',
             );
         }
@@ -2228,6 +2294,18 @@ final class ExportJobHandler
             DocumentTargetResolver::MODE_VOUCHER_ONLY,
         )
             && $target->documentAuthority === $currentAuthority
+            && self::invoiceLifecycleMode($candidate) === (string) $this->config->get(
+                'invoice_lifecycle_mode',
+                DocumentTargetResolver::LIFECYCLE_AFTER_PAYMENT_PROFORMA,
+            )
+            && (string) (
+                $candidate['targetLateFeeMode']
+                ?? $candidate['requestedLateFeeMode']
+                ?? InvoiceItemExportPolicy::LATE_FEE_MODE_BLOCKED
+            ) === (string) $this->config->get(
+                'late_fee_mode',
+                InvoiceItemExportPolicy::LATE_FEE_MODE_BLOCKED,
+            )
             && $target->ossProfile === (string) $this->config->get(
                 'oss_profile',
                 DocumentTargetResolver::OSS_BLOCKED,
@@ -2366,7 +2444,50 @@ final class ExportJobHandler
             $mode,
             $authority,
             $ossProfile,
+            self::invoiceLifecycleMode($candidate)
+                === DocumentTargetResolver::LIFECYCLE_ISSUE_ON_CREATION,
         );
+    }
+
+    /** @param array<string,mixed> $candidate */
+    private function directIssueOnCreationSelected(array $candidate): bool
+    {
+        return self::invoiceLifecycleMode($candidate)
+                === DocumentTargetResolver::LIFECYCLE_ISSUE_ON_CREATION
+            && self::documentContextValue(
+                $candidate,
+                'targetExportMode',
+                'requestedExportMode',
+                (string) $this->config->get(
+                    'export_mode',
+                    DocumentTargetResolver::MODE_VOUCHER_ONLY,
+                ),
+            ) === DocumentTargetResolver::MODE_INVOICE_ONLY
+            && self::documentContextValue(
+                $candidate,
+                'targetDocumentAuthority',
+                'requestedDocumentAuthority',
+                (string) $this->config->get(
+                    'document_authority',
+                    DocumentTargetResolver::AUTHORITY_WHMCS,
+                ),
+            ) === DocumentTargetResolver::AUTHORITY_SEVDESK;
+    }
+
+    /** @param array<string,mixed> $candidate */
+    private static function invoiceLifecycleMode(array $candidate): string
+    {
+        $value = $candidate['targetInvoiceLifecycleMode']
+            ?? $candidate['requestedInvoiceLifecycleMode']
+            ?? DocumentTargetResolver::LIFECYCLE_AFTER_PAYMENT_PROFORMA;
+
+        return is_string($value)
+            && in_array($value, [
+                DocumentTargetResolver::LIFECYCLE_AFTER_PAYMENT_PROFORMA,
+                DocumentTargetResolver::LIFECYCLE_ISSUE_ON_CREATION,
+            ], true)
+                ? $value
+                : DocumentTargetResolver::LIFECYCLE_AFTER_PAYMENT_PROFORMA;
     }
 
     public static function statusIsExportable(string $status, bool $onlyPaid): bool
@@ -2773,27 +2894,96 @@ final class ExportJobHandler
      * Persist only a SHA-256 digest of the WHMCS invoice/contact contract. A
      * resumed job after a possible write may never invent this snapshot.
      *
+     * @param null|array{amountMinor:int,fingerprint:string,itemCount:int} $currentLateFee
      * @param array<string,mixed> $candidate
      * @param callable(string,array<string,scalar|null>):bool $checkpoint
      */
     private function freezeWhmcsInvoiceContract(
         string $currentFingerprint,
+        string $currentPrimaryFingerprint,
+        ?array $currentLateFee,
         array $candidate,
         object $item,
         callable $checkpoint,
     ): ?JobOutcome {
         $currentFingerprint = strtolower(trim($currentFingerprint));
+        $currentPrimaryFingerprint = strtolower(trim($currentPrimaryFingerprint));
         $storedFingerprint = strtolower(trim((string) (
             $candidate['whmcsInvoiceContractFingerprint']
             ?? ''
         )));
+        $storedPrimaryFingerprint = strtolower(trim((string) (
+            $candidate['primaryInvoiceContractFingerprint']
+            ?? ''
+        )));
         $checkpointName = (string) ($item->checkpoint ?? '');
         $risky = JobRepository::isRiskyCheckpoint($checkpointName);
-        if (preg_match('/^[a-f0-9]{64}$/', $currentFingerprint) !== 1) {
+        if (
+            preg_match('/^[a-f0-9]{64}$/', $currentFingerprint) !== 1
+            || preg_match('/^[a-f0-9]{64}$/', $currentPrimaryFingerprint) !== 1
+        ) {
+            return $this->whmcsInvoiceContractChangedOutcome($item);
+        }
+        if (
+            $storedPrimaryFingerprint !== ''
+            && !hash_equals($storedPrimaryFingerprint, $currentPrimaryFingerprint)
+        ) {
+            return $this->whmcsInvoiceContractChangedOutcome($item);
+        }
+        $currentLateFeeFingerprint = strtolower(trim((string) ($currentLateFee['fingerprint'] ?? '')));
+        $currentLateFeeAmount = $currentLateFee === null
+            ? null
+            : ($currentLateFee['amountMinor'] ?? null);
+        $storedHasLateFee = array_key_exists('lateFeeFingerprint', $candidate)
+            || array_key_exists('lateFeeAmountMinor', $candidate);
+        if (
+            $currentLateFee !== null
+            && (
+                preg_match('/^[a-f0-9]{64}$/', $currentLateFeeFingerprint) !== 1
+                || !is_int($currentLateFeeAmount)
+                || $currentLateFeeAmount <= 0
+            )
+        ) {
+            return $this->whmcsInvoiceContractChangedOutcome($item);
+        }
+        if ($storedHasLateFee) {
+            $storedLateFeeFingerprint = strtolower(trim((string) (
+                $candidate['lateFeeFingerprint'] ?? ''
+            )));
+            $storedLateFeeAmount = $candidate['lateFeeAmountMinor'] ?? null;
+            if (
+                $currentLateFee === null
+                || preg_match('/^[a-f0-9]{64}$/', $storedLateFeeFingerprint) !== 1
+                || !is_int($storedLateFeeAmount)
+                || !hash_equals($storedLateFeeFingerprint, $currentLateFeeFingerprint)
+                || $storedLateFeeAmount !== $currentLateFeeAmount
+            ) {
+                return $this->whmcsInvoiceContractChangedOutcome($item);
+            }
+        } elseif ($currentLateFee !== null && $risky) {
+            return JobOutcome::ambiguous(
+                'Nach einem möglichen Remote-Write fehlt der eingefrorene Late-Fee-Vertrag.',
+                $checkpointName,
+                isset($item->sevdesk_id) ? (string) $item->sevdesk_id : null,
+                errorCode: 'late_fee_snapshot_missing_after_write',
+            );
+        }
+
+        if (
+            $storedFingerprint !== ''
+            && (
+                preg_match('/^[a-f0-9]{64}$/', $storedFingerprint) !== 1
+                || !hash_equals($storedFingerprint, $currentFingerprint)
+            )
+        ) {
             return $this->whmcsInvoiceContractChangedOutcome($item);
         }
 
-        if ($storedFingerprint === '') {
+        if (
+            $storedFingerprint === ''
+            || ($storedPrimaryFingerprint === '' && !$risky)
+            || ($currentLateFee !== null && !$storedHasLateFee)
+        ) {
             if ($risky) {
                 return JobOutcome::ambiguous(
                     'Nach einem möglichen Remote-Write fehlt der eingefrorene WHMCS-Rechnungsvertrag. '
@@ -2803,12 +2993,15 @@ final class ExportJobHandler
                     errorCode: 'whmcs_invoice_contract_snapshot_missing_after_write',
                 );
             }
-            if (
-                !$checkpoint(
-                    $checkpointName !== '' ? $checkpointName : 'queued',
-                    ['whmcsInvoiceContractFingerprint' => $currentFingerprint],
-                )
-            ) {
+            $context = [
+                'whmcsInvoiceContractFingerprint' => $currentFingerprint,
+                'primaryInvoiceContractFingerprint' => $currentPrimaryFingerprint,
+            ];
+            if ($currentLateFee !== null) {
+                $context['lateFeeFingerprint'] = $currentLateFeeFingerprint;
+                $context['lateFeeAmountMinor'] = $currentLateFeeAmount;
+            }
+            if (!$checkpoint($checkpointName !== '' ? $checkpointName : 'queued', $context)) {
                 return JobOutcome::permanentFailure(
                     'Der unveränderliche WHMCS-Rechnungsvertrag konnte vor dem ersten Remote-Write '
                         . 'nicht gespeichert werden.',
@@ -2819,11 +3012,97 @@ final class ExportJobHandler
             return null;
         }
 
+        return null;
+    }
+
+    private function lateFeeSeparationEnabled(): bool
+    {
+        return (string) $this->config->get('export_mode', DocumentTargetResolver::MODE_VOUCHER_ONLY)
+                === DocumentTargetResolver::MODE_INVOICE_ONLY
+            && (string) $this->config->get(
+                'late_fee_mode',
+                InvoiceItemExportPolicy::LATE_FEE_MODE_BLOCKED,
+            ) === InvoiceItemExportPolicy::LATE_FEE_MODE_REMINDER_THEN_RULE22;
+    }
+
+    /**
+     * The primary Invoice is already mapped at this point. Queueing the
+     * separate fee document is local and deduplicated; it never sends mail.
+     *
+     * @param array<string,mixed> $contract
+     * @param array<string,mixed> $candidate
+     */
+    private function queueLateFeeVoucher(
+        InvoiceSnapshot $invoice,
+        array $contract,
+        array $candidate,
+        ?string $primaryRemoteId,
+    ): ?JobOutcome {
+        $lateFee = is_array($contract['lateFee'] ?? null) ? $contract['lateFee'] : null;
+        if ($lateFee === null) {
+            return null;
+        }
         if (
-            preg_match('/^[a-f0-9]{64}$/', $storedFingerprint) !== 1
-            || !hash_equals($storedFingerprint, $currentFingerprint)
+            (string) ($contract['status'] ?? '') === 'Unpaid'
+            && $this->directIssueOnCreationSelected($candidate)
         ) {
-            return $this->whmcsInvoiceContractChangedOutcome($item);
+            // The direct Invoice is issued now, but the separated fee remains
+            // an open WHMCS claim. InvoicePaid will enqueue its mail-free
+            // accounting document with the immutable payment date.
+            return null;
+        }
+        $feeFingerprint = strtolower(trim((string) ($lateFee['fingerprint'] ?? '')));
+        $feeAmount = $lateFee['amountMinor'] ?? null;
+        if (
+            !$this->lateFeeSeparationEnabled()
+            || preg_match('/^[a-f0-9]{64}$/', $feeFingerprint) !== 1
+            || !is_int($feeAmount)
+            || $feeAmount <= 0
+            || preg_match('/^[1-9]\d*$/', (string) $primaryRemoteId) !== 1
+        ) {
+            return JobOutcome::ambiguous(
+                'Die Grundrechnung ist erstellt, der getrennte Mahngebührenauftrag konnte aber nicht sicher aufgebaut werden.',
+                'mapping_persisted',
+                $primaryRemoteId,
+                errorCode: 'late_fee_followup_context_invalid',
+            );
+        }
+        $voucherDate = $this->whmcs->invoiceDatePaid($invoice->invoiceId);
+        if ($voucherDate === null) {
+            return JobOutcome::ambiguous(
+                'Die Grundrechnung ist erstellt, das unveränderliche Zahlungsdatum für den '
+                    . 'Mahngebührenbeleg fehlt jedoch.',
+                'mapping_persisted',
+                $primaryRemoteId,
+                errorCode: 'late_fee_payment_date_missing',
+            );
+        }
+        try {
+            $this->jobs->create('late_fee_accounting', [[
+                'invoice_id' => $invoice->invoiceId,
+                'action' => 'export_late_fee_voucher',
+                'dedupe_key' => 'late_fee_voucher:' . $invoice->invoiceId . ':' . $feeFingerprint,
+                'candidate' => [
+                    'whmcsInvoiceContractFingerprint' => (string) $contract['fingerprint'],
+                    'primaryInvoiceContractFingerprint' => (string) $contract['primaryFingerprint'],
+                    'lateFeeFingerprint' => $feeFingerprint,
+                    'lateFeeAmountMinor' => $feeAmount,
+                    'lateFeeVoucherDate' => $voucherDate,
+                    'parentRemoteId' => $primaryRemoteId,
+                    'historicalBackfill' => self::truthy($candidate['historicalBackfill'] ?? false),
+                    'delivery_requested' => false,
+                ],
+            ]], [
+                'trigger' => 'verified_primary_invoice',
+                'mail_free' => true,
+            ]);
+        } catch (Throwable) {
+            return JobOutcome::ambiguous(
+                'Die Grundrechnung ist erstellt, der lokale mailfreie Gebührenauftrag konnte aber nicht gespeichert werden.',
+                'mapping_persisted',
+                $primaryRemoteId,
+                errorCode: 'late_fee_followup_enqueue_failed',
+            );
         }
 
         return null;

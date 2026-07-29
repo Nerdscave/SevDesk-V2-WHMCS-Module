@@ -17,6 +17,8 @@ final class MappingRepository
     public const DOCUMENT_TYPE_INVOICE = 'invoice';
     public const DOCUMENT_AUTHORITY_WHMCS = 'whmcs';
     public const DOCUMENT_AUTHORITY_SEVDESK = 'sevdesk';
+    public const LIFECYCLE_AFTER_PAYMENT_PROFORMA = 'after_payment_proforma';
+    public const LIFECYCLE_ISSUE_ON_CREATION = 'issue_on_creation';
 
     /** @var list<string> */
     private const DOCUMENT_TYPES = [self::DOCUMENT_TYPE_VOUCHER, self::DOCUMENT_TYPE_INVOICE];
@@ -25,6 +27,12 @@ final class MappingRepository
     private const DOCUMENT_AUTHORITIES = [
         self::DOCUMENT_AUTHORITY_WHMCS,
         self::DOCUMENT_AUTHORITY_SEVDESK,
+    ];
+
+    /** @var list<string> */
+    private const INVOICE_LIFECYCLES = [
+        self::LIFECYCLE_AFTER_PAYMENT_PROFORMA,
+        self::LIFECYCLE_ISSUE_ON_CREATION,
     ];
 
     public function findCompleteByInvoice(int $invoiceId): ?object
@@ -72,12 +80,14 @@ final class MappingRepository
         ?bool $isEInvoice = null,
         ?string $xmlSha256 = null,
         ?string $documentAuthority = null,
+        ?string $invoiceLifecycleMode = null,
     ): void {
         self::validateMappingIds($invoiceId, $sevdeskId);
         $documentType = self::validateDocumentType($documentType);
         $documentNumber = self::validateDocumentNumber($documentNumber);
         $xmlSha256 = self::validateSha256($xmlSha256, 'XML');
         $documentAuthority = self::validateDocumentAuthority($documentAuthority);
+        $invoiceLifecycleMode = self::validateInvoiceLifecycle($invoiceLifecycleMode);
         self::validateDocumentAuthorityForType($documentType, $documentAuthority);
         self::validateEInvoiceMetadata($documentType, $isEInvoice, $xmlSha256);
 
@@ -89,6 +99,7 @@ final class MappingRepository
             $isEInvoice,
             $xmlSha256,
             $documentAuthority,
+            $invoiceLifecycleMode,
         );
     }
 
@@ -221,6 +232,7 @@ final class MappingRepository
         ?bool $isEInvoice = null,
         ?string $xmlSha256 = null,
         ?string $documentAuthority = null,
+        ?string $invoiceLifecycleMode = null,
     ): void {
         Capsule::connection()->transaction(static function () use (
             $invoiceId,
@@ -230,6 +242,7 @@ final class MappingRepository
             $isEInvoice,
             $xmlSha256,
             $documentAuthority,
+            $invoiceLifecycleMode,
         ): void {
             $existing = Capsule::table(Migrator::MAPPING_TABLE)
                 ->where('invoice_id', $invoiceId)
@@ -246,6 +259,9 @@ final class MappingRepository
                         $insert['document_number'] = $documentNumber;
                         if ($documentAuthority !== null) {
                             $insert['document_authority'] = $documentAuthority;
+                        }
+                        if ($invoiceLifecycleMode !== null) {
+                            $insert['invoice_lifecycle_mode'] = $invoiceLifecycleMode;
                         }
                         if ($isEInvoice !== null) {
                             $insert['is_e_invoice'] = $isEInvoice ? 1 : 0;
@@ -284,6 +300,7 @@ final class MappingRepository
                     $documentType,
                     $documentNumber,
                     $documentAuthority,
+                    $invoiceLifecycleMode,
                 );
             if ($documentType !== null) {
                 $currentEInvoice = self::storedNullableBool($existing->is_e_invoice ?? null);
@@ -330,6 +347,7 @@ final class MappingRepository
         string $documentType,
         ?string $documentNumber,
         ?string $documentAuthority,
+        ?string $invoiceLifecycleMode = null,
     ): array {
         $updates = [];
         $currentType = trim((string) ($existing->document_type ?? ''));
@@ -359,6 +377,17 @@ final class MappingRepository
         if ($documentAuthority !== null && $currentAuthority === '') {
             $updates['document_authority'] = $documentAuthority;
         }
+
+        $currentLifecycle = trim((string) ($existing->invoice_lifecycle_mode ?? ''));
+        if (
+            $invoiceLifecycleMode !== null
+            && $currentLifecycle !== ''
+            && $currentLifecycle !== $invoiceLifecycleMode
+        ) {
+            throw new RuntimeException('A different invoice lifecycle already exists for this mapping.');
+        }
+        // A blank lifecycle denotes a pre-RC.9 mapping. It stays blank so a
+        // later setup change cannot retroactively enable delivery or dunning.
 
         return $updates;
     }
@@ -408,6 +437,19 @@ final class MappingRepository
         }
 
         return $documentAuthority;
+    }
+
+    private static function validateInvoiceLifecycle(?string $invoiceLifecycleMode): ?string
+    {
+        if ($invoiceLifecycleMode === null || trim($invoiceLifecycleMode) === '') {
+            return null;
+        }
+        $invoiceLifecycleMode = strtolower(trim($invoiceLifecycleMode));
+        if (!in_array($invoiceLifecycleMode, self::INVOICE_LIFECYCLES, true)) {
+            throw new InvalidArgumentException('Invalid invoice lifecycle mode.');
+        }
+
+        return $invoiceLifecycleMode;
     }
 
     private static function validateDocumentAuthorityForType(
@@ -585,7 +627,8 @@ final class MappingRepository
             ->select([
                 'm.id as mapping_id', 'm.id', 'm.invoice_id', 'm.sevdesk_id',
                 'm.document_type', 'm.document_authority', 'm.document_number', 'm.document_ready_at',
-                'm.delivered_at', 'm.pdf_sha256', 'm.is_e_invoice', 'm.xml_sha256',
+                'm.invoice_lifecycle_mode', 'm.delivered_at', 'm.pdf_sha256',
+                'm.is_e_invoice', 'm.xml_sha256',
                 'i.id as existing_invoice_id', 'i.invoicenum', 'i.date', 'i.status',
             ])
             ->orderByDesc('m.id')

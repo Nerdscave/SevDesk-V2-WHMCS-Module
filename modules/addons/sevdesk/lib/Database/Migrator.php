@@ -15,6 +15,7 @@ final class Migrator
     public const JOBS_TABLE = 'mod_sevdesk_jobs';
     public const ITEMS_TABLE = 'mod_sevdesk_job_items';
     public const PDF_RATE_TABLE = 'mod_sevdesk_pdf_rate_limits';
+    public const RELATED_DOCUMENTS_TABLE = 'mod_sevdesk_related_documents';
 
     public static function up(): void
     {
@@ -27,6 +28,7 @@ final class Migrator
                 $table->string('sevdesk_id', 255)->nullable();
                 $table->string('document_type', 16)->nullable();
                 $table->string('document_authority', 16)->nullable();
+                $table->string('invoice_lifecycle_mode', 32)->nullable();
                 $table->string('document_number', 191)->nullable();
                 $table->dateTime('document_ready_at')->nullable();
                 $table->dateTime('delivered_at')->nullable();
@@ -99,6 +101,40 @@ final class Migrator
             });
         }
 
+        if (!$schema->hasTable(self::RELATED_DOCUMENTS_TABLE)) {
+            $schema->create(self::RELATED_DOCUMENTS_TABLE, static function ($table): void {
+                $table->bigIncrements('id');
+                $table->unsignedInteger('invoice_id');
+                $table->string('role', 32);
+                $table->unsignedSmallInteger('dunning_level')->default(0);
+                $table->string('sevdesk_id', 255);
+                $table->string('parent_sevdesk_id', 255);
+                $table->string('document_number', 191)->nullable();
+                $table->integer('amount_minor');
+                $table->string('fingerprint', 64);
+                $table->string('pdf_sha256', 64)->nullable();
+                $table->string('xml_sha256', 64)->nullable();
+                $table->string('delivery_status', 32)->default('not_requested');
+                $table->dateTime('document_ready_at')->nullable();
+                $table->dateTime('delivered_at')->nullable();
+                $table->dateTime('created_at');
+                $table->dateTime('updated_at');
+                $table->unique(
+                    ['invoice_id', 'role', 'dunning_level'],
+                    'mod_sevdesk_related_invoice_role_level_unique',
+                );
+                $table->unique('sevdesk_id', 'mod_sevdesk_related_remote_unique');
+                $table->index(['invoice_id', 'role'], 'mod_sevdesk_related_invoice_role');
+            });
+        } else {
+            if (!$schema->hasColumn(self::RELATED_DOCUMENTS_TABLE, 'xml_sha256')) {
+                $schema->table(self::RELATED_DOCUMENTS_TABLE, static function ($table): void {
+                    $table->string('xml_sha256', 64)->nullable()->after('pdf_sha256');
+                });
+            }
+            self::ensureRelatedDocumentIndexes();
+        }
+
         (new Config())->ensureDefaults();
     }
 
@@ -109,7 +145,7 @@ final class Migrator
         foreach (
             [
                 'document_type', 'document_authority', 'document_number', 'document_ready_at', 'delivered_at',
-                'pdf_sha256', 'is_e_invoice', 'xml_sha256',
+                'pdf_sha256', 'is_e_invoice', 'xml_sha256', 'invoice_lifecycle_mode',
             ] as $column
         ) {
             if (!$schema->hasColumn(self::MAPPING_TABLE, $column)) {
@@ -144,6 +180,9 @@ final class Migrator
             }
             if (in_array('xml_sha256', $missing, true)) {
                 $table->string('xml_sha256', 64)->nullable();
+            }
+            if (in_array('invoice_lifecycle_mode', $missing, true)) {
+                $table->string('invoice_lifecycle_mode', 32)->nullable();
             }
         });
     }
@@ -191,7 +230,51 @@ final class Migrator
         }
     }
 
-    /** @return array{tables:bool,missing_columns:list<string>,mapping_invoice_unique:bool,mapping_remote_unique:bool,item_dedupe_unique:bool} */
+    private static function ensureRelatedDocumentIndexes(): void
+    {
+        $indexes = Capsule::select('SHOW INDEX FROM `' . self::RELATED_DOCUMENTS_TABLE . '`');
+        if (!self::hasUniqueColumnIndex($indexes, ['invoice_id', 'role', 'dunning_level'])) {
+            $duplicate = Capsule::table(self::RELATED_DOCUMENTS_TABLE)
+                ->select(['invoice_id', 'role', 'dunning_level'])
+                ->groupBy(['invoice_id', 'role', 'dunning_level'])
+                ->havingRaw('COUNT(*) > 1')
+                ->first();
+            if ($duplicate !== null) {
+                throw new RuntimeException(
+                    'Duplicate related-document roles prevent creation of the unique index.',
+                );
+            }
+            Capsule::schema()->table(self::RELATED_DOCUMENTS_TABLE, static function ($table): void {
+                $table->unique(
+                    ['invoice_id', 'role', 'dunning_level'],
+                    'mod_sevdesk_related_invoice_role_level_unique',
+                );
+            });
+        }
+        if (!self::hasUniqueSingleColumnIndex($indexes, 'sevdesk_id')) {
+            $duplicate = Capsule::table(self::RELATED_DOCUMENTS_TABLE)
+                ->select('sevdesk_id')
+                ->groupBy('sevdesk_id')
+                ->havingRaw('COUNT(*) > 1')
+                ->first();
+            if ($duplicate !== null) {
+                throw new RuntimeException(
+                    'Duplicate related-document remote IDs prevent creation of the unique index.',
+                );
+            }
+            Capsule::schema()->table(self::RELATED_DOCUMENTS_TABLE, static function ($table): void {
+                $table->unique('sevdesk_id', 'mod_sevdesk_related_remote_unique');
+            });
+        }
+    }
+
+    /**
+     * @return array{
+     *   tables:bool,missing_columns:list<string>,mapping_invoice_unique:bool,
+     *   mapping_remote_unique:bool,item_dedupe_unique:bool,
+     *   related_role_unique:bool,related_remote_unique:bool
+     * }
+     */
     public static function schemaReport(): array
     {
         $schema = Capsule::schema();
@@ -199,7 +282,7 @@ final class Migrator
             self::MAPPING_TABLE => [
                 'id', 'invoice_id', 'sevdesk_id', 'document_type', 'document_number',
                 'document_authority', 'document_ready_at', 'delivered_at', 'pdf_sha256', 'is_e_invoice',
-                'xml_sha256',
+                'xml_sha256', 'invoice_lifecycle_mode',
             ],
             self::JOBS_TABLE => [
                 'id', 'type', 'status', 'filters_json', 'requested_by_admin_id',
@@ -215,6 +298,12 @@ final class Migrator
             ],
             self::PDF_RATE_TABLE => [
                 'client_id', 'window_started_at', 'request_count', 'updated_at',
+            ],
+            self::RELATED_DOCUMENTS_TABLE => [
+                'id', 'invoice_id', 'role', 'dunning_level', 'sevdesk_id',
+                'parent_sevdesk_id', 'document_number', 'amount_minor', 'fingerprint',
+                'pdf_sha256', 'xml_sha256', 'delivery_status', 'document_ready_at', 'delivered_at',
+                'created_at', 'updated_at',
             ],
         ];
         $missing = [];
@@ -236,6 +325,9 @@ final class Migrator
         $itemIndexes = $schema->hasTable(self::ITEMS_TABLE)
             ? Capsule::select('SHOW INDEX FROM `' . self::ITEMS_TABLE . '`')
             : [];
+        $relatedIndexes = $schema->hasTable(self::RELATED_DOCUMENTS_TABLE)
+            ? Capsule::select('SHOW INDEX FROM `' . self::RELATED_DOCUMENTS_TABLE . '`')
+            : [];
 
         return [
             'tables' => count(array_filter(
@@ -246,6 +338,14 @@ final class Migrator
             'mapping_invoice_unique' => self::hasUniqueSingleColumnIndex($mappingIndexes, 'invoice_id'),
             'mapping_remote_unique' => self::hasUniqueSingleColumnIndex($mappingIndexes, 'sevdesk_id'),
             'item_dedupe_unique' => self::hasUniqueSingleColumnIndex($itemIndexes, 'dedupe_key'),
+            'related_role_unique' => self::hasUniqueColumnIndex(
+                $relatedIndexes,
+                ['invoice_id', 'role', 'dunning_level'],
+            ),
+            'related_remote_unique' => self::hasUniqueSingleColumnIndex(
+                $relatedIndexes,
+                'sevdesk_id',
+            ),
         ];
     }
 
@@ -265,7 +365,9 @@ final class Migrator
             && $report['missing_columns'] === []
             && $report['mapping_invoice_unique']
             && $report['mapping_remote_unique']
-            && $report['item_dedupe_unique'];
+            && $report['item_dedupe_unique']
+            && $report['related_role_unique']
+            && $report['related_remote_unique'];
     }
 
     /** Validate the CLI runtime before any worker-side DDL or remote-capable code. */
@@ -317,6 +419,15 @@ final class Migrator
     /** @param list<object> $indexes */
     private static function hasUniqueSingleColumnIndex(array $indexes, string $column): bool
     {
+        return self::hasUniqueColumnIndex($indexes, [$column]);
+    }
+
+    /**
+     * @param list<object> $indexes
+     * @param list<string> $expectedColumns
+     */
+    private static function hasUniqueColumnIndex(array $indexes, array $expectedColumns): bool
+    {
         $definitions = [];
         foreach ($indexes as $index) {
             $name = (string) ($index->Key_name ?? '');
@@ -325,9 +436,9 @@ final class Migrator
             }
             $definitions[$name][(int) ($index->Seq_in_index ?? 0)] = (string) ($index->Column_name ?? '');
         }
-        foreach ($definitions as $columns) {
-            ksort($columns);
-            if (array_values($columns) === [$column]) {
+        foreach ($definitions as $actualColumns) {
+            ksort($actualColumns);
+            if (array_values($actualColumns) === $expectedColumns) {
                 return true;
             }
         }

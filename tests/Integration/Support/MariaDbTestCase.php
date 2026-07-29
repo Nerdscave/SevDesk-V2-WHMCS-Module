@@ -97,6 +97,7 @@ abstract class MariaDbTestCase extends TestCase
             $table->unsignedInteger('userid')->default(0);
             $table->string('invoicenum', 191)->nullable();
             $table->date('date')->nullable();
+            $table->date('duedate')->nullable();
             $table->dateTime('datepaid')->nullable();
             $table->decimal('subtotal', 16, 2)->default(0);
             $table->decimal('credit', 16, 2)->default(0);
@@ -153,6 +154,7 @@ abstract class MariaDbTestCase extends TestCase
         foreach (
             [
                 Migrator::PDF_RATE_TABLE,
+                Migrator::RELATED_DOCUMENTS_TABLE,
                 Migrator::ITEMS_TABLE,
                 Migrator::JOBS_TABLE,
                 Migrator::MAPPING_TABLE,

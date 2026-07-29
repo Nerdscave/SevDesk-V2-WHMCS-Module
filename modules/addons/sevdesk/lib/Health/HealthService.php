@@ -13,6 +13,7 @@ use WHMCS\Module\Addon\SevDesk\Config;
 use WHMCS\Module\Addon\SevDesk\Database\Migrator;
 use WHMCS\Module\Addon\SevDesk\Domain\Decimal;
 use WHMCS\Module\Addon\SevDesk\Service\DocumentTargetResolver;
+use WHMCS\Module\Addon\SevDesk\Service\DunningService;
 use WHMCS\Module\Addon\SevDesk\Service\InvoiceDiscountCapabilityPolicy;
 
 final class HealthService
@@ -48,7 +49,9 @@ final class HealthService
             && $schemaReport['missing_columns'] === []
             && $schemaReport['mapping_invoice_unique']
             && $schemaReport['mapping_remote_unique']
-            && $schemaReport['item_dedupe_unique'];
+            && $schemaReport['item_dedupe_unique']
+            && $schemaReport['related_role_unique']
+            && $schemaReport['related_remote_unique'];
         $this->add(
             $checks,
             'Datenbankschema',
@@ -67,6 +70,10 @@ final class HealthService
         $ossProfile = (string) $this->application->config->get('oss_profile', 'blocked');
         $euB2cMode = (string) $this->application->config->get('eu_b2c_mode', 'blocked');
         $eInvoiceMode = (string) $this->application->config->get('e_invoice_mode', 'off');
+        $invoiceLifecycleMode = (string) $this->application->config->get(
+            'invoice_lifecycle_mode',
+            \WHMCS\Module\Addon\SevDesk\Repository\MappingRepository::LIFECYCLE_AFTER_PAYMENT_PROFORMA,
+        );
         $invoiceCapable = in_array($exportMode, ['invoice_for_oss', 'invoice_only'], true);
         $pdfRequired = in_array($exportMode, ['voucher_only', 'invoice_for_oss'], true);
         $pdfFunctions = defined('ROOTDIR') ? ROOTDIR . '/includes/invoicefunctions.php' : '';
@@ -309,7 +316,13 @@ final class HealthService
                 && $this->application->whmcs->isEInvoiceOptInField($eInvoiceFieldId)
                 && preg_match('/^[1-9]\d*$/', $paymentMethodId) === 1
                 && $activeFrom instanceof DateTimeImmutable
-                && $activeFrom->format('d-m-Y') === $activeFromValue;
+                && $activeFrom->format('d-m-Y') === $activeFromValue
+                && (
+                    $invoiceLifecycleMode !== 'issue_on_creation'
+                    || $this->application->config->bool(
+                        'e_invoice_cancellation_canary_confirmed',
+                    )
+                );
         }
         $this->add(
             $checks,
@@ -319,7 +332,8 @@ final class HealthService
                 ? 'Native E-Rechnungen sind ausgeschaltet.'
                 : ($eInvoiceConfigurationReady
                     ? 'ZUGFeRD ist für bestätigte deutsche B2B-Kunden hinter eigenem Canary und Admin-Opt-in vorbereitet.'
-                    : 'ZUGFeRD benötigt Invoice only, sevdesk-Hoheit, PHP XMLReader, Canary, Admin-Tickbox, Zahlungsmethode und Aktivierungsdatum.'),
+                    : 'ZUGFeRD benötigt Invoice only, sevdesk-Hoheit, PHP XMLReader, Canary, Admin-Tickbox, '
+                        . 'Zahlungsmethode und Aktivierungsdatum; im Direktbetrieb zusätzlich den SR-PDF-/XML-Canary.'),
             'error',
             'addonmodules.php?module=sevdesk&a=setup',
             'E-Rechnungsprofil prüfen',
@@ -362,8 +376,20 @@ final class HealthService
                     'Versandkanal umstellen',
                 );
             }
-            $authorityReady = $this->application->whmcs->proformaInvoicingEnabled()
-                && $this->application->whmcs->themeAdapterManifestInstalled()
+            $lifecycleReady = $invoiceLifecycleMode === 'after_payment_proforma'
+                ? $this->application->whmcs->proformaInvoicingEnabled()
+                : (
+                    $invoiceLifecycleMode === 'issue_on_creation'
+                    && !$this->application->whmcs->proformaInvoicingEnabled()
+                    && !$this->application->whmcs->sequentialPaidInvoiceNumberingEnabled()
+                    && !$this->application->whmcs->setInvoiceDateOnPaymentEnabled()
+                    && $deliveryChannel === 'sevdesk'
+                    && $this->application->config->bool('direct_invoice_canary_confirmed')
+                );
+            $authorityReady = $lifecycleReady
+                && $this->application->whmcs->themeAdapterManifestInstalled(
+                    $invoiceLifecycleMode === 'issue_on_creation' ? 2 : 1,
+                )
                 && $this->application->config->bool('theme_adapter_confirmed')
                 && in_array($deliveryChannel, ['sevdesk', 'whmcs_template'], true)
                 && $templateOk;
@@ -372,11 +398,76 @@ final class HealthService
                 'sevdesk-Dokumenthoheit',
                 $authorityReady,
                 $authorityReady
-                    ? 'Proforma, Theme-Adapter und Versandkanal sind vorbereitet.'
-                    : 'Proforma, Theme-Adapter oder der gewählte Versandkanal ist nicht vollständig vorbereitet.',
+                    ? 'Invoice-Lebenszyklus, Theme-Adapter und Versandkanal sind vorbereitet.'
+                    : 'Invoice-Lebenszyklus, Nummerierung, Theme-Adapter oder Versandkanal '
+                        . 'sind nicht vollständig vorbereitet.',
                 'error',
                 'addonmodules.php?module=sevdesk&a=setup',
                 'Dokumenthoheit prüfen',
+            );
+        }
+
+        $lateFeeMode = (string) $this->application->config->get('late_fee_mode', 'blocked');
+        if ($lateFeeMode === 'reminder_then_rule22') {
+            $accountingSource = (string) $this->application->config->get(
+                'late_fee_accounting_source',
+                'rule22_voucher',
+            );
+            $lateFeeReady = $accountingSource === 'rule22_voucher'
+                ? $this->application->config->bool('late_fee_rule22_canary_confirmed')
+                    && preg_match('/^[1-9]\d*$/', (string) $this->application->config->get(
+                        'late_fee_rule22_account_datev_id',
+                        '',
+                    )) === 1
+                : $accountingSource === 'reminder'
+                    && $this->application->config->bool(
+                        'late_fee_reminder_accounting_canary_confirmed',
+                    );
+            $this->add(
+                $checks,
+                'Late-Fee-Buchungsquelle',
+                $lateFeeReady,
+                $lateFeeReady
+                    ? 'Die getrennte, genau einmalige Gebührenbuchung ist canary-gebunden freigegeben.'
+                    : 'Late Fees bleiben gesperrt, bis genau eine Buchungsquelle samt Canary bestätigt ist.',
+                'error',
+                'addonmodules.php?module=sevdesk&a=setup',
+                'Late-Fee-Gate prüfen',
+            );
+        }
+        if ($invoiceLifecycleMode === 'issue_on_creation') {
+            $dunningMode = (string) $this->application->config->get('dunning_mode', 'off');
+            $dunningReady = $dunningMode === 'off'
+                || (
+                    $dunningMode === 'whmcs_schedule_sevdesk_delivery'
+                    && $this->application->config->bool('dunning_canary_confirmed')
+                );
+            $this->add(
+                $checks,
+                'sevdesk-Mahnversand',
+                $dunningReady,
+                $dunningMode === 'off'
+                    ? 'Der automatische sevdesk-Mahnversand ist ausgeschaltet.'
+                    : ($dunningReady
+                        ? 'WHMCS-Termine und der sevdesk-Mahnversand sind durch den Hook-Canary freigegeben.'
+                        : 'Der Mahnversand bleibt gesperrt, bis der WHMCS-8.13-Hook-Canary bestätigt ist.'),
+                $dunningReady ? 'healthy' : 'error',
+                'addonmodules.php?module=sevdesk&a=setup',
+                'Mahn-Gate prüfen',
+            );
+            $cancellationReady = $this->application->config->bool(
+                'cancellation_canary_confirmed',
+            );
+            $this->add(
+                $checks,
+                'sevdesk-Stornorechnung',
+                $cancellationReady,
+                $cancellationReady
+                    ? 'cancelInvoice, SR-Readback, PDF und Versandverhalten sind freigegeben.'
+                    : 'Automatische Stornorechnungen bleiben aus; eine WHMCS-Stornierung erzeugt einen Prüffall.',
+                $cancellationReady ? 'healthy' : 'warning',
+                'addonmodules.php?module=sevdesk&a=setup',
+                'Storno-Gate prüfen',
             );
         }
 
@@ -565,6 +656,34 @@ final class HealthService
                         'error',
                     );
                 }
+                if (
+                    $lateFeeMode === 'reminder_then_rule22'
+                    && (string) $this->application->config->get(
+                        'late_fee_accounting_source',
+                        'rule22_voucher',
+                    ) === 'rule22_voucher'
+                ) {
+                    $lateFeeAccount = (string) $this->application->config->get(
+                        'late_fee_rule22_account_datev_id',
+                        '',
+                    );
+                    $lateFeeGuidanceReady = DunningService::guidanceAllowsRule22(
+                        $this->application->referenceData()->receiptGuidance(true),
+                        $lateFeeAccount,
+                    );
+                    $this->add(
+                        $checks,
+                        'Rule 22 / Mahngebührenkonto',
+                        $lateFeeGuidanceReady,
+                        $lateFeeGuidanceReady
+                            ? 'Receipt Guidance bestätigt das konfigurierte REVENUE-Konto für Rule 22 mit 0 %.'
+                            : 'Das konfigurierte Konto ist aktuell nicht eindeutig für Rule 22 mit 0 % freigegeben.',
+                        'error',
+                        'addonmodules.php?module=sevdesk&a=setup',
+                        'Late-Fee-Gate prüfen',
+                        $lateFeeGuidanceReady ? null : 'late_fee_rule22_guidance_unsupported',
+                    );
+                }
             } catch (ApiException $error) {
                 $details = array_filter([
                     $error->httpStatus === null ? null : 'HTTP ' . $error->httpStatus,
@@ -604,7 +723,7 @@ final class HealthService
             'stats' => [
                 'health_status' => $hasError ? 'error' : ($hasWarning ? 'warning' : 'healthy'),
                 'healthy' => $healthy,
-                'module_version' => '2.1.0-rc.8',
+                'module_version' => '2.1.0-rc.9',
                 'whmcs_version' => $whmcsVersion,
                 'php_version' => PHP_VERSION,
                 'bookkeeping_version' => $bookkeepingVersion,

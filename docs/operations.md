@@ -2,7 +2,18 @@
 
 ## Freigabestatus
 
-Dieses Runbook gilt für den Arbeitsstand `2.1.0-rc.8`. Der RC ist für kontrollierte Test- und Nachlaufinstallationen gedacht. Die automatisierten Prüfungen unter PHP 8.3 mit XMLReader und MariaDB sowie die technischen Live-Läufe für normale Invoices, Rule 19 und ZUGFeRD wurden mit synthetischen Daten ausgeführt. Der direkte sevDesk-Versand, echte Kundensitzungen und die Rechteprüfung waren erfolgreich. Zwei WHMCS-Postfachläufe enthielten dagegen die WHMCS-Core-PDF. WHMCS 8.13 führt den Hook zwar aus, kann dessen Binäranhang aber nicht übernehmen. Der Kanal `whmcs_template` ist auf der Zielplattform daher gesperrt. Vor der vollständigen Freigabe stehen noch Invoice-`bookAmount`, der rabattfreie Rule-11-Invoice-Canary, die fünf getrennten Rabatt-Canaries, die Voucher-Canaries der produktiv verwendeten Steuerfälle und die fachliche Abnahme aus.
+Dieses Runbook gilt für den Arbeitsstand `2.1.0-rc.9`. Der RC ist für kontrollierte Test- und Nachlaufinstallationen gedacht. Die automatisierten Prüfungen unter PHP 8.3 mit XMLReader und MariaDB sowie die technischen Live-Läufe für normale Invoices, Rule 19 und ZUGFeRD wurden mit synthetischen Daten ausgeführt. Der direkte sevDesk-Versand, echte Kundensitzungen und die Rechteprüfung waren erfolgreich. Zwei WHMCS-Postfachläufe enthielten dagegen die WHMCS-Core-PDF. WHMCS 8.13 führt den Hook zwar aus, kann dessen Binäranhang aber nicht übernehmen. Der Kanal `whmcs_template` ist auf der Zielplattform daher gesperrt.
+
+rc.9 ergänzt Direktrechnung, Mahnung, Storno und die getrennte
+Late-Fee-Buchung. Diese Wege sind implementiert, aber noch nicht live
+freigegeben. `invoice_lifecycle_mode=after_payment_proforma`,
+`dunning_mode=off`, `late_fee_mode=blocked` und sämtliche neuen Canaries bleiben
+beim Upgrade erhalten beziehungsweise aus. Der mailfreie Gebührennachlauf darf
+erst nach Live-Gate 1 beginnen. Direktversand, Mahnung und Storno brauchen
+Live-Gate 2. Vor der finalen Freigabe stehen außerdem Invoice-`bookAmount`, der
+rabattfreie Rule-11-Invoice-Canary, die fünf getrennten Rabatt-Canaries, die
+Voucher-Canaries der produktiv verwendeten Steuerfälle und die fachliche
+Abnahme aus.
 
 Bis zum jeweiligen Einzelnachweis bleiben `invoice_canary_confirmed`, `small_business_invoice_canary_confirmed`, `e_invoice_canary_confirmed`, `invoice_discount_canary_confirmed`, `invoice_discount_rule1_19_canary_confirmed`, `invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed`, `invoice_discount_rule17_0_canary_confirmed`, `invoice_discount_rule19_canary_confirmed` und bei neuen Rollouts auch `sync_enabled` deaktiviert. Ein 2.0-Bestand behält beim Upgrade den Modus `voucher_only` und erhält `runtime_review_required=on`. Diese Quarantäne stoppt automatische und manuelle Verarbeitung. Sie endet erst nach einer erfolgreichen read-only Prüfung und der Bestätigung im Setup.
 
@@ -258,15 +269,99 @@ Der Kundenbereich liefert die geprüfte ZUGFeRD-PDF. Beim sevDesk-Versand setzt 
 
 Zusätzlich erforderlich:
 
-- WHMCS-Proforma aktiviert;
 - `export_mode=invoice_only`;
 - installiertes Adapter-Manifest; für Twenty-One liegt eine Referenzintegration bei;
 - ausdrückliche Bestätigung des Theme-Eingriffs;
 - Versandkanal `sevdesk`. Der gespeicherte Wert `whmcs_template` bleibt migrationsverträglich erhalten, ist unter WHMCS 8.13 aber nicht ausführbar.
 
+Im Upgrade-Default `after_payment_proforma` muss WHMCS-Proforma aktiv sein. Im
+Direktbetrieb `issue_on_creation` muss sie aus sein. Außerdem müssen
+„Sequential Paid Invoice Numbering“ und „Set Invoice Date on Payment“
+ausgeschaltet sein. Das Setup verlangt dafür Adaptervertrag v2, einen
+bestätigten Direkt-Canary, keine offenen Rechnungen aus dem alten Lebenszyklus
+und eine frische Übergangsinventur. Der Wechsel allein erzeugt keinen Job.
+
 Für `sevdesk` werden Betreff und Text ausschließlich mit `{invoice_number}` und `{company_name}` als erlaubten Platzhaltern gepflegt. Eine bestehende Auswahl `whmcs_template` wird nicht automatisch geändert: Der Health Check meldet den Konflikt, und das Setup muss bewusst auf `sevdesk` gespeichert werden. Das Modul legt keine Mailvorlage an und verändert keine vorhandene.
 
 Backfills und historische Bulk-Jobs versenden nie automatisch.
+
+### Direktbetrieb und Mahnverfahren
+
+Diese Einstellungen bleiben bis zum vollständigen Live-Gate 2 aus:
+
+- `invoice_lifecycle_mode=issue_on_creation`;
+- `direct_invoice_canary_confirmed`;
+- `dunning_mode=whmcs_schedule_sevdesk_delivery`;
+- `dunning_canary_confirmed`;
+- `cancellation_canary_confirmed`;
+- bei ZUGFeRD zusätzlich `e_invoice_cancellation_canary_confirmed`.
+
+WHMCS bleibt Quelle für Fälligkeit und Mahnstufen. Deshalb werden dort die
+gewünschten First-, Second- und Third-Reminder-Termine gepflegt. Das Modul
+erfindet keine eigenen Fristen. Der synthetische WHMCS-8.13.4-Test muss
+beweisen, dass `InvoicePaymentReminder` auch dann vollständig läuft, wenn
+`EmailPreSend` die Core-Mail blockiert.
+
+Vor jeder Freigabe:
+
+1. Offene WHMCS-Invoices aus dem bisherigen Lebenszyklus auf null bringen oder
+   außerhalb des Moduls eindeutig klären.
+2. Übergangsinventur ohne aktive, unklare oder alte fehlgeschlagene
+   Lifecycle-Jobs bestätigen.
+3. Eine neue offene Testinvoice erzeugen. In WHMCS darf keine Core-PDF-Mail
+   ankommen, in sevDesk genau eine Rechnung.
+4. Kundendownload mit eigener und fremder Sitzung prüfen.
+5. Erinnerung, Mahnung, Payment-Race, Teilzahlung und Cancellation einzeln
+   testen.
+6. Erst danach die Gates speichern und `sync_enabled` aktivieren.
+
+Bei Teilzahlung, geändertem Total, Refund, Collections, Chargeback oder
+abweichender Rechnungsnummer nichts manuell wiederholen. Das Item bleibt
+Prüffall, bis WHMCS-Forderung und sevDesk-Dokument einzeln abgeglichen wurden.
+
+### Late Fees und Live-Gate 1
+
+`late_fee_mode=reminder_then_rule22` darf erst nach einem synthetischen,
+mailfreien Late-Fee-Lauf aktiviert werden. Nur positive, unbesteuerte
+`LateFee`-Positionen sind zulässig. Das Modul entfernt sie aus der
+Leistungs-Invoice; sie dürfen anschließend nicht noch einmal als normale
+Invoice-Position auftauchen.
+
+Das Setup verlangt genau eine Buchhaltungsquelle:
+
+- `late_fee_accounting_source=reminder`: nur nach dem Canary, der belegt, dass
+  die von sevDesk erzeugte `MA` die Gebühr im verbundenen Mandanten bereits
+  buchhalterisch erfasst;
+- `late_fee_accounting_source=rule22_voucher`: nach Zahlung ein eigener
+  Rule-22-Revenue-Voucher. Das konfigurierte Konto muss in der aktuellen
+  `ReceiptGuidance` numerisch, als `REVENUE`, mit Rule 22 und 0 % erscheinen.
+
+Der Rule-22-Weg ist der sichere Ausgangspunkt, solange die MA-Wirkung nicht
+nachgewiesen ist. Dazu `late_fee_rule22_canary_confirmed` und die
+mandantenspezifische Account-Datev-ID erst nach dem vollständigen Canary
+speichern. Der Gebührenvoucher ist intern, mailfrei und im Kundenbereich nur
+als Buchhaltungsstatus ohne Download sichtbar.
+
+Für den historischen Nachlauf:
+
+1. Eine synthetische bezahlte Late-Fee-Invoice vollständig verarbeiten.
+2. Prüfen, dass die Primär-Invoice exakt um die Gebühr verkürzt wurde und keine
+   Kundenmail entstand.
+3. MA-Factory und deren Wirkung dokumentieren.
+4. Den ausgewählten Buchhaltungsweg centgenau zurücklesen.
+5. Recovery einmal gezielt nach dem jeweiligen Write-Checkpoint ausführen.
+6. Erst danach die historischen Fälle in einem gemeinsamen mailfreien Job
+   einreihen.
+
+Eine gemeinsame Zahlung auf Grundrechnung und Gebührenbeleg wird nicht
+automatisch gebucht. Der Buchungsassistent zeigt „manuelle Zahlungsaufteilung
+erforderlich“. Dadurch entstehen keine doppelten Erlöse; die Banktransaktion
+muss aber in sevDesk von Hand aufgeteilt werden.
+
+Existiert bereits eine `MA` mit positiver Gebühr, bleibt eine spätere
+WHMCS-Cancellation manuell. Die automatische `SR` würde nur die verkürzte
+Grundrechnung stornieren und könnte weder Gebührenforderung noch Mahndokument
+sicher ausgleichen.
 
 Nach Installation und Upgrade bleibt EU-B2B/Rule 3 standardmäßig gesperrt. Die Freigabe im Setup ist nur möglich, wenn der gesamte betroffene Geschäftsfall fachlich als innergemeinschaftliche Warenlieferung bestätigt wurde.
 
@@ -722,6 +817,28 @@ globale Hoheit als historischen Ersatz verwenden noch blind alle WHMCS-Mails
 unterdrücken. Bis Datenbank und WHMCS-Mailzustand wieder gesund sind, deshalb
 keine manuelle Invoice- oder Serienmail auslösen; ein möglicherweise bereits
 erfolgter Versand wird anschließend einzeln geprüft.
+
+### Mahnung, Storno oder Gebührenbeleg unklar
+
+- Bei `reminder_write_requested`, `cancellation_write_requested` oder
+  `late_fee_voucher_write_requested` keinen zweiten Create beziehungsweise
+  Cancel auslösen.
+- Remote ausschließlich über Elternbeleg, Rolle, Mahnstufe, Marker und
+  Forderungsfingerprint suchen.
+- Genau einen strukturell vollständigen Treffer lesen und seine Beträge,
+  Kontakt, Positionen sowie PDF erneut prüfen.
+- Nach `*_delivery_write_requested` keinen Resend starten. Die
+  `delivery_status=ambiguous`-Markierung in
+  `mod_sevdesk_related_documents` ist ein Warnsignal; der Jobcheckpoint bleibt
+  die maßgebliche Recovery-Grenze.
+- Eine definitiv abgelehnte 4xx-/422-Antwort darf auf den letzten sicheren
+  Checkpoint zurückgehen. Timeout, Verbindungsabbruch, 5xx nach einem Write oder
+  eine unklare Mailantwort dürfen das nicht.
+- Bei einer ZUGFeRD-Stornorechnung zusätzlich XML und gespeicherten
+  `xml_sha256` prüfen. Kein PDF- oder XML-Hash darf nachträglich überschrieben
+  werden.
+- Ein Rule-22-Voucher besitzt keinen Kunden-PDF-Pfad. Nicht durch einen
+  direkten sevDesk-Link oder eine WHMCS-PDF ersetzen.
 
 ### sevDesk-Dokumenthoheit zeigt falschen Zustand
 

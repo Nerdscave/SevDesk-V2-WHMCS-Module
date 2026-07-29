@@ -146,6 +146,26 @@ final class DocumentTargetResolverTest extends TestCase
         self::assertSame('invoice_number_not_final', $resolver->resolve($tax, true, false)->code);
     }
 
+    public function testDirectLifecycleAllowsAnUnpaidInvoiceButStillRequiresANumber(): void
+    {
+        $resolver = new DocumentTargetResolver(
+            DocumentTargetResolver::MODE_INVOICE_ONLY,
+            DocumentTargetResolver::AUTHORITY_SEVDESK,
+            DocumentTargetResolver::OSS_BLOCKED,
+            true,
+        );
+        $tax = TaxDecision::allow('domestic', '1000', '1', 'Domestic.');
+
+        $decision = $resolver->resolve($tax, false, true);
+
+        self::assertTrue($decision->allowed);
+        self::assertSame(DocumentTargetDecision::DOCUMENT_INVOICE, $decision->documentType);
+        self::assertSame(
+            'invoice_number_not_final',
+            $resolver->resolve($tax, false, false)->code,
+        );
+    }
+
     public function testSevdeskAuthorityIsValidOnlyWithInvoiceOnly(): void
     {
         $tax = TaxDecision::allow('domestic', '1000', '1', 'Domestic.');

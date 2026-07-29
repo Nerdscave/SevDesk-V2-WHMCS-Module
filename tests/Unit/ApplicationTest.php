@@ -120,5 +120,11 @@ final class ApplicationTest extends TestCase
         yield 'completed booking needs reconciliation' => ['booking_completed', true];
         yield 'correction request is risky' => ['correction_voucher_write_requested', true];
         yield 'created correction is risky' => ['correction_voucher_created', true];
+        yield 'reminder request is risky' => ['reminder_create_requested', true];
+        yield 'verified reminder is risky' => ['reminder_verified', true];
+        yield 'cancellation request is risky' => ['cancellation_write_requested', true];
+        yield 'verified cancellation is risky' => ['cancellation_verified', true];
+        yield 'fee voucher request is risky' => ['late_fee_voucher_write_requested', true];
+        yield 'verified fee voucher is risky' => ['late_fee_voucher_verified', true];
     }
 }

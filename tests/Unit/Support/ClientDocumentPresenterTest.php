@@ -67,6 +67,48 @@ final class ClientDocumentPresenterTest extends TestCase
         self::assertSame('', $result['downloadUrl']);
     }
 
+    public function testDirectUnpaidInvoiceUsesTheVerifiedSevdeskDocument(): void
+    {
+        $mapping = (object) [
+            'sevdesk_id' => '701',
+            'document_type' => 'invoice',
+            'document_authority' => 'sevdesk',
+            'invoice_lifecycle_mode' => 'issue_on_creation',
+            'document_number' => 'RE-2026-44',
+            'document_ready_at' => '2026-07-18 12:34:56',
+            'pdf_sha256' => str_repeat('c', 64),
+        ];
+
+        $result = ClientDocumentPresenter::present(
+            'Unpaid',
+            '44',
+            $mapping,
+            'succeeded',
+            '/download',
+            'issue_on_creation',
+        );
+
+        self::assertSame('ready', $result['state']);
+        self::assertSame('RE-2026-44', $result['invoiceNumber']);
+        self::assertSame('/download', $result['downloadUrl']);
+        self::assertTrue(ClientDocumentPresenter::isDeliverableInvoiceMapping('Cancelled', $mapping));
+    }
+
+    public function testDirectUnpaidInvoiceShowsPendingBeforeTheVerifiedMappingExists(): void
+    {
+        $result = ClientDocumentPresenter::present(
+            'Unpaid',
+            '44',
+            null,
+            'running',
+            '/download',
+            'issue_on_creation',
+        );
+
+        self::assertSame('pending', $result['state']);
+        self::assertSame('', $result['downloadUrl']);
+    }
+
     public function testFinalInvoiceRemainsAvailableAfterWhmcsStatusChangesToRefunded(): void
     {
         $mapping = (object) [

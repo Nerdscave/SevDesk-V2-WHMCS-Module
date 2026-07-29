@@ -153,6 +153,18 @@
                         {if $mapping.document_type === 'invoice'}
                             <small>E-Rechnung: {if $mapping.is_e_invoice == 1}<strong>ja</strong>{if $mapping.xml_sha256} · XML geprüft{/if}{elseif $mapping.is_e_invoice === null}historisch ungeklärt{else}nein{/if}</small>
                         {/if}
+                        {if $mapping.invoice_lifecycle_mode}
+                            <small>Lebenszyklus: {$mapping.invoice_lifecycle_mode|escape:'html':'UTF-8'}</small>
+                        {/if}
+                        {if $mapping.related_documents|@count}
+                            <small><strong>Zusatzdokumente:</strong>
+                                {foreach from=$mapping.related_documents item=related name=relatedDocs}
+                                    {if !$smarty.foreach.relatedDocs.first} · {/if}
+                                    {if $related.role === 'reminder'}MA {$related.dunning_level|escape:'html':'UTF-8'}{elseif $related.role === 'cancellation'}SR{else}Rule-22-Gebühr{/if}
+                                    <span class="sd-mono">{$related.sevdesk_id|escape:'html':'UTF-8'}</span>
+                                {/foreach}
+                            </small>
+                        {/if}
                     </td>
                     <td>
                         <small>

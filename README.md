@@ -4,7 +4,7 @@ Dieses Repository enthält ein Drop-in-Replacement für ein nicht mehr gepflegte
 
 Für den nativen E-Rechnungspfad muss PHP außerdem `XMLReader` bereitstellen. Das Setup und der Worker blockieren ZUGFeRD, wenn die Erweiterung fehlt.
 
-Die wählbaren Invoice-Modi gehören zu 2.1.0. Der aktuelle Arbeitsstand ist `2.1.0-rc.8` und nur für kontrollierte Test- und Nachlaufinstallationen vorgesehen. Der Voucher-, Booking- und Korrekturumfang aus 2.0.0 bleibt erhalten. RC.8 härtet die bestehenden Invoice-, ZUGFeRD-, Booking- und Recovery-Pfade ab; neue Steuerfälle werden damit nicht freigegeben.
+Die wählbaren Invoice-Modi gehören zu 2.1.0. Der aktuelle Arbeitsstand ist `2.1.0-rc.9` und nur für kontrollierte Test- und Nachlaufinstallationen vorgesehen. Der Voucher-, Booking- und Korrekturumfang aus 2.0.0 bleibt erhalten. RC.9 ergänzt einen abgesicherten Direktbetrieb sowie eine getrennte Behandlung von Mahnungen, Stornorechnungen und positiven, unbesteuerten WHMCS-Late-Fees. Alle neuen Abläufe sind standardmäßig ausgeschaltet.
 
 > Die technischen Invoice- und ZUGFeRD-Pfade wurden mit synthetischen Daten unter WHMCS 8.13.4 und PHP 8.3 geprüft. Rule 19, `getXml`, `getPdf`, `sendBy`, der direkte sevDesk-Versand sowie eigene und fremde Kundensitzungen waren erfolgreich. Beide Postfachläufe über eine WHMCS-Mailvorlage enthielten dagegen die normale WHMCS-PDF. Der Grund ist inzwischen geklärt: WHMCS 8.13 führt `EmailPreSend` aus, unterstützt dessen Binäranhänge aber noch nicht. Der Kanal `whmcs_template` ist auf der Zielplattform deshalb gesperrt; verfügbar bleibt `sevdesk sendViaEmail`. Eine normale Rule-11-Invoice wurde als Draft angenommen, scheiterte beim Öffnen aber am automatisch gewählten sevDesk-Konten-Scope. Deshalb bleiben Rule-11-Invoices hinter einem zusätzlichen Canary und einer aktuellen Guidance-Prüfung gesperrt. Invoice-`bookAmount`, die noch nicht einzeln bestandenen Rabatt- und Voucher-Canaries sowie die fachliche Abnahme bleiben offene Gates. Bei neuen Installationen und Freigaberollouts bleibt auch `sync_enabled` aus.
 >
@@ -84,7 +84,7 @@ Die Dokumenthoheit ist davon getrennt:
 - `whmcs`: WHMCS-Rechnung und WHMCS-PDF bleiben kundenseitig maßgeblich. Eine sevDesk-Invoice wird ohne Kundenversand geöffnet.
 - `sevdesk`: nur zusammen mit `invoice_only`. WHMCS bleibt Billing-, Proforma- und Zahlungsplattform; nach Zahlung ist allein die von sevDesk erzeugte Invoice-PDF als Endrechnung sichtbar.
 
-Upgrade-Default und sichere Grundstellung bleiben `whmcs + voucher_only + OSS blocked`; E-Rechnungen sind aus. Bestehende Mappings werden nicht neu exportiert. Voucher bleiben Voucher, und die für eine bestehende Invoice gewählte Dokumenthoheit bleibt erhalten. Der neue Laufzeitnachweis pausiert automatische Exporte beim ersten 2.1-Upgrade einmalig bis zur Betreiberprüfung. Invoice-Ziele sind immer paid-only und benötigen eine effektive WHMCS-Rechnungsnummer. Maßgeblich ist das gespeicherte `invoicenum`; bei Legacy-Zeilen ohne separate Nummer verwendet das Modul rein lesend die unveränderliche interne Invoice-ID. `tblinvoices` wird dabei nicht nachträglich geändert.
+Upgrade-Default und sichere Grundstellung bleiben `whmcs + voucher_only + OSS blocked`; E-Rechnungen sind aus. Bestehende Mappings werden nicht neu exportiert. Voucher bleiben Voucher, und die für eine bestehende Invoice gewählte Dokumenthoheit bleibt erhalten. Der neue Laufzeitnachweis pausiert automatische Exporte beim ersten 2.1-Upgrade einmalig bis zur Betreiberprüfung. Im Upgrade-Lebenszyklus sind Invoice-Ziele paid-only. Nur der getrennt freizugebende Direktbetrieb darf eine offene Invoice bei Erstellung ausgeben. Beide Wege benötigen eine effektive WHMCS-Rechnungsnummer. Maßgeblich ist das gespeicherte `invoicenum`; bei Legacy-Zeilen ohne separate Nummer verwendet das Modul rein lesend die unveränderliche interne Invoice-ID. `tblinvoices` wird dabei nicht nachträglich geändert.
 
 Die Kleinunternehmerregelung lässt sich auf Rechnungen bis zu einem Stichtag begrenzen. Maßgeblich ist das Rechnungsdatum. Innerhalb dieses Zeitraums wird Rule 11 mit 0 % vor der Einordnung nach Land, Kundenart und einem bestätigten AddFunds-Sonderprofil gewählt. Nach dem Stichtag greift AddFunds wieder auf sein eigenes, ausdrücklich bestätigtes Profil zurück. Auch dort ist Rule 1 mit 0 % nicht zulässig; für steuerfreie Guthabenfälle braucht es eine fachlich passende, bestätigte Regel. Ein leeres Enddatum behält bewusst das Verhalten älterer Installationen bei und wendet den aktivierten Schalter ohne zeitliche Grenze an. Bei aktivem Kleinunternehmerprofil blockiert ein ungültiger gespeicherter Wert die Steuerentscheidung, statt auf die normale Besteuerung zurückzufallen.
 
@@ -112,7 +112,7 @@ Genau eine negative WHMCS-Position vom Typ `PromoHosting` kann als negative sevD
 
 Die Setup-Freigaben speichern keinen pauschalen Wahrheitswert, sondern den exakten Capability-Key des beim Speichern aktiven WHMCS-Steuermodus. Deutsche Rule-1-Rechnungen und EU-B2C mit bestätigter Inlandsbesteuerung werden getrennt freigegeben. Gleiche Rule und gleicher Steuersatz genügen nicht, weil Steuerprofil und Länderklasse ebenfalls zum Schlüssel gehören. Rule 19 verlangt zusätzlich den im Canary geprüften Zielsteuersatz. Ein Wechsel zwischen `Inclusive` und `Exclusive`, ein anderer Steuersatz oder ein alter Wert wie `on` sperrt die Capability wieder. Der bestehende Rule-11-Schalter bleibt aus Kompatibilitätsgründen unverändert.
 
-Vor dem Create friert das Modul Capability-Key und SHA-256 des vollständigen Rabattvertrags ein. Derselbe Hash steht als `[WHMCS-DISCOUNT:<sha256>]` an der Invoice. `discountSave` bleibt leer: Beim bestätigten Rule-1-Bruttocanary verschob der globale sevDesk-Rabatt einen Cent von der Steuer ins Netto. Die negative Position erhielt dagegen exakt die WHMCS-Werte. Der Readback vergleicht alle Remote-Positionen sowie `sumNet`, `sumTax` und `sumGross` in Minor Units; `sumDiscounts` muss numerisch 0 sein. Andere negative Positionen, mehrere Rabatte, abweichende Steuerkontexte und `LateFee` bleiben blockiert.
+Vor dem Create friert das Modul Capability-Key und SHA-256 des vollständigen Rabattvertrags ein. Derselbe Hash steht als `[WHMCS-DISCOUNT:<sha256>]` an der Invoice. `discountSave` bleibt leer: Beim bestätigten Rule-1-Bruttocanary verschob der globale sevDesk-Rabatt einen Cent von der Steuer ins Netto. Die negative Position erhielt dagegen exakt die WHMCS-Werte. Der Readback vergleicht alle Remote-Positionen sowie `sumNet`, `sumTax` und `sumGross` in Minor Units; `sumDiscounts` muss numerisch 0 sein. Andere negative Positionen, mehrere Rabatte und abweichende Steuerkontexte bleiben blockiert. Eine positive, unbesteuerte `LateFee` ist nur über den getrennten rc.9-Gebührenpfad zulässig.
 
 ## Technischer Umfang
 
@@ -145,7 +145,16 @@ Das frühere Modul ist nicht mit PHP 8.3 kompatibel, konnte EU-B2C fälschlich a
 
 Eine normale sevDesk-Invoice wird als `RE` im Draft-Status 100 mit der unveränderten effektiven WHMCS-Rechnungsnummer, dem Marker `[WHMCS-INVOICE:<id>]`, `SevUser`, `Unity`, Land, Währung und geprüften Positionen erstellt. Invoice-Positionen verwenden in der ersten Version Menge 1 und übernehmen kein frei konfiguriertes `accountDatev`.
 
-Bei WHMCS-Dokumenthoheit bleibt die WHMCS-PDF maßgeblich. sevDesk-Dokumenthoheit setzt WHMCS-Proforma und die automatische Einreihung neuer Rechnungen voraus. Vor Zahlung sieht der Kunde die Proforma, danach zunächst einen neutralen Pending-Zustand und nach erfolgreicher Finalisierung den authentifizierten sevDesk-PDF-Download.
+Für sevDesk-Hoheit gibt es zwei ausdrücklich wählbare Lebenszyklen:
+
+| Lebenszyklus | WHMCS-Proforma | Ausgabe der sevDesk-Invoice | Mahnungen | erneuter Versand bei Zahlung |
+| --- | --- | --- | --- | --- |
+| `after_payment_proforma` | an | nach vollständiger Zahlung | WHMCS | einmaliger Versand der Endrechnung |
+| `issue_on_creation` | aus | direkt nach Rechnungserstellung | Termine und Stufen aus WHMCS, Dokumentversand durch sevDesk | nein |
+
+`after_payment_proforma` bleibt der Upgrade-Default. Der Direktbetrieb setzt `invoice_only`, sevDesk-Hoheit, einen Theme-Adapter mit Vertrag v2, unveränderliche Rechnungsnummern und ein eigenes Live-Canary voraus. WHMCS-Proforma, „Sequential Paid Invoice Numbering“ und „Set Invoice Date on Payment“ müssen dafür ausgeschaltet sein. Ein Moduswechsel ist mit offenen Rechnungen oder ungeklärten Jobs gesperrt und wirkt nie auf bestehende Mappings zurück.
+
+Bei WHMCS-Dokumenthoheit bleibt die WHMCS-PDF maßgeblich. Im Proforma-Betrieb sieht der Kunde vor Zahlung die WHMCS-Proforma, danach zunächst einen neutralen Pending-Zustand und nach erfolgreicher Finalisierung den authentifizierten sevDesk-PDF-Download. Im Direktbetrieb steht derselbe Download bereits für die unveränderte, offene sevDesk-Invoice bereit. Während der Verarbeitung zeigt der Kundenbereich nur den Pending-Zustand.
 
 Während einer Review-, Authentifizierungs- oder Sync-Pause wird in diesem Modus keine WHMCS-Endrechnung als Ersatz versendet. Trifft ein Paid-Ereignis während eines Authentifizierungsalarms ein, speichert das Modul nur den deduplizierten lokalen Pending-Job. Der Runner verarbeitet ihn erst nach einer erfolgreichen Mandantenprüfung. Eine dauerhafte PDF-Kopie in WHMCS gibt es in dieser Version nicht.
 
@@ -155,6 +164,19 @@ Für eine kundenseitige Zustellung gibt es zwei explizite Wege:
 - `whmcs_template`: Der vorbereitete Pfad setzt Binäranhänge aus `EmailPreSend` voraus. Diese Fähigkeit kam erst mit WHMCS 9 hinzu und steht auf der festgelegten Zielplattform WHMCS 8.13.4 nicht zur Verfügung. Setup, Health Check und Worker sperren den Kanal, ohne still auf sevDesk umzuschalten.
 
 Bulk- und historische Importe versenden nie automatisch. Nach einem möglicherweise ausgeführten Create-, Open- oder Versand-Write wird ausschließlich lesend reconciliiert; ein nicht beweisbarer Ausgang bleibt `ambiguous` und wird nicht automatisch wiederholt.
+
+### Mahnungen, Storno und Late Fees
+
+Im Direktbetrieb bleibt WHMCS die Quelle für Fälligkeit, Mahnstufe, Status und Zahlung. Die WHMCS-Hooks liefern nur den Anlass; der Worker prüft den gesamten Forderungsstand erneut. Eine Mahnung wird nur verschickt, wenn die ursprüngliche sevDesk-Invoice nachweislich zugestellt wurde, weiterhin unverändert und offen ist und noch keine Teilzahlung vorliegt. Die parallele WHMCS-Mail wird unterdrückt. Es gibt keinen stillen Rückfall auf eine WHMCS-PDF.
+
+Eine unbezahlte, unveränderte Direktbetriebs-Invoice kann hinter einem eigenen Canary über sevDesk storniert werden. Das Modul prüft die erzeugte `SR` samt PDF; bei einer ZUGFeRD-Invoice zusätzlich das XML. Die Stornorechnung wird nur dann per Mail zugestellt, wenn auch die Originalrechnung nachweislich durch sevDesk versandt wurde. Änderungen nach Ausgabe, Teilzahlungen, Refunds, Collections, Chargebacks und Credit-Note-Fälle bleiben manuelle Prüffälle.
+
+Positive und unbesteuerte WHMCS-Positionen vom Typ `LateFee` gehören nicht zur Leistungsrechnung. Nach ausdrücklicher Freigabe werden sie herausgelöst und über einen Fingerprint eingefroren. Die Gebühr wird genau einmal erfasst:
+
+- entweder durch eine sevDesk-Mahnung, wenn der Mandanten-Canary deren buchhalterische Wirkung exakt bestätigt;
+- oder nach Zahlung über einen verknüpften Rule-22-Revenue-Voucher mit einem aktuell durch `ReceiptGuidance` bestätigten 0-%-Konto.
+
+Der Rule-22-Beleg ist ein interner, mailfreier Buchhaltungsbeleg. Das Modul gibt dafür bewusst keinen vermeintlichen Kunden-PDF-Link aus. Andere, negative, besteuerte oder nachträglich veränderte Gebühren bleiben blockiert. Bei Grundrechnung plus Gebührenbeleg verlangt der Buchungsassistent eine manuelle Zahlungsaufteilung.
 
 ### Native ZUGFeRD-Invoices
 
@@ -168,7 +190,9 @@ sevDesk erstellt das strukturierte Dokument mit `propertyIsEInvoice=true`. Beim 
 
 ## Datenmodell und Zuverlässigkeit
 
-`mod_sevdesk` bleibt die einzige verbindliche Invoice-zu-sevDesk-Zuordnung. Additiv kommen `document_type`, `document_authority`, `document_number`, `document_ready_at`, `delivered_at`, `pdf_sha256`, `is_e_invoice` und `xml_sha256` hinzu. Alte Mappings behalten Typ und Hoheit zunächst als `NULL`; beides wird erst nach read-only Prüfung und Adminbestätigung ergänzt. Für alte Becker-Belege ist WHMCS die sichere Vorauswahl. Eine bereits im Altjob eingefrorene Entscheidung darf dabei nicht überschrieben werden. sevDesk-Hoheit setzt eine bezahlte WHMCS-Rechnung, eine finalisierte sevDesk-Invoice, Proforma, Theme-Adapter und einen gültigen Versandweg voraus. Kundenansicht und PDF-Proxy prüfen den lokalen Zahlungsstatus nochmals. Legacy-Zeilen mit `sevdesk_id = NULL` bleiben Recovery-Fälle.
+`mod_sevdesk` bleibt die verbindliche Primärzuordnung zwischen WHMCS-Rechnung und sevDesk-Beleg. Additiv kommen `document_type`, `document_authority`, `invoice_lifecycle_mode`, `document_number`, `document_ready_at`, `delivered_at`, `pdf_sha256`, `is_e_invoice` und `xml_sha256` hinzu. Alte Mappings behalten Typ, Hoheit und Lebenszyklus zunächst als `NULL`; sie werden erst nach read-only Prüfung und Adminbestätigung ergänzt. Für alte Becker-Belege ist WHMCS die sichere Vorauswahl. Eine bereits im Altjob eingefrorene Entscheidung darf dabei nicht überschrieben werden. Kundenansicht und PDF-Proxy prüfen Status, Hoheit und Lebenszyklus nochmals. Legacy-Zeilen mit `sevdesk_id = NULL` bleiben Recovery-Fälle.
+
+`mod_sevdesk_related_documents` speichert ausschließlich die Zusatzrollen `reminder`, `cancellation` und `late_fee_voucher`. Darin stehen Remote-ID, Elternbezug, Mahnstufe, Beträge, Fingerprints, Prüfsummen und Zustellstatus. Anschriften, Mailadressen, PDF-Dateien und API-Rohantworten werden nicht dupliziert.
 
 `mod_sevdesk_pdf_rate_limits` begrenzt den authentifizierten Kundenabruf pro
 WHMCS-Kunde. Die Tabelle enthält nur Zähler und Zeitfenster, keine PDF-Bytes oder
@@ -208,8 +232,8 @@ API-Token, WHMCS-Konfiguration, unredigierte Exporte/Dumps, Kundendaten, Rechnun
 | [docs/testing.md](docs/testing.md) | Teststrategie und verbindliche Invoice-Canaries |
 | [docs/operations.md](docs/operations.md) | Einrichtung, Nachlauf, Versand und Recovery |
 | [docs/sevdesk-openapi.yaml](docs/sevdesk-openapi.yaml) | unveränderte lokale sevDesk-OpenAPI-Referenz |
-| [RELEASE_NOTES_2.1.0-rc.8.md](RELEASE_NOTES_2.1.0-rc.8.md) | Release Notes für die aktuelle Vorabversion |
-| [RELEASE_NOTES_2.1.0-rc.7.md](RELEASE_NOTES_2.1.0-rc.7.md) | Notizen zur vorherigen Vorabversion |
+| [RELEASE_NOTES_2.1.0-rc.9.md](RELEASE_NOTES_2.1.0-rc.9.md) | Release Notes für die aktuelle Vorabversion |
+| [RELEASE_NOTES_2.1.0-rc.8.md](RELEASE_NOTES_2.1.0-rc.8.md) | Notizen zur vorherigen Vorabversion |
 
 ## Freigabegrenzen
 
@@ -217,7 +241,7 @@ API-Token, WHMCS-Konfiguration, unredigierte Exporte/Dumps, Kundendaten, Rechnun
 - sevDesk-Dokumenthoheit verlangt `invoice_only`, WHMCS-Proforma, installierten Theme-Adapter und eine ausdrückliche Betreiberbestätigung.
 - Der mitgelieferte Twenty-One-Adapter ersetzt die normalen sichtbaren Kundenlinks. Ein direkt erratener WHMCS-Core-PDF-Endpunkt kann ohne Core-Änderung technisch weiter erreichbar sein.
 - Rule 3 bleibt ausschließlich für bestätigte innergemeinschaftliche Warenlieferungen an Organisationen mit USt-ID und `taxexempt` freigegeben; Hosting und andere Dienstleistungen bleiben blockiert.
-- Exakt erkannte Sammelzahlungen und genau ein für seine Rule-/Rate-Capability bestätigter `PromoHosting`-Rabatt haben den oben beschriebenen engen Pfad. Gewöhnliches Guthaben kann nur im ausdrücklich bestätigten Voucher-Einzelexport über den vollen Bruttobetrag verarbeitet werden. `LateFee`, andere negative Positionen, Fremdwährungen und unklare Mischfälle bleiben blockiert.
+- Exakt erkannte Sammelzahlungen und genau ein für seine Rule-/Rate-Capability bestätigter `PromoHosting`-Rabatt haben den oben beschriebenen engen Pfad. Gewöhnliches Guthaben kann nur im ausdrücklich bestätigten Voucher-Einzelexport über den vollen Bruttobetrag verarbeitet werden. Positive, unbesteuerte `LateFee` ist ausschließlich über den getrennten rc.9-Vertrag zulässig; andere Gebühren, negative Positionen, Fremdwährungen und unklare Mischfälle bleiben blockiert.
 - WHMCS 9, Rules 18/20, B2G/XRechnung, historische E-Rechnungs-Backfills, dauerhafte PDF-Spiegelung und Invoice-CreditNotes sind nicht freigegeben.
 
 Die sevDesk-Prüfung bestätigt technische API-Gültigkeit, nicht die steuerliche Behandlung. Vor Produktivbetrieb muss die fachliche Matrix von Steuerberatung beziehungsweise Buchhaltung bestätigt werden. Nach 401/403 stoppt der Worker mandantenweit, bis eine erfolgreiche read-only Prüfung im Setup die Sperre aufhebt.

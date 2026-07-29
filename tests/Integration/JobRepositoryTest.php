@@ -139,6 +139,153 @@ final class JobRepositoryTest extends MariaDbTestCase
         self::assertSame('completed', $this->jobs->findJob($backfillJob)?->status);
     }
 
+    public function testDirectEmailIntentUpgradesTheExistingPrimaryOwnerMonotonically(): void
+    {
+        $baseCandidate = [
+            'trigger' => 'InvoiceCreated',
+            'requestedExportMode' => 'invoice_only',
+            'requestedDocumentAuthority' => 'sevdesk',
+            'requestedInvoiceLifecycleMode' => 'issue_on_creation',
+            'requestedOssProfile' => 'blocked',
+            'requestedEuB2cMode' => 'blocked',
+            'requestedDeliveryChannel' => 'sevdesk',
+            'delivery_requested' => false,
+        ];
+        $ownerJob = $this->jobs->create('automatic_export', [[
+            'invoice_id' => 426,
+            'action' => 'export_document',
+            'dedupe_key' => 'export_voucher:426',
+            'candidate' => $baseCandidate,
+        ]]);
+        $baseCandidate['delivery_requested'] = true;
+        $duplicateJob = $this->jobs->create('automatic_export', [[
+            'invoice_id' => 426,
+            'action' => 'export_document',
+            'dedupe_key' => 'export_voucher:426',
+            'candidate' => $baseCandidate,
+        ]]);
+
+        $owner = Capsule::table(Migrator::ITEMS_TABLE)->where('job_id', $ownerJob)->first();
+        $duplicate = Capsule::table(Migrator::ITEMS_TABLE)->where('job_id', $duplicateJob)->first();
+        $candidate = json_decode((string) $owner->candidate_json, true, 32, JSON_THROW_ON_ERROR);
+
+        self::assertTrue($candidate['delivery_requested']);
+        self::assertMatchesRegularExpression(
+            '/^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}$/',
+            (string) $candidate['directDeliveryRequestedAt'],
+        );
+        self::assertSame('pending', $owner->status);
+        self::assertSame('skipped', $duplicate->status);
+        self::assertNull($duplicate->dedupe_key);
+    }
+
+    public function testIssuedPrimaryFingerprintComesOnlyFromTheOwningMappedExport(): void
+    {
+        $fingerprint = hash('sha256', 'synthetic-issued-primary-contract');
+        $jobId = $this->jobs->create('automatic_export', [[
+            'invoice_id' => 427,
+            'action' => 'export_document',
+            'dedupe_key' => 'export_voucher:427',
+            'candidate' => [
+                'primaryInvoiceContractFingerprint' => $fingerprint,
+            ],
+        ]]);
+        $claimed = $this->jobs->claimNext();
+        self::assertNotNull($claimed);
+        self::assertTrue($this->jobs->checkpoint(
+            (int) $claimed->id,
+            (string) $claimed->lease_token,
+            'mapping_persisted',
+        ));
+
+        self::assertSame($fingerprint, $this->jobs->issuedPrimaryContractFingerprint(427));
+
+        $loserJob = $this->jobs->create('automatic_export', [[
+            'invoice_id' => 427,
+            'action' => 'export_document',
+            'dedupe_key' => 'export_voucher:427',
+            'candidate' => [
+                'primaryInvoiceContractFingerprint' => hash('sha256', 'dedupe loser'),
+            ],
+        ]]);
+        $loser = Capsule::table(Migrator::ITEMS_TABLE)->where('job_id', $loserJob)->first();
+        self::assertSame('skipped', $loser->status);
+        self::assertSame($fingerprint, $this->jobs->issuedPrimaryContractFingerprint(427));
+
+        Capsule::table(Migrator::ITEMS_TABLE)->where('job_id', $jobId)->update([
+            'candidate_json' => '{"primaryInvoiceContractFingerprint":"invalid"}',
+        ]);
+        self::assertNull($this->jobs->issuedPrimaryContractFingerprint(427));
+    }
+
+    public function testContractFreezeRetainsRiskyRelatedDocumentDedupe(): void
+    {
+        $jobId = $this->jobs->create('invoice_dunning', [[
+            'invoice_id' => 428,
+            'action' => 'create_invoice_reminder',
+            'dedupe_key' => 'invoice_reminder:428:1:synthetic',
+        ]]);
+        $claimed = $this->jobs->claimNext();
+        self::assertNotNull($claimed);
+        self::assertTrue($this->jobs->checkpoint(
+            (int) $claimed->id,
+            (string) $claimed->lease_token,
+            'reminder_create_requested',
+        ));
+
+        $this->jobs->freezeRelatedDocumentActions(428, 'invoice_total_changed');
+
+        $frozen = Capsule::table(Migrator::ITEMS_TABLE)->where('job_id', $jobId)->first();
+        self::assertSame('ambiguous', $frozen->status);
+        self::assertSame('reminder_create_requested', $frozen->checkpoint);
+        self::assertSame('invoice_reminder:428:1:synthetic', $frozen->dedupe_key);
+
+        $duplicateJob = $this->jobs->create('invoice_dunning', [[
+            'invoice_id' => 428,
+            'action' => 'create_invoice_reminder',
+            'dedupe_key' => 'invoice_reminder:428:1:synthetic',
+        ]]);
+        self::assertSame(
+            'skipped',
+            Capsule::table(Migrator::ITEMS_TABLE)
+                ->where('job_id', $duplicateJob)
+                ->value('status'),
+        );
+    }
+
+    public function testAmbiguousDunningWriteRequeuesOnlyReadOnlyRecoveryWithSameIdentity(): void
+    {
+        $dedupe = 'cancel_invoice:429:synthetic';
+        $jobId = $this->jobs->create('invoice_cancellation', [[
+            'invoice_id' => 429,
+            'action' => 'cancel_invoice',
+            'dedupe_key' => $dedupe,
+            'candidate' => ['localDunningFingerprint' => hash('sha256', 'synthetic')],
+        ]]);
+        $claimed = $this->jobs->claimNext();
+        self::assertNotNull($claimed);
+        self::assertTrue($this->jobs->checkpoint(
+            (int) $claimed->id,
+            (string) $claimed->lease_token,
+            'cancellation_write_requested',
+            ['remoteId' => '90429'],
+        ));
+        $this->jobs->finish($claimed, JobOutcome::ambiguous(
+            'Synthetic unknown cancellation.',
+            'cancellation_write_requested',
+            '90429',
+        ));
+
+        self::assertTrue($this->jobs->reconcile((int) $claimed->id));
+
+        $recovery = Capsule::table(Migrator::ITEMS_TABLE)->where('job_id', $jobId)->first();
+        self::assertSame('pending', $recovery->status);
+        self::assertSame('cancel_invoice', $recovery->action);
+        self::assertSame('cancellation_write_requested', $recovery->checkpoint);
+        self::assertSame('90429', $recovery->sevdesk_id);
+        self::assertSame($dedupe, $recovery->dedupe_key);
+    }
+
     public function testHistoricalBackfillCannotTakeOverLegacyRiskyFailedVoucherWrite(): void
     {
         $oldJob = $this->jobs->create('legacy_export', [[

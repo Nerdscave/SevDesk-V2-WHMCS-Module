@@ -30,6 +30,27 @@ final class HookBehaviorTest extends TestCase
         self::assertSame(0, $result['remoteCalls']);
     }
 
+    public function testDirectAutogenEmailIsSuppressedOnlyAfterPersistingTheDeliveryJob(): void
+    {
+        $result = $this->runScenario('direct_autogen_initial_email');
+
+        self::assertSame(['abortsend' => true], $result['mailResult']);
+        self::assertSame(1, $result['jobCount']);
+        self::assertSame('InvoiceCreated', $result['trigger']);
+        self::assertTrue($result['deliveryRequested']);
+        self::assertSame(0, $result['remoteCalls']);
+    }
+
+    public function testDirectInvoiceWithoutRequestedCoreMailStaysMailFree(): void
+    {
+        $result = $this->runScenario('direct_created_without_email');
+
+        self::assertSame(1, $result['jobCount']);
+        self::assertSame('InvoiceCreated', $result['trigger']);
+        self::assertFalse($result['deliveryRequested']);
+        self::assertSame(0, $result['remoteCalls']);
+    }
+
     public function testMassPaymentHookQueuesOriginalInvoicesAndKeepsContainerMail(): void
     {
         $result = $this->runScenario('mass_payment_container');

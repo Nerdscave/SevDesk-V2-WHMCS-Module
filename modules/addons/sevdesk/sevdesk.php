@@ -9,6 +9,7 @@ use WHMCS\Module\Addon\SevDesk\Api\ApiException;
 use WHMCS\Module\Addon\SevDesk\Config;
 use WHMCS\Module\Addon\SevDesk\Controller;
 use WHMCS\Module\Addon\SevDesk\Database\Migrator;
+use WHMCS\Module\Addon\SevDesk\Repository\RelatedDocumentRepository;
 use WHMCS\Module\Addon\SevDesk\Support\AdvisoryLockName;
 use WHMCS\Module\Addon\SevDesk\Support\ClientDocumentPresenter;
 use WHMCS\Module\Addon\SevDesk\Support\ClientPdfRateLimiter;
@@ -40,7 +41,7 @@ function sevdesk_config(): array
         'name' => 'sevdesk Integration',
         'description' => 'Fortsetzbarer WHMCS→sevdesk Voucher-/Invoice-Export. '
             . 'Die betriebliche Konfiguration erfolgt ausschließlich auf der Modul-Seite „Einrichtung“.',
-        'version' => '2.1.0-rc.8',
+        'version' => '2.1.0-rc.9',
         'author' => 'Nerdscave',
         'language' => 'german',
         // WHMCS persists fields declared here without passing through the guarded
@@ -332,7 +333,8 @@ function sevdesk_clientarea(array $vars): array
         ];
     };
 
-    if ((string) ($_GET['a'] ?? '') !== 'download') {
+    $clientAction = (string) ($_GET['a'] ?? '');
+    if (!in_array($clientAction, ['download', 'downloadRelated'], true)) {
         return $page('Bitte öffnen Sie das Rechnungsdokument über die zugehörige Rechnung.');
     }
 
@@ -384,8 +386,41 @@ function sevdesk_clientarea(array $vars): array
         if (!DocumentDeliveryContext::usesSevdeskInvoiceAuthority($documentContext, $mapping)) {
             return $page('Das Rechnungsdokument ist nicht verfügbar.', 404);
         }
+        $relatedDocument = null;
+        if ($clientAction === 'downloadRelated') {
+            $role = trim((string) ($_GET['role'] ?? ''));
+            $level = filter_var(
+                trim((string) ($_GET['level'] ?? '0')),
+                FILTER_VALIDATE_INT,
+                ['options' => ['min_range' => 0, 'max_range' => 65535]],
+            );
+            if (
+                !in_array($role, [
+                    RelatedDocumentRepository::ROLE_REMINDER,
+                    RelatedDocumentRepository::ROLE_CANCELLATION,
+                ], true)
+                || $level === false
+            ) {
+                return $page('Das Rechnungsdokument ist nicht verfügbar.', 404);
+            }
+            $relatedDocument = $application->relatedDocuments->find($invoiceId, $role, $level);
+            if (
+                $relatedDocument === null
+                || trim((string) ($relatedDocument->document_ready_at ?? '')) === ''
+                || preg_match('/^[1-9]\d*$/', trim((string) ($relatedDocument->sevdesk_id ?? ''))) !== 1
+                || preg_match('/^[a-f0-9]{64}$/', strtolower(trim((string) (
+                    $relatedDocument->pdf_sha256
+                    ?? ''
+                )))) !== 1
+            ) {
+                return $page('Das Rechnungsdokument ist noch nicht verfügbar.', 409);
+            }
+        }
         $invoiceStatus = $application->whmcs->invoiceStatusForDelivery($invoiceId);
-        if (!ClientDocumentPresenter::isDeliverableInvoiceMapping($invoiceStatus, $mapping)) {
+        if (
+            $relatedDocument === null
+            && !ClientDocumentPresenter::isDeliverableInvoiceMapping($invoiceStatus, $mapping)
+        ) {
             return $page('Das Rechnungsdokument ist noch nicht verfügbar.', 409);
         }
 
@@ -401,10 +436,19 @@ function sevdesk_clientarea(array $vars): array
             );
         }
 
-        $expectedHash = strtolower(trim((string) $mapping->pdf_sha256));
-        $pdf = $application->invoicePdf()->fetch((string) $mapping->sevdesk_id);
+        $expectedHash = strtolower(trim((string) (
+            $relatedDocument->pdf_sha256
+            ?? $mapping->pdf_sha256
+        )));
+        $pdf = $application->invoicePdf()->fetch((string) (
+            $relatedDocument->sevdesk_id
+            ?? $mapping->sevdesk_id
+        ));
         $invoiceStatus = $application->whmcs->invoiceStatusForDelivery($invoiceId);
-        if (!ClientDocumentPresenter::isDeliverableInvoiceMapping($invoiceStatus, $mapping)) {
+        if (
+            $relatedDocument === null
+            && !ClientDocumentPresenter::isDeliverableInvoiceMapping($invoiceStatus, $mapping)
+        ) {
             return $page('Das Rechnungsdokument ist noch nicht verfügbar.', 409);
         }
         if (!hash_equals($expectedHash, $pdf['sha256'])) {

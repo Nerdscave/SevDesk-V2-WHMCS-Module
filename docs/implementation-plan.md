@@ -8,7 +8,7 @@ Die Voucher-Basisphasen sowie die Codepfade für wählbare Voucher-/Invoice-Ziel
 
 `2.1.0-rc.5` ergänzt den zeitlich begrenzten Kleinunternehmerpfad, die strukturelle Behandlung von WHMCS-Sammelzahlungen und den eng freigegebenen Rule-11-Rabatt. Ein Live-Lauf mit einer normalen Rule-11-Invoice scheiterte erst beim Öffnen: sevDesk akzeptierte den Draft, wies `sendBy` wegen des automatisch gewählten Konten-Scopes aber mit Code 7100 zurück. Deshalb gibt es nun vor dem Rabattpfad ein eigenes Gate für alle Rule-11-Invoices. Offen bleiben Invoice-`bookAmount`, dieser rabattfreie Rule-11-Canary, der darauf aufbauende Rabatt-Canary, die Voucher-Canaries der produktiv genutzten Steuerfälle und die fachliche Abnahme.
 
-`2.1.0-rc.6` erweitert diesen festen Rabattvertrag auf vier getrennte Invoice-Capabilities: Rule 11 mit 0 %, Rule 1 mit 19 %, Rule 17 mit 0 % und Rule 19 mit positivem, einheitlichem Zielsteuersatz. Jede Capability besitzt ein eigenes, standardmäßig ausgeschaltetes Canary-Gate. Der Rule-11-Invoice-Canary und seine aktuelle `REVENUE`-Guidance bleiben davon unabhängig Pflicht. Capability-Key und Rabatt-Fingerprint werden vor dem Write eingefroren. Der Rabatt wird als exakt geprüfte negative `InvoicePos` übertragen, weil der globale `discountSave` im Rule-1-Live-Canary die WHMCS-Centverteilung verändert hat. Der Remote-Readback prüft alle Positionen sowie `sumNet`, `sumTax` und `sumGross` exakt; `sumDiscounts` muss numerisch 0 sein. `LateFee` bleibt ein eigener, stets blockierter Prüffall.
+`2.1.0-rc.6` erweitert diesen festen Rabattvertrag auf vier getrennte Invoice-Capabilities: Rule 11 mit 0 %, Rule 1 mit 19 %, Rule 17 mit 0 % und Rule 19 mit positivem, einheitlichem Zielsteuersatz. Jede Capability besitzt ein eigenes, standardmäßig ausgeschaltetes Canary-Gate. Der Rule-11-Invoice-Canary und seine aktuelle `REVENUE`-Guidance bleiben davon unabhängig Pflicht. Capability-Key und Rabatt-Fingerprint werden vor dem Write eingefroren. Der Rabatt wird als exakt geprüfte negative `InvoicePos` übertragen, weil der globale `discountSave` im Rule-1-Live-Canary die WHMCS-Centverteilung verändert hat. Der Remote-Readback prüft alle Positionen sowie `sumNet`, `sumTax` und `sumGross` exakt; `sumDiscounts` muss numerisch 0 sein. `LateFee` blieb bis rc.8 ein eigener, blockierter Prüffall.
 
 `2.1.0-rc.7` trennt den deutschen Rule-1-/19-%-Rabatt von demselben Steuersatz unter der bestätigten EU-B2C-Inlandsbesteuerung. Beide Fälle haben verschiedene Steuerprofile und Länderklassen und erhalten deshalb eigene Capability-Keys und Setup-Gates. Bestehende deutsche Freigaben bleiben unverändert. Veraltete Keys werden im Setup nicht mehr allein wegen eines nicht leeren Werts vorausgewählt.
 
@@ -22,6 +22,13 @@ Ergebnis sichtbar. Der Kunden-PDF-Proxy ist pro Kunde begrenzt, ohne
 Dokumentkopien anzulegen. Rule 1 mit 0 % wird regelbasiert blockiert und kann
 nicht über den Namen eines AddFunds- oder EU-B2C-Profils freigegeben werden.
 
+`2.1.0-rc.9` ergänzt zwei eingefrorene Invoice-Lebenszyklen. Der bisherige
+Proforma-/Paid-Ablauf bleibt Default. Der neue Direktbetrieb gibt eine offene
+sevDesk-Invoice schon bei WHMCS-Erstellung aus und verwendet die
+WHMCS-Automation nur als Termin- und Statusquelle. Daneben entstehen getrennte,
+idempotente Jobs für `MA`, `SR` und einen mailfreien Rule-22-Gebührenvoucher.
+Alle neuen Remote-Wege haben eigene Canaries und bleiben bei einem Upgrade aus.
+
 Der Invoice-Canary bleibt ein hartes Release-Gate. Bis dahin blockiert `invoice_canary_confirmed=off` alle Invoice-Modi. Rule-11-Invoices benötigen zusätzlich `small_business_invoice_canary_confirmed` und eine aktuelle `ReceiptGuidance` mit Rule 11, 0 % und `REVENUE`-Scope. ZUGFeRD hat mit `e_invoice_canary_confirmed` ein eigenes Gate. Die fünf Rabatt-Gates sind `invoice_discount_canary_confirmed`, `invoice_discount_rule1_19_canary_confirmed`, `invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed`, `invoice_discount_rule17_0_canary_confirmed` und `invoice_discount_rule19_canary_confirmed`. Das additive Upgrade behält `voucher_only` bei und setzt die neuen Gates auf aus. Der 2.0-Betrieb stoppt beim Upgrade einmalig mit `sync_enabled=off` und `runtime_review_required=on`.
 
 ## Feste Produktentscheidungen
@@ -34,7 +41,9 @@ Der Invoice-Canary bleibt ein hartes Release-Gate. Bis dahin blockiert `invoice_
 - drei Exportmodi: `voucher_only`, `invoice_for_oss`, `invoice_only`
 - Dokumenthoheit `whmcs` in allen Modi; `sevdesk` ausschließlich mit `invoice_only`
 - Rule 19 nur für ausdrücklich bestätigte, vollständig digitale EU-B2C-Leistungen; Rules 18/20 bleiben blockiert
-- Invoice-Ziele sind paid-only und benötigen eine effektive WHMCS-Rechnungsnummer; bei leerem
+- Invoice-Ziele im Upgrade-Default sind paid-only; `issue_on_creation` erlaubt
+  nur die gesondert freigegebene offene Direktbetriebs-Invoice. Beide Wege
+  benötigen eine effektive WHMCS-Rechnungsnummer; bei leerem
   Legacy-`invoicenum` gilt read-only die interne Invoice-ID
 - keine automatische Dokumenttyp-Fallbacklogik nach einem Remote-Write
 - `mod_sevdesk` in-place weiterverwenden
@@ -44,12 +53,16 @@ Der Invoice-Canary bleibt ein hartes Release-Gate. Bis dahin blockiert `invoice_
 - OSS-Voucher blockieren; Rule-19-Invoice nur hinter Profil- und Canary-Gate
 - zweistufiger Buchungsassistent in Release 2.0.0: `BookingService`, Jobtyp `payment_booking`, Aktion `book_payment`
 - manuell bestätigter negativer Korrektur-Voucher in Release 2.0.0: `CorrectionService`, Jobtyp `refund_correction`, Aktion `correction_voucher`
-- keine automatische Refund-, Chargeback-, Gutschrift- oder Storno-Verarbeitung; Chargebacks bleiben blockiert
+- keine automatische Refund-, Chargeback- oder Gutschriftverarbeitung;
+  ausschließlich eine unveränderte unbezahlte Direktbetriebs-Invoice darf
+  hinter eigenem Canary über `cancelInvoice` storniert werden
 - keine sevDesk→WHMCS-Rücksynchronisation und keine sevDesk-Webhooks
 - keine dauerhafte Invoice-PDF-/XML-Spiegelung und kein Invoice-`CreditNote`-Pfad
 - ZUGFeRD ausschließlich sevDesk-nativ für neue deutsche B2B-Rule-1-Invoices bei `invoice_only + sevdesk`; kein eigenes XML, kein B2G/XRechnung, keine OSS-E-Rechnung und kein historischer E-Rechnungs-Backfill
 - genau ein strukturell belegter `PromoHosting`-Rabatt nur in `invoice_only`, EUR und ohne E-Rechnung; Rule 11/0 %, Rule 1/19 % für Deutschland, Rule 1/19 % für EU-B2C mit bestätigter Inlandsbesteuerung, Rule 17/0 % und Rule 19 mit positivem einheitlichem Zielsteuersatz haben getrennte Canary-Gates
-- `LateFee` bleibt unabhängig von Rule, Datum und Dokumentmodus blockiert
+- positive, unbesteuerte `LateFee` ausschließlich im rc.9-Sonderpfad:
+  aus der Leistungs-Invoice entfernen und genau einmal über eine bestätigte
+  `MA`-Wirkung oder einen mailfreien Rule-22-Voucher nach Zahlung erfassen
 
 ## Phase 0: Dokumentation und Sicherheitsgrundlagen
 
@@ -563,7 +576,55 @@ Der technische Live-Lauf hat Rule 19, Marker, Nummer, Pflichtreferenzen, PDF und
 
 Das Modul kann den Pfad technisch fail-closed ausführen. Produktiv freigegeben wird er erst nach Invoice-Canary, eigenem ZUGFeRD-Canary und der WHMCS-Liveprüfung von Proforma, Adapter, Paid-Mail und Kunden-PDF.
 
-## Phase 13: Erweiterungen nach stabilem Invoice-Rollout
+## Phase 13: RC.9 – Invoice-Direktbetrieb und Late Fees
+
+### Aufgaben
+
+1. Den Lebenszyklus `after_payment_proforma` für bestehende Installationen
+   beibehalten und `issue_on_creation` nur hinter einer signierten
+   Übergangsinventur freigeben.
+2. WHMCS-Proforma, Paid-Nummerierung, Rechnungsdatum, offene Rechnungen, Theme
+   Adapter v2 und aktive Jobs vor dem Direktbetrieb fail-closed prüfen.
+3. `InvoiceCreated` in einen unveränderlichen, offenen Invoice-Export übersetzen
+   und den Versandwunsch lokal deduplizieren.
+4. WHMCS-Rechnungs- und Mahnmails unterdrücken, ohne den WHMCS-Ablauf oder dessen
+   Reminder-Hooks zu unterbrechen.
+5. `create_invoice_reminder`, `cancel_invoice` und
+   `export_late_fee_voucher` mit eigenen Checkpoints, Reconciliation und
+   Dedupe-Fingerprints implementieren.
+6. `reminder`, `cancellation` und `late_fee_voucher` additiv in
+   `mod_sevdesk_related_documents` ablegen.
+7. Positive, unbesteuerte `LateFee`-Positionen aus der Leistungs-Invoice
+   entfernen und genau eine Erlösquelle erzwingen: bestätigte `MA`-Wirkung oder
+   Rule-22-Revenue-Voucher nach Zahlung.
+8. Teilzahlungen, Änderungen, Refunds, Collections, Chargebacks und unklare
+   Stornos vor weiteren Remote-Writes einfrieren.
+9. Grundrechnung, Mahnung und Storno im Kundenbereich eigentümergeschützt
+   darstellen; der interne Rule-22-Beleg erhält keinen Kunden-PDF-Link.
+
+### Tests und Gates
+
+- automatisierte Matrix aus Exportmodus, Hoheit, Lebenszyklus,
+  WHMCS-Nummerierung und Canary-Zuständen;
+- additive Migration und mehrfache Zusatzdokumente;
+- Create-, Reminder-, Payment-, Update- und Cancellation-Rennen;
+- exakter MA-, SR- und Rule-22-Readback einschließlich PDF und ZUGFeRD-XML;
+- unbekannter Ausgang an jedem Create-, Cancel- und Delivery-Write;
+- keine doppelte Mail, keine doppelte Gebühr und keine automatische Vollbuchung
+  der verkürzten Grundrechnung;
+- Live-Gate 1 für einen mailfreien Late-Fee-Fall;
+- Live-Gate 2 für Direktinvoice, Reminder, Mahnung, Teilzahlung, Zahlung vor
+  Versand, Storno sowie getrennte E-Invoice-/Rule-19-Varianten.
+
+### Exit-Kriterium
+
+Der mailfreie Gebührenpfad darf erst nach Live-Gate 1 für den
+Buchhaltungsnachlauf aktiviert werden. Direktversand, Mahnung und Storno bleiben
+bis Live-Gate 2 aus. Eine finale 2.1.0 braucht zusätzlich PHP 8.3, den
+vollständigen MariaDB-Integrationslauf und den synthetischen
+WHMCS-8.13.4-Hooknachweis.
+
+## Phase 14: Erweiterungen nach stabilem Invoice-Rollout
 
 Erst nach diesen Gates kommen Invoice-`CreditNote`, Rules 18/20, B2G/XRechnung, Produktklassifikation, Fremdwährung, dauerhafte Dokumentspiegelung, automatische Refund-/Chargeback-Flows oder zusätzliche USt-ID-Dienste infrage. Jede Erweiterung braucht einen konkreten Geschäftsfall, einen API-Nachweis, eine eigene Recovery-Regel und Tests.
 

@@ -8,6 +8,7 @@ use JsonException;
 use Throwable;
 use WHMCS\Database\Capsule;
 use WHMCS\Module\Addon\SevDesk\Config;
+use WHMCS\Module\Addon\SevDesk\Database\Migrator;
 use WHMCS\Module\Addon\SevDesk\Domain\Decimal;
 use WHMCS\Module\Addon\SevDesk\Repository\JobRepository;
 use WHMCS\Module\Addon\SevDesk\Repository\MappingRepository;
@@ -311,8 +312,44 @@ final class BookingJobHandler
                 errorCode: 'whmcs_payment_changed',
             );
         }
+        if ($this->lateFeePaymentSplitRequired($invoiceId, $candidate)) {
+            return JobOutcome::permanentFailure(
+                'Grundrechnung und Mahngebührenbeleg benötigen eine manuelle Zahlungsaufteilung.',
+                errorCode: 'late_fee_payment_split_required',
+            );
+        }
 
         return null;
+    }
+
+    /** @param array<string,mixed> $candidate */
+    private function lateFeePaymentSplitRequired(int $invoiceId, array $candidate): bool
+    {
+        if (
+            self::normalisedDocumentType($candidate['documentType'] ?? null)
+                !== MappingRepository::DOCUMENT_TYPE_INVOICE
+        ) {
+            return false;
+        }
+
+        $hasSeparatedDocument = Capsule::schema()->hasTable(Migrator::RELATED_DOCUMENTS_TABLE)
+            && Capsule::table(Migrator::RELATED_DOCUMENTS_TABLE)
+                ->where('invoice_id', $invoiceId)
+                ->where('role', 'late_fee_voucher')
+                ->exists();
+        if ($hasSeparatedDocument) {
+            return true;
+        }
+
+        return $this->config->get(
+            'late_fee_mode',
+            'blocked',
+        ) === 'reminder_then_rule22'
+            && Capsule::table('tblinvoiceitems')
+                ->where('invoiceid', $invoiceId)
+                ->where('type', 'LateFee')
+                ->where('amount', '>', 0)
+                ->exists();
     }
 
     /** @param array<string,mixed> $candidate */

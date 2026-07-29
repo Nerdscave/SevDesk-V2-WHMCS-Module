@@ -27,6 +27,7 @@ final class ClientDocumentPresenter
         ?object $mapping,
         ?string $latestJobStatus,
         string $downloadUrl,
+        string $invoiceLifecycleMode = MappingRepository::LIFECYCLE_AFTER_PAYMENT_PROFORMA,
     ): array {
         $invoiceNumber = trim((string) ($mapping->document_number ?? ''));
         if ($invoiceNumber === '') {
@@ -35,7 +36,16 @@ final class ClientDocumentPresenter
 
         $ready = self::isDeliverableInvoiceMapping($invoiceStatus, $mapping);
         $state = $ready ? 'ready' : 'proforma';
-        if (!$ready && strcasecmp(trim($invoiceStatus), 'Paid') === 0) {
+        if (
+            !$ready
+            && (
+                strcasecmp(trim($invoiceStatus), 'Paid') === 0
+                || (
+                    strcasecmp(trim($invoiceStatus), 'Unpaid') === 0
+                    && $invoiceLifecycleMode === MappingRepository::LIFECYCLE_ISSUE_ON_CREATION
+                )
+            )
+        ) {
             $state = match (true) {
                 in_array(trim((string) $latestJobStatus), self::FAILURE_STATUSES, true) => 'failure',
                 default => 'pending',
@@ -64,7 +74,18 @@ final class ClientDocumentPresenter
 
     public static function isDeliverableInvoiceMapping(string $invoiceStatus, ?object $mapping): bool
     {
-        return in_array(strtolower(trim($invoiceStatus)), ['paid', 'refunded'], true)
-            && self::isReadyInvoiceMapping($mapping);
+        if (!self::isReadyInvoiceMapping($mapping)) {
+            return false;
+        }
+        $status = strtolower(trim($invoiceStatus));
+        if (in_array($status, ['paid', 'refunded'], true)) {
+            return true;
+        }
+
+        return in_array($status, ['unpaid', 'cancelled'], true)
+            && trim((string) ($mapping->document_authority ?? ''))
+                === MappingRepository::DOCUMENT_AUTHORITY_SEVDESK
+            && trim((string) ($mapping->invoice_lifecycle_mode ?? ''))
+                === MappingRepository::LIFECYCLE_ISSUE_ON_CREATION;
     }
 }

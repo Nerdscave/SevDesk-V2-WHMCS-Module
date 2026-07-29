@@ -13,7 +13,11 @@ WHMCS-Kundenbereich. WHMCS-Coredateien werden nicht verändert.
    bleiben.
 5. Bestätige die Installation erst danach auf der sevdesk-Einrichtungsseite.
 
-Ein Custom-Theme-Adapter erhält in `sevdeskDocument` genau diese Felder:
-`authority`, `state`, `invoiceNumber` und `downloadUrl`. Der direkt erratbare
+Ein Custom-Theme-Adapter erhält in `sevdeskDocument` die Felder
+`authority`, `state`, `invoiceNumber` und `downloadUrl`. Zusätzlich enthält
+`sevdeskRelatedDocuments` die zum Download freigegebenen Mahnungen und
+Stornorechnungen sowie den rein buchhalterischen Status eines getrennten
+Rule-22-Mahngebührenbelegs. Für diesen internen Beleg ist `downloadUrl` leer.
+Der direkt erratbare
 WHMCS-PDF-Endpunkt kann ohne Coreänderung weiterhin existieren; zugesichert ist
 die Ersetzung der normalen Oberfläche und E-Mail-Auslieferung.

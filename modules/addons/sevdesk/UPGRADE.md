@@ -1,10 +1,13 @@
 # Sicherer Ersatz eines bestehenden WHMCS-sevDesk-Moduls
 
-Diese Anleitung gehört zu `2.1.0-rc.8`. Der RC ist eine Vorabversion für kontrollierte Test- und Nachlaufinstallationen. Die technischen Invoice- und ZUGFeRD-Läufe unter WHMCS 8.13.4 sind weitgehend abgeschlossen. Zwei Postfachtests haben bestätigt, dass WHMCS 8.13 Binäranhänge aus `EmailPreSend` nicht übernimmt. Der Versandweg `whmcs_template` ist deshalb gesperrt; bei sevDesk-Dokumenthoheit steht der direkte sevDesk-Versand zur Verfügung. Für die vollständige Freigabe fehlen außerdem Invoice-`bookAmount`, der rabattfreie Rule-11-Invoice-Canary, die fünf getrennten Rabatt-Canaries, die produktiven Voucher-Steuerfälle und die fachliche Abnahme.
+Diese Anleitung gehört zu `2.1.0-rc.9`. Der RC ist eine Vorabversion für kontrollierte Test- und Nachlaufinstallationen. Die technischen Invoice- und ZUGFeRD-Läufe unter WHMCS 8.13.4 sind weitgehend abgeschlossen. Zwei Postfachtests haben bestätigt, dass WHMCS 8.13 Binäranhänge aus `EmailPreSend` nicht übernimmt. Der Versandweg `whmcs_template` ist deshalb gesperrt; bei sevDesk-Dokumenthoheit steht der direkte sevDesk-Versand zur Verfügung. Für die vollständige Freigabe fehlen außerdem Invoice-`bookAmount`, der rabattfreie Rule-11-Invoice-Canary, die fünf getrennten Rabatt-Canaries, die produktiven Voucher-Steuerfälle und die fachliche Abnahme.
 
-RC.8 ergänzt die Tabelle `mod_sevdesk_pdf_rate_limits`. Sie enthält nur
-Kunden-ID, Zeitfenster und Zähler für den authentifizierten PDF-Proxy. Die
-Migration legt sie additiv an und verändert keine vorhandenen Mappings.
+RC.9 ergänzt `mod_sevdesk.invoice_lifecycle_mode` und die Tabelle
+`mod_sevdesk_related_documents`. Dort stehen ausschließlich technische
+Verweise auf Mahnungen, Stornorechnungen und Late-Fee-Voucher. Die Migration
+legt beides additiv an, erhält bestehende Mappings und startet weder Export noch
+Mailversand. `after_payment_proforma`, `dunning_mode=off` und
+`late_fee_mode=blocked` bleiben die sicheren Upgrade-Werte.
 
 Diese Version verwendet weiterhin den Addon-Namen und Ordner `sevdesk` sowie
 die Mappingtabelle `mod_sevdesk`. Der Austausch erhält vorhandene Zuordnungen
@@ -142,13 +145,44 @@ Alte fehlgeschlagene Voucher-Jobs werden nach einem Moduswechsel nicht normal wi
 
 ## sevDesk-Hoheit und ZUGFeRD später aktivieren
 
-sevDesk-Hoheit gilt nur mit `invoice_only`, WHMCS-Proforma, installiertem Theme-Adapter und dem direkten sevDesk-Versand. `whmcs_template` bleibt auf WHMCS 8.13.4 gesperrt. Die Hoheit wird erst aktiviert, nachdem Paid-Mail, Pending-/Ready-Zustand und Kundendownload geprüft wurden. Frühere Invoices wechseln dadurch nicht rückwirkend die Hoheit.
+sevDesk-Hoheit gilt nur mit `invoice_only`, installiertem Theme-Adapter und dem direkten sevDesk-Versand. Im Upgrade-Lebenszyklus bleibt WHMCS-Proforma Pflicht. `whmcs_template` bleibt auf WHMCS 8.13.4 gesperrt. Die Hoheit wird erst aktiviert, nachdem Paid-Mail, Pending-/Ready-Zustand und Kundendownload geprüft wurden. Frühere Invoices wechseln dadurch nicht rückwirkend die Hoheit.
 
 ZUGFeRD braucht einen eigenen Testmandanten-Canary und bleibt bis dahin aus. Das Setup verlangt ein vorhandenes, nur für Administratoren sichtbares WHMCS-Kunden-Tickbox-Feld, eine sevDesk-PaymentMethod, Aktivierungsdatum, PHP XMLReader und die gesonderte Canary-Bestätigung. Ausgewählt werden nur neue deutsche Organisationskunden mit Rule 1 und gesetztem Kunden-Opt-in.
 
 Der verknüpfte sevDesk-Kontakt braucht Käuferreferenz, passende Haupt-E-Mail, vollständige deutsche Rechnungsadresse und darf nicht als Behörde geführt sein. Das Modul ergänzt diese Daten nicht. Fehlen sie nach gesetztem Opt-in, wird die Rechnung blockiert; es gibt keinen Rückfall auf eine normale Invoice. Rule 19, Rules 18/20, B2G/XRechnung und historische E-Rechnungs-Backfills sind ausgeschlossen.
 
 sevDesk erzeugt PDF und XML. Das Modul prüft beide, speichert nur ihre SHA-256-Hashes und hält keine dauerhafte Kopie in WHMCS. Beim sevDesk-Mailkanal wird `sendXml=false` verwendet. Der strukturierte Inhalt bleibt Bestandteil der ZUGFeRD-PDF.
+
+## Direktbetrieb und Late Fees erst nach Canaries
+
+Der neue Lebenszyklus `issue_on_creation` ist kein Upgrade-Schritt. Er darf erst
+nach einem getrennten Live-Test aktiviert werden und setzt Folgendes voraus:
+
+- `invoice_only` und sevDesk-Hoheit;
+- WHMCS-Proforma aus;
+- „Sequential Paid Invoice Numbering“ aus;
+- „Set Invoice Date on Payment“ aus;
+- Adaptervertrag v2;
+- keine offenen Rechnungen oder ungeklärten Lifecycle-Jobs;
+- bestätigte Canaries für Direktinvoice, Mahnung und Storno.
+
+Das Setup zeigt vor dem Wechsel eine signierte Übergangsinventur. Eine
+Bestätigung startet keinen Nachlauf. Bestehende Mappings behalten ihren alten
+Lebenszyklus.
+
+Positive, unbesteuerte `LateFee`-Positionen können hinter einem eigenen Canary
+aus der Leistungs-Invoice herausgelöst werden. Die Gebühr wird genau einmal
+erfasst: entweder durch eine nachweislich buchungswirksame sevDesk-Mahnung oder
+nach Zahlung durch einen mailfreien Rule-22-Revenue-Voucher. Für den
+Voucher-Pfad müssen das aktuelle `ReceiptGuidance`-Ergebnis, Rule 22, 0 % und
+die mandantenspezifische Account-Datev-ID übereinstimmen.
+
+Bis diese Nachweise vorliegen, bleiben
+`direct_invoice_canary_confirmed`, `dunning_canary_confirmed`,
+`cancellation_canary_confirmed`, `e_invoice_cancellation_canary_confirmed`,
+`late_fee_rule22_canary_confirmed` und
+`late_fee_reminder_accounting_canary_confirmed` aus. Historische Exporte bleiben
+unabhängig davon mailfrei.
 
 ## Kompatibilitäts- und Rollbackgrenze
 

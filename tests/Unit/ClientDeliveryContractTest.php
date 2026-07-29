@@ -58,8 +58,14 @@ final class ClientDeliveryContractTest extends TestCase
         self::assertStringContainsString("return ['attachments' => [\$attachment]]", $method);
         self::assertStringContainsString("return ['abortsend' => true]", $method);
         self::assertStringContainsString("return \$guardApplies ? ['abortsend' => true] : []", $method);
+        self::assertStringContainsString('DirectDeliveryIntentContext::request($invoiceId)', $method);
+        self::assertStringContainsString(
+            "sevdesk_enqueue_invoice(['invoiceid' => \$invoiceId], 'InvoiceCreated')",
+            $method,
+        );
+        self::assertStringContainsString("'invoice_lifecycle_mode'", $method);
+        self::assertStringContainsString("get('document_authority', 'whmcs') === 'sevdesk'", $method);
         self::assertStringNotContainsString("get('invoice_delivery_channel'", $method);
-        self::assertStringNotContainsString("get('document_authority'", $method);
         self::assertStringNotContainsString('client()', $method);
         self::assertStringNotContainsString('invoicePdf()', $method);
         self::assertStringNotContainsString('SevdeskClient', $method);
@@ -82,7 +88,9 @@ final class ClientDeliveryContractTest extends TestCase
         self::assertStringContainsString('invoiceStatusForDelivery($invoiceId)', $method);
         self::assertGreaterThanOrEqual(2, substr_count($method, 'invoiceStatusForDelivery($invoiceId)'));
         self::assertStringContainsString('ClientDocumentPresenter::isDeliverableInvoiceMapping(', $method);
-        self::assertStringContainsString('invoicePdf()->fetch((string) $mapping->sevdesk_id)', $method);
+        self::assertStringContainsString('$application->invoicePdf()->fetch(', $method);
+        self::assertStringContainsString('$relatedDocument->sevdesk_id', $method);
+        self::assertStringContainsString('$mapping->sevdesk_id', $method);
         self::assertStringContainsString("hash_equals(\$expectedHash, \$pdf['sha256'])", $method);
         self::assertStringContainsString('tripAuthenticationSafetyGates()', $method);
         self::assertStringContainsString("header('Content-Type: application/pdf')", $method);

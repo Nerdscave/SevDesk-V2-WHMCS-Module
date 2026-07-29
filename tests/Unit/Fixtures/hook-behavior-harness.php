@@ -21,6 +21,8 @@ namespace WHMCS\Module\Addon\SevDesk\Tests\Unit\Fixtures {
             'oss_profile' => 'blocked',
             'eu_b2c_mode' => 'blocked',
             'invoice_delivery_channel' => 'whmcs_template',
+            'invoice_lifecycle_mode' => 'after_payment_proforma',
+            'direct_invoice_canary_confirmed' => '',
             'import_only_paid' => 'on',
         ];
 
@@ -152,6 +154,15 @@ namespace WHMCS\Module\Addon\SevDesk\Tests\Unit\Fixtures {
             }
 
             return HookState::$mapping;
+        }
+    }
+
+    final class FakeRelatedDocuments
+    {
+        /** @return list<object> */
+        public function forInvoice(int $invoiceId): array
+        {
+            return [];
         }
     }
 
@@ -343,6 +354,7 @@ namespace WHMCS\Module\Addon\SevDesk\Database {
         public const JOBS_TABLE = 'mod_sevdesk_jobs';
         public const ITEMS_TABLE = 'mod_sevdesk_job_items';
         public const MAPPING_TABLE = 'mod_sevdesk';
+        public const RELATED_DOCUMENTS_TABLE = 'mod_sevdesk_related_documents';
     }
 }
 
@@ -351,6 +363,7 @@ namespace WHMCS\Module\Addon\SevDesk {
     use WHMCS\Module\Addon\SevDesk\Tests\Unit\Fixtures\FakeJobs;
     use WHMCS\Module\Addon\SevDesk\Tests\Unit\Fixtures\FakeMappings;
     use WHMCS\Module\Addon\SevDesk\Tests\Unit\Fixtures\FakePaymentStructure;
+    use WHMCS\Module\Addon\SevDesk\Tests\Unit\Fixtures\FakeRelatedDocuments;
     use WHMCS\Module\Addon\SevDesk\Tests\Unit\Fixtures\FakeRunner;
     use WHMCS\Module\Addon\SevDesk\Tests\Unit\Fixtures\FakeWhmcs;
     use WHMCS\Module\Addon\SevDesk\Tests\Unit\Fixtures\HookState;
@@ -365,6 +378,8 @@ namespace WHMCS\Module\Addon\SevDesk {
 
         public readonly FakeMappings $mappings;
 
+        public readonly FakeRelatedDocuments $relatedDocuments;
+
         public readonly FakeWhmcs $whmcs;
 
         private function __construct()
@@ -372,6 +387,7 @@ namespace WHMCS\Module\Addon\SevDesk {
             $this->config = new FakeConfig();
             $this->jobs = new FakeJobs();
             $this->mappings = new FakeMappings();
+            $this->relatedDocuments = new FakeRelatedDocuments();
             $this->whmcs = new FakeWhmcs();
         }
 
@@ -464,6 +480,42 @@ namespace {
             'jobsAfterInvoicePaid' => count(HookState::$jobs),
             'trigger' => $candidate['trigger'] ?? null,
             'deliveryRequested' => $candidate['delivery_requested'] ?? null,
+            'remoteCalls' => HookState::$remoteCalls,
+        ]);
+    }
+
+    if ($scenario === 'direct_autogen_initial_email') {
+        HookState::$config['invoice_lifecycle_mode'] = 'issue_on_creation';
+        HookState::$config['direct_invoice_canary_confirmed'] = 'on';
+        HookState::$config['invoice_delivery_channel'] = 'sevdesk';
+
+        $mailResult = hook_callback('EmailPreSend')([
+            'relid' => 42,
+            'messagename' => 'Invoice Created',
+        ]);
+        $item = HookState::$jobs[0]['items'][0] ?? [];
+
+        emit_result([
+            'mailResult' => $mailResult,
+            'jobCount' => count(HookState::$jobs),
+            'trigger' => $item['candidate']['trigger'] ?? null,
+            'deliveryRequested' => $item['candidate']['delivery_requested'] ?? null,
+            'remoteCalls' => HookState::$remoteCalls,
+        ]);
+    }
+
+    if ($scenario === 'direct_created_without_email') {
+        HookState::$config['invoice_lifecycle_mode'] = 'issue_on_creation';
+        HookState::$config['direct_invoice_canary_confirmed'] = 'on';
+        HookState::$config['invoice_delivery_channel'] = 'sevdesk';
+
+        hook_callback('InvoiceCreated')(['invoiceid' => 42, 'status' => 'Unpaid']);
+        $item = HookState::$jobs[0]['items'][0] ?? [];
+
+        emit_result([
+            'jobCount' => count(HookState::$jobs),
+            'trigger' => $item['candidate']['trigger'] ?? null,
+            'deliveryRequested' => $item['candidate']['delivery_requested'] ?? null,
             'remoteCalls' => HookState::$remoteCalls,
         ]);
     }

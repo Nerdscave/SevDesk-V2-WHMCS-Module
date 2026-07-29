@@ -175,10 +175,12 @@ final class WhmcsGateway
      * @return array{
      *     snapshot:InvoiceSnapshot,
      *     fingerprint:string,
+     *     primaryFingerprint:string,
      *     status:string,
      *     itemTypes:list<string>,
      *     creditMinor:int,
-     *     configuredContactId:?string
+     *     configuredContactId:?string,
+     *     lateFee:null|array{amountMinor:int,fingerprint:string,itemCount:int}
      * }
      */
     public function invoiceExportContract(int $invoiceId): array
@@ -186,7 +188,21 @@ final class WhmcsGateway
         $invoice = $this->invoice($invoiceId);
         $clientId = (int) ($invoice['userid'] ?? 0);
         $client = $this->client($clientId);
-        $snapshot = $this->invoiceSnapshotFromRows($invoiceId, $invoice, $client);
+        try {
+            $lateFeeSeparationEnabled = (string) $this->config->get(
+                'late_fee_mode',
+                InvoiceItemExportPolicy::LATE_FEE_MODE_BLOCKED,
+            ) === InvoiceItemExportPolicy::LATE_FEE_MODE_REMINDER_THEN_RULE22
+                && (string) $this->config->get('export_mode', 'voucher_only') === 'invoice_only';
+        } catch (Throwable) {
+            // Standalone contract tests do not boot WHMCS' settings table.
+            $lateFeeSeparationEnabled = false;
+        }
+        $split = LateFeePolicy::split(
+            $invoice,
+            $lateFeeSeparationEnabled,
+        );
+        $snapshot = $this->invoiceSnapshotFromRows($invoiceId, $split['invoice'], $client);
         $itemTypes = [];
         foreach (self::normaliseRows($invoice['items']['item'] ?? []) as $item) {
             $itemTypes[] = strtolower(trim((string) ($item['type'] ?? '')));
@@ -206,10 +222,19 @@ final class WhmcsGateway
                 $snapshot,
                 $this->config,
             ),
+            'primaryFingerprint' => self::invoiceContractFingerprint(
+                $invoiceId,
+                $split['invoice'],
+                $client,
+                $snapshot,
+                $this->config,
+                false,
+            ),
             'status' => trim((string) ($invoice['status'] ?? '')),
             'itemTypes' => $itemTypes,
             'creditMinor' => Decimal::toMinorUnits((string) ($invoice['credit'] ?? '0')),
             'configuredContactId' => self::configuredContactIdFromClient($client, $this->config),
+            'lateFee' => $split['lateFee'],
         ];
     }
 
@@ -331,6 +356,7 @@ final class WhmcsGateway
         array $client,
         InvoiceSnapshot $snapshot,
         Config $config,
+        bool $includeStatus = true,
     ): string {
         $items = [];
         foreach (self::normaliseRows($invoice['items']['item'] ?? []) as $item) {
@@ -402,7 +428,7 @@ final class WhmcsGateway
             'version' => 'whmcs_invoice_export_contract_v1',
             'invoiceId' => $invoiceId,
             'clientId' => $snapshot->clientId,
-            'status' => trim((string) ($invoice['status'] ?? '')),
+            'status' => $includeStatus ? trim((string) ($invoice['status'] ?? '')) : null,
             'invoiceNumber' => $snapshot->invoiceNumber,
             'invoiceDate' => $snapshot->invoiceDate->format('Y-m-d'),
             'currency' => $snapshot->currency,
@@ -943,6 +969,34 @@ final class WhmcsGateway
         return self::truthy($value);
     }
 
+    public function sequentialPaidInvoiceNumberingEnabled(): bool
+    {
+        return $this->configurationFlag('SequentialInvoiceNumbering');
+    }
+
+    public function setInvoiceDateOnPaymentEnabled(): bool
+    {
+        return $this->configurationFlag('TaxPaidInvoiceDate');
+    }
+
+    public function openInvoiceCount(): int
+    {
+        return (int) Capsule::table('tblinvoices')
+            ->whereIn('status', ['Unpaid', 'Collections', 'Payment Pending'])
+            ->count();
+    }
+
+    private function configurationFlag(string $setting): bool
+    {
+        if (array_key_exists($setting, $GLOBALS['CONFIG'] ?? [])) {
+            return self::truthy($GLOBALS['CONFIG'][$setting]);
+        }
+
+        return self::truthy(Capsule::table('tblconfiguration')
+            ->where('setting', $setting)
+            ->value('value'));
+    }
+
     public function invoiceOwnerId(int $invoiceId): int
     {
         return (int) Capsule::table('tblinvoices')
@@ -958,13 +1012,120 @@ final class WhmcsGateway
     }
 
     /**
+     * Local payment state used immediately before reminder and cancellation
+     * writes. Any credit, refund or account movement is significant.
+     *
+     * @return array{creditMinor:int,amountInMinor:int,amountOutMinor:int,transactionCount:int}
+     */
+    public function invoiceFinancialState(int $invoiceId): array
+    {
+        $invoiceId = $this->positiveId($invoiceId, 'invoice');
+        $credit = Capsule::table('tblinvoices')->where('id', $invoiceId)->value('credit');
+        $rows = Capsule::table('tblaccounts')
+            ->where('invoiceid', $invoiceId)
+            ->get(['amountin', 'amountout']);
+        $amountIn = 0;
+        $amountOut = 0;
+        foreach ($rows as $row) {
+            $amountIn += Decimal::toMinorUnits((string) ($row->amountin ?? '0'));
+            $amountOut += Decimal::toMinorUnits((string) ($row->amountout ?? '0'));
+        }
+
+        return [
+            'creditMinor' => Decimal::toMinorUnits((string) ($credit ?? '0')),
+            'amountInMinor' => $amountIn,
+            'amountOutMinor' => $amountOut,
+            'transactionCount' => count($rows),
+        ];
+    }
+
+    public function invoiceDatePaid(int $invoiceId): ?string
+    {
+        $value = trim((string) Capsule::table('tblinvoices')
+            ->where('id', $this->positiveId($invoiceId, 'invoice'))
+            ->value('datepaid'));
+        if ($value === '' || str_starts_with($value, '0000-00-00')) {
+            return null;
+        }
+
+        return substr($value, 0, 10);
+    }
+
+    public function localDunningFingerprint(int $invoiceId): string
+    {
+        $invoiceId = $this->positiveId($invoiceId, 'invoice');
+        $invoice = Capsule::table('tblinvoices')->where('id', $invoiceId)->first([
+            'id', 'invoicenum', 'status', 'date', 'duedate', 'subtotal',
+            'tax', 'tax2', 'total', 'credit', 'datepaid',
+        ]);
+        if ($invoice === null) {
+            throw new RuntimeException('The WHMCS invoice no longer exists.');
+        }
+        $items = Capsule::table('tblinvoiceitems')
+            ->where('invoiceid', $invoiceId)
+            ->orderBy('id')
+            ->get(['id', 'type', 'relid', 'amount', 'taxed'])
+            ->map(static fn (object $row): array => [
+                'id' => (int) $row->id,
+                'type' => strtolower(trim((string) $row->type)),
+                'relid' => (int) $row->relid,
+                'amount' => Decimal::fromMinorUnits(Decimal::toMinorUnits((string) $row->amount)),
+                'taxed' => self::truthy($row->taxed ?? false),
+            ])
+            ->all();
+
+        return hash('sha256', json_encode([
+            'version' => 'whmcs_dunning_contract_v1',
+            'invoice' => (array) $invoice,
+            'items' => $items,
+        ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES));
+    }
+
+    public function reminderDeadline(int $invoiceId, int $dunningLevel): string
+    {
+        if ($dunningLevel < 1 || $dunningLevel > 3) {
+            throw new \InvalidArgumentException('Unsupported WHMCS dunning level.');
+        }
+        $due = trim((string) Capsule::table('tblinvoices')
+            ->where('id', $this->positiveId($invoiceId, 'invoice'))
+            ->value('duedate'));
+        $dueDate = DateTimeImmutable::createFromFormat('!Y-m-d', $due);
+        if (!$dueDate instanceof DateTimeImmutable) {
+            throw new RuntimeException('The WHMCS invoice due date is invalid.');
+        }
+        $scheduleSetting = match ($dunningLevel) {
+            1 => 'FirstOverdueReminder',
+            2 => 'SecondOverdueReminder',
+            3 => 'ThirdOverdueReminder',
+        };
+        $daysAfterDue = $this->configurationInteger($scheduleSetting);
+        if ($daysAfterDue < 1) {
+            throw new RuntimeException('The requested WHMCS reminder stage is disabled.');
+        }
+
+        return $dueDate->modify('+' . $daysAfterDue . ' days')->format('Y-m-d');
+    }
+
+    private function configurationInteger(string $setting): int
+    {
+        $value = $GLOBALS['CONFIG'][$setting] ?? Capsule::table('tblconfiguration')
+            ->where('setting', $setting)
+            ->value('value');
+
+        return is_numeric($value) ? max(0, (int) $value) : 0;
+    }
+
+    /**
      * Verify the adapter manifest from the active WHMCS client theme, not the
      * bundled reference copy. The operator confirmation remains a separate
      * setup gate because a manifest cannot prove that the partial was placed at
      * the correct include point in viewinvoice.tpl.
      */
-    public function themeAdapterManifestInstalled(): bool
+    public function themeAdapterManifestInstalled(int $minimumContractVersion = 1): bool
     {
+        if ($minimumContractVersion < 1 || $minimumContractVersion > 2) {
+            return false;
+        }
         if (!defined('ROOTDIR')) {
             return false;
         }
@@ -995,6 +1156,9 @@ final class WhmcsGateway
         if (!is_array($manifest) || !self::validThemeAdapterManifest($manifest, $theme)) {
             return false;
         }
+        if ((int) ($manifest['contractVersion'] ?? 0) < $minimumContractVersion) {
+            return false;
+        }
 
         $partial = (string) $manifest['partial'];
 
@@ -1005,19 +1169,26 @@ final class WhmcsGateway
     public static function validThemeAdapterManifest(array $manifest, string $activeTheme): bool
     {
         $contract = $manifest['contract'] ?? null;
-        if (
-            !is_array($contract)
-            || count($contract) !== 4
-            || count(array_filter($contract, 'is_string')) !== 4
-        ) {
+        if (!is_array($contract) || count(array_filter($contract, 'is_string')) !== count($contract)) {
             return false;
         }
         $fields = array_values($contract);
         sort($fields);
-        $required = ['authority', 'downloadUrl', 'invoiceNumber', 'state'];
+        $contractVersion = $manifest['contractVersion'] ?? null;
+        $required = match ($contractVersion) {
+            1 => ['authority', 'downloadUrl', 'invoiceNumber', 'state'],
+            2 => [
+                'authority',
+                'downloadUrl',
+                'invoiceNumber',
+                'sevdeskRelatedDocuments',
+                'state',
+            ],
+            default => null,
+        };
 
         return ($manifest['module'] ?? null) === 'sevdesk'
-            && ($manifest['contractVersion'] ?? null) === 1
+            && $required !== null
             && in_array((string) ($manifest['theme'] ?? ''), [$activeTheme, '*'], true)
             && $fields === $required
             && is_string($manifest['partial'] ?? null)

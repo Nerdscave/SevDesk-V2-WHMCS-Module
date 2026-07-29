@@ -26,10 +26,11 @@ final class MigrationTest extends MariaDbTestCase
         self::assertTrue(Capsule::schema()->hasTable(Migrator::JOBS_TABLE));
         self::assertTrue(Capsule::schema()->hasTable(Migrator::ITEMS_TABLE));
         self::assertTrue(Capsule::schema()->hasTable(Migrator::PDF_RATE_TABLE));
+        self::assertTrue(Capsule::schema()->hasTable(Migrator::RELATED_DOCUMENTS_TABLE));
         foreach (
             [
                 'document_type', 'document_authority', 'document_number', 'document_ready_at', 'delivered_at',
-                'pdf_sha256', 'is_e_invoice', 'xml_sha256',
+                'pdf_sha256', 'is_e_invoice', 'xml_sha256', 'invoice_lifecycle_mode',
             ] as $column
         ) {
             self::assertTrue(Capsule::schema()->hasColumn(Migrator::MAPPING_TABLE, $column));
@@ -44,6 +45,8 @@ final class MigrationTest extends MariaDbTestCase
             'mapping_invoice_unique' => true,
             'mapping_remote_unique' => true,
             'item_dedupe_unique' => true,
+            'related_role_unique' => true,
+            'related_remote_unique' => true,
         ], Migrator::schemaReport());
         Migrator::assertRuntimeSchema();
         self::assertSame('voucher_only', (new Config())->get('export_mode'));
@@ -51,6 +54,9 @@ final class MigrationTest extends MariaDbTestCase
         self::assertFalse((new Config())->bool('e_invoice_canary_confirmed'));
         self::assertFalse((new Config())->bool('small_business_invoice_canary_confirmed'));
         self::assertSame('', (new Config())->get('small_business_until'));
+        self::assertSame('after_payment_proforma', (new Config())->get('invoice_lifecycle_mode'));
+        self::assertSame('off', (new Config())->get('dunning_mode'));
+        self::assertSame('blocked', (new Config())->get('late_fee_mode'));
     }
 
     public function testPersistentPdfRateLimitIsPerClientAndSurvivesSessions(): void
