@@ -139,6 +139,17 @@ final class ExportJobHandler
                 errorCode: 'invalid_invoice_id',
             );
         }
+        if (
+            ($candidate['trigger'] ?? null) === 'InvoiceCreatedEmailPending'
+            && !self::truthy($candidate['directCreationConfirmed'] ?? false)
+        ) {
+            return JobOutcome::retry(
+                'Die initiale Mailabsicht ist gespeichert; der bestätigende InvoiceCreated-Hook steht noch aus.',
+                30,
+                errorCode: 'direct_creation_confirmation_pending',
+                checkpoint: (string) ($item->checkpoint ?? 'queued'),
+            );
+        }
 
         try {
             $rawInvoice = null;
@@ -1215,6 +1226,8 @@ final class ExportJobHandler
         if ($target->documentAuthority === DocumentTargetResolver::AUTHORITY_WHMCS) {
             $opened = $this->ensureInvoiceOpened(
                 $item,
+                $candidate,
+                $initialMassPaymentStructure,
                 $invoice,
                 $remoteId,
                 $tax,
@@ -1263,12 +1276,19 @@ final class ExportJobHandler
             $invoiceExporter,
             $eInvoiceContext,
             $invoiceAddressContext,
+            $initialMassPaymentStructure,
         );
     }
 
-    /** @param callable(string,array<string,scalar|null>):bool $checkpoint */
+    /**
+     * @param array<string,mixed> $candidate
+     * @param array<string,mixed>|null $initialMassPaymentStructure
+     * @param callable(string,array<string,scalar|null>):bool $checkpoint
+     */
     private function ensureInvoiceOpened(
         object $item,
+        array $candidate,
+        ?array $initialMassPaymentStructure,
         InvoiceSnapshot $invoice,
         string $remoteId,
         TaxDecision $tax,
@@ -1307,6 +1327,14 @@ final class ExportJobHandler
                 $checkpoint,
                 $eInvoiceContext,
                 $invoiceAddressContext,
+                $this->invoicePreWriteGuard(
+                    $invoice->invoiceId,
+                    $invoice,
+                    $initialMassPaymentStructure,
+                    $candidate,
+                    $item,
+                    $sevdeskContactId,
+                ),
             );
         if ($result->status !== ExportResult::SUCCEEDED) {
             return $this->toOutcome($result, $item, 'exported');
@@ -1315,7 +1343,11 @@ final class ExportJobHandler
         return null;
     }
 
-    /** @param array<string,mixed> $candidate @param callable(string,array<string,scalar|null>):bool $checkpoint */
+    /**
+     * @param array<string,mixed> $candidate
+     * @param callable(string,array<string,scalar|null>):bool $checkpoint
+     * @param array<string,mixed>|null $initialMassPaymentStructure
+     */
     private function completeSevdeskAuthority(
         object $item,
         array $candidate,
@@ -1328,6 +1360,7 @@ final class ExportJobHandler
         InvoiceExporter $invoiceExporter,
         ?EInvoiceContext $eInvoiceContext = null,
         ?InvoiceAddressContext $invoiceAddressContext = null,
+        ?array $initialMassPaymentStructure = null,
     ): JobOutcome {
         $deliveryRequested = self::truthy($candidate['delivery_requested'] ?? false);
         $channel = (string) ($candidate['targetDeliveryChannel']
@@ -1407,6 +1440,14 @@ final class ExportJobHandler
                     $checkpoint,
                     $eInvoiceContext,
                     $invoiceAddressContext,
+                    $this->invoicePreWriteGuard(
+                        $invoice->invoiceId,
+                        $invoice,
+                        $initialMassPaymentStructure,
+                        $candidate,
+                        $item,
+                        $sevdeskContactId,
+                    ),
                 );
             }
             if ($delivered->status !== ExportResult::SUCCEEDED) {
@@ -1444,6 +1485,8 @@ final class ExportJobHandler
 
         $opened = $this->ensureInvoiceOpened(
             $item,
+            $candidate,
+            $initialMassPaymentStructure,
             $invoice,
             $remoteId,
             $tax,

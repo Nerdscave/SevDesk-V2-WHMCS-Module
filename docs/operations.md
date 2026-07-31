@@ -349,6 +349,8 @@ Für den historischen Nachlauf:
    Kundenmail entstand.
 3. MA-Factory und deren Wirkung dokumentieren.
 4. Den ausgewählten Buchhaltungsweg centgenau zurücklesen.
+   Beim Rule-22-Voucher muss der Request exakt auf `GET /VoucherPos` mit
+   `voucher[id]` und `voucher[objectName]=Voucher` gehen.
 5. Recovery einmal gezielt nach dem jeweiligen Write-Checkpoint ausführen.
 6. Erst danach die historischen Fälle in einem gemeinsamen mailfreien Job
    einreihen.
@@ -726,6 +728,8 @@ Symptom: Authentifizierung fehlgeschlagen.
 Maßnahmen:
 
 1. Prüfen, ob der globale Auth-Alarm gesetzt ist. Nach dem betroffenen Item beendet der Runner den aktuellen Batch und claimt auch in späteren Cronläufen keine weiteren Items.
+   Der gemeinsame API-Client setzt diesen Alarm auch dann, wenn zuerst ein
+   read-only Health- oder Setup-Aufruf den 401/403 erkennt.
    Kann die Alarmzeile nicht geschrieben werden, speichert das Modul Review-Marker und neuen Quarantäne-Token gemeinsam. Die gültige Signatur bleibt dabei für den lokalen Mail- und PDF-Schutz erhalten. Dieser erfolgreiche Fallback wird in demselben Fehlerpfad nicht später erneut gesetzt; eine inzwischen abgeschlossene Setup-Freigabe wird dadurch nicht überschrieben.
    Scheitert diese Speicherung, versucht das Modul Review-Marker und ungültige Laufzeitsignatur gemeinsam zu setzen. Nur wenn beide atomaren Fallbacks scheitern, folgt ein letzter, bestmöglicher Schreibversuch für den Review-Marker. Sync-Stopp und Jobpause werden unabhängig davon versucht.
 2. Token nicht in Ticket oder Chat kopieren.
@@ -931,4 +935,14 @@ Das Originalmodul kennt `document_type` nicht. Nach dem ersten neuen sevDesk-`In
 
 ## Deaktivierung und Deinstallation
 
-Eine Deaktivierung stoppt Hooks und Worker, lässt die Daten aber bestehen. Bei der Deinstallation dürfen `mod_sevdesk` und die Jobreports nur nach einer separat bestätigten Export- und Löschentscheidung entfernt werden. Standardmäßig bleiben sie für Buchhaltungsnachweis und Idempotenz erhalten.
+Eine WHMCS-Deaktivierung wird verweigert, solange ein Invoice-Mapping mit
+eingefrorener sevDesk-Dokumenthoheit oder ein aktiver beziehungsweise unklarer
+sevDesk-hoheitlicher Exportjob besteht. Ohne die Hooks würden sonst WHMCS-PDF
+und Core-Mail wieder sichtbar. Für einen normalen Betriebsstopp bleibt das Addon
+deshalb installiert und nur `sync_enabled` wird ausgeschaltet. Eine vollständige
+Deaktivierung ist erst nach einem separat bestätigten, kontrollierten Rollback
+zulässig.
+
+Bei der Deinstallation dürfen `mod_sevdesk` und die Jobreports nur nach einer
+separat bestätigten Export- und Löschentscheidung entfernt werden. Standardmäßig
+bleiben sie für Buchhaltungsnachweis und Idempotenz erhalten.

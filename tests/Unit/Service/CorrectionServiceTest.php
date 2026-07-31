@@ -27,6 +27,11 @@ final class CorrectionServiceTest extends TestCase
                 new Response(200, [], '{"objects":[]}'),
                 $this->originalVoucherResponse(),
                 new Response(201, [], '{"objects":{"voucher":{"id":"99","sumGross":"-172.50"}}}'),
+                $this->correctionVoucherResponse('-172.50'),
+                $this->correctionPositionsResponse([
+                    ['comment' => 'Seven percent allocation', 'sumNet' => '-50.00', 'taxRate' => '7'],
+                    ['comment' => 'Nineteen percent allocation', 'sumNet' => '-100.00', 'taxRate' => '19'],
+                ]),
             ], $history),
             static fn (string $reference): mixed => $mappings[$reference] ?? null,
             static function (string $reference, string $remoteId) use (&$mappings): void {
@@ -58,7 +63,7 @@ final class CorrectionServiceTest extends TestCase
             'correction_mapping_persisted',
         ], array_column($checkpoints, 0));
 
-        self::assertCount(3, $history);
+        self::assertCount(5, $history);
         self::assertSame('POST', $history[2]['request']->getMethod());
         self::assertSame('/api/v1/Voucher/Factory/saveVoucher', $history[2]['request']->getUri()->getPath());
         $payload = json_decode((string) $history[2]['request']->getBody(), true, 512, JSON_THROW_ON_ERROR);
@@ -254,6 +259,10 @@ final class CorrectionServiceTest extends TestCase
                         'taxRule' => ['id' => '1', 'objectName' => 'TaxRule'],
                     ]],
                 ], JSON_THROW_ON_ERROR)),
+                $this->correctionVoucherResponse('-119.00'),
+                $this->correctionPositionsResponse([
+                    ['comment' => 'Refund', 'sumNet' => '-100.00', 'taxRate' => '19'],
+                ]),
             ], $history),
             static fn (): null => null,
             static function (string $reference, string $remoteId) use (&$stored): void {
@@ -276,8 +285,57 @@ final class CorrectionServiceTest extends TestCase
         self::assertSame([
             CorrectionService::dedupeReference('RF-9') => '99',
         ], $stored);
-        self::assertCount(1, $history);
+        self::assertCount(3, $history);
         self::assertSame('GET', $history[0]['request']->getMethod());
+        self::assertSame('/api/v1/Voucher/99', $history[1]['request']->getUri()->getPath());
+        self::assertSame('/api/v1/VoucherPos', $history[2]['request']->getUri()->getPath());
+    }
+
+    public function testMarkerMatchWithDifferentRemotePositionIsNeverMapped(): void
+    {
+        $history = [];
+        $persistCalls = 0;
+        $description = 'Correction INV-10 '
+            . VoucherExporter::marker(10)
+            . ' [SEVDESK-VOUCHER:88] '
+            . CorrectionService::refundMarker('RF-9');
+        $service = new CorrectionService(
+            $this->client([
+                new Response(200, [], json_encode(['objects' => [[
+                    'id' => '99',
+                    'description' => $description,
+                    'currency' => 'EUR',
+                    'creditDebit' => 'D',
+                    'sumGross' => '-119.00',
+                    'supplier' => ['id' => '42', 'objectName' => 'Contact'],
+                    'taxRule' => ['id' => '1', 'objectName' => 'TaxRule'],
+                ]]], JSON_THROW_ON_ERROR)),
+                $this->correctionVoucherResponse('-119.00'),
+                $this->correctionPositionsResponse([
+                    ['comment' => 'Different allocation', 'sumNet' => '-100.00', 'taxRate' => '19'],
+                ]),
+            ], $history),
+            static fn (): null => null,
+            static function () use (&$persistCalls): bool {
+                ++$persistCalls;
+
+                return true;
+            },
+        );
+
+        $result = $service->create(
+            $this->request('119.00'),
+            $this->taxDecision(),
+            [new LineItem('Refund', '100.00', '19', true)],
+            true,
+            null,
+            true,
+        );
+
+        self::assertSame('ambiguous', $result['status']);
+        self::assertSame('correction_reconciliation_position_mismatch', $result['code']);
+        self::assertSame(0, $persistCalls);
+        self::assertCount(3, $history);
     }
 
     public function testReadOnlyRecoveryWithNoMarkerMatchNeverCreatesAnotherVoucher(): void
@@ -468,6 +526,46 @@ final class CorrectionServiceTest extends TestCase
                 'supplier' => ['id' => '42', 'objectName' => 'Contact'],
                 'taxRule' => ['id' => '1', 'objectName' => 'TaxRule'],
             ]],
+        ], JSON_THROW_ON_ERROR));
+    }
+
+    private function correctionVoucherResponse(string $sumGross): Response
+    {
+        $description = 'Correction INV-10 '
+            . VoucherExporter::marker(10)
+            . ' [SEVDESK-VOUCHER:88] '
+            . CorrectionService::refundMarker('RF-9');
+
+        return new Response(200, [], json_encode([
+            'objects' => [[
+                'id' => '99',
+                'objectName' => 'Voucher',
+                'status' => 100,
+                'voucherType' => 'VOU',
+                'voucherDate' => '10.07.2026',
+                'description' => $description,
+                'currency' => 'EUR',
+                'creditDebit' => 'D',
+                'sumGross' => $sumGross,
+                'supplier' => ['id' => '42', 'objectName' => 'Contact'],
+                'taxRule' => ['id' => '1', 'objectName' => 'TaxRule'],
+            ]],
+        ], JSON_THROW_ON_ERROR));
+    }
+
+    /** @param list<array{comment:string,sumNet:string,taxRate:string}> $positions */
+    private function correctionPositionsResponse(array $positions): Response
+    {
+        return new Response(200, [], json_encode([
+            'objects' => array_map(static fn (array $position): array => [
+                'objectName' => 'VoucherPos',
+                'voucher' => ['id' => '99', 'objectName' => 'Voucher'],
+                'accountDatev' => ['id' => '100', 'objectName' => 'AccountDatev'],
+                'taxRate' => $position['taxRate'],
+                'net' => true,
+                'comment' => $position['comment'],
+                'sumNet' => $position['sumNet'],
+            ], $positions),
         ], JSON_THROW_ON_ERROR));
     }
 

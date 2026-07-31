@@ -156,6 +156,30 @@ final class CorrectionJobHandlerTest extends TestCase
                     ]],
                 ], JSON_THROW_ON_ERROR)),
                 new Response(201, [], '{"objects":{"voucher":{"id":"99","sumGross":"-10.00"}}}'),
+                new Response(200, [], json_encode(['objects' => [[
+                    'id' => '99',
+                    'objectName' => 'Voucher',
+                    'status' => 100,
+                    'voucherType' => 'VOU',
+                    'voucherDate' => '10.07.2026',
+                    'description' => 'Correction INV-42 [WHMCS-INVOICE:42] [SEVDESK-VOUCHER:88] '
+                        . CorrectionService::refundMarker('WHMCS-ACCOUNT:11'),
+                    'currency' => 'EUR',
+                    'creditDebit' => 'D',
+                    'sumGross' => '-10.00',
+                    'supplier' => ['id' => '42', 'objectName' => 'Contact'],
+                    'taxRule' => ['id' => $expectedRule, 'objectName' => 'TaxRule'],
+                ]]], JSON_THROW_ON_ERROR)),
+                new Response(200, [], json_encode(['objects' => [[
+                    'id' => '1001',
+                    'objectName' => 'VoucherPos',
+                    'voucher' => ['id' => '99', 'objectName' => 'Voucher'],
+                    'accountDatev' => ['id' => $expectedAccount, 'objectName' => 'AccountDatev'],
+                    'taxRate' => $taxRate,
+                    'net' => false,
+                    'comment' => 'Synthetic refund allocation',
+                    'sumGross' => '-10.00',
+                ]]], JSON_THROW_ON_ERROR)),
             ], $history),
             static fn (): null => null,
             static fn (): bool => true,
@@ -206,7 +230,7 @@ final class CorrectionJobHandlerTest extends TestCase
         );
 
         self::assertSame('succeeded', $outcome->status);
-        self::assertCount(3, $history);
+        self::assertCount(5, $history);
         self::assertSame('POST', $history[2]['request']->getMethod());
         $payload = json_decode((string) $history[2]['request']->getBody(), true, 512, JSON_THROW_ON_ERROR);
         self::assertSame((int) $expectedRule, $payload['voucher']['taxRule']['id']);

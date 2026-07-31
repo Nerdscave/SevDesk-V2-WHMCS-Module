@@ -123,12 +123,12 @@ function sevdesk_mass_payment_target_ids(Application $application, int $invoiceI
 }
 
 /** @param array<string, mixed> $vars */
-function sevdesk_enqueue_invoice(array $vars, string $event): void
+function sevdesk_enqueue_invoice(array $vars, string $event): bool
 {
     $invoiceId = (int) ($vars['invoiceid'] ?? 0);
     try {
         if (!Capsule::schema()->hasTable(Migrator::JOBS_TABLE)) {
-            return;
+            return false;
         }
         $application = Application::instance();
         // InvoicePaidPreEmail and InvoicePaid share one Application instance.
@@ -137,7 +137,7 @@ function sevdesk_enqueue_invoice(array $vars, string $event): void
         $application->config->refresh();
         $automaticEnqueueEnabled = sevdesk_automatic_enqueue_enabled($application);
         $authAlarmAuthorityPending = !$automaticEnqueueEnabled
-            && $event === 'InvoicePaid'
+            && in_array($event, ['InvoicePaid', 'InvoiceCreated', 'InvoiceCreatedEmailPending'], true)
             && $application->config->bool('module_active')
             && !$application->config->bool('sync_enabled')
             && !$application->config->bool(Config::RUNTIME_REVIEW_SETTING)
@@ -146,10 +146,20 @@ function sevdesk_enqueue_invoice(array $vars, string $event): void
             && $application->config->bool('invoice_canary_confirmed')
             && (string) $application->config->get('export_mode', 'voucher_only') === 'invoice_only'
             && (string) $application->config->get('document_authority', 'whmcs') === 'sevdesk'
+            && (
+                $event === 'InvoicePaid'
+                || (
+                    $application->config->bool('direct_invoice_canary_confirmed')
+                    && (string) $application->config->get(
+                        'invoice_lifecycle_mode',
+                        MappingRepository::LIFECYCLE_AFTER_PAYMENT_PROFORMA,
+                    ) === MappingRepository::LIFECYCLE_ISSUE_ON_CREATION
+                )
+            )
             && trim((string) $application->config->get('health_alarm', ''))
                 === 'api_authentication_failed';
         if (!$automaticEnqueueEnabled && !$authAlarmAuthorityPending) {
-            return;
+            return false;
         }
         $mode = (string) $application->config->get('export_mode', 'voucher_only');
         $documentAuthority = (string) $application->config->get('document_authority', 'whmcs');
@@ -174,30 +184,30 @@ function sevdesk_enqueue_invoice(array $vars, string $event): void
         if ($mode === 'invoice_only') {
             if (
                 $invoiceLifecycle === MappingRepository::LIFECYCLE_ISSUE_ON_CREATION
-                && $event !== 'InvoiceCreated'
+                && !in_array($event, ['InvoiceCreated', 'InvoiceCreatedEmailPending'], true)
             ) {
-                return;
+                return false;
             }
             if (
                 $invoiceLifecycle !== MappingRepository::LIFECYCLE_ISSUE_ON_CREATION
                 && $event !== 'InvoicePaid'
             ) {
-                return;
+                return false;
             }
         }
         if ($mode === 'voucher_only' && (($event === 'InvoicePaid') === !$onlyPaid)) {
-            return;
+            return false;
         }
         if ($mode === 'invoice_for_oss' && $onlyPaid && $event !== 'InvoicePaid') {
-            return;
+            return false;
         }
 
         if ($invoiceId < 1) {
-            return;
+            return false;
         }
-        $directDeliveryRequested = $event === 'InvoiceCreated'
+        $directDeliveryRequested = in_array($event, ['InvoiceCreated', 'InvoiceCreatedEmailPending'], true)
             && $invoiceLifecycle === MappingRepository::LIFECYCLE_ISSUE_ON_CREATION
-            && DirectDeliveryIntentContext::consume($invoiceId);
+            && DirectDeliveryIntentContext::isRequested($invoiceId);
 
         $massPaymentContext = $event === 'InvoicePaid'
             ? sevdesk_mass_payment_hook_context($application, $invoiceId)
@@ -248,6 +258,7 @@ function sevdesk_enqueue_invoice(array $vars, string $event): void
                             && $invoiceLifecycle !== MappingRepository::LIFECYCLE_ISSUE_ON_CREATION)
                         || $directDeliveryRequested
                     ),
+                'directCreationConfirmed' => $event === 'InvoiceCreated',
             ];
             if (
                 $massPaymentContainerInvoiceId !== null
@@ -263,13 +274,22 @@ function sevdesk_enqueue_invoice(array $vars, string $event): void
             ];
         }
         if ($items === []) {
-            return;
+            if ($directDeliveryRequested && $event === 'InvoiceCreated') {
+                DirectDeliveryIntentContext::acknowledge($invoiceId);
+            }
+
+            return true;
         }
 
         $application->jobs->create('automatic_export', $items, [
             'trigger' => $event,
             'mass_payment_container' => $massPaymentTargets !== [] ? $invoiceId : null,
         ]);
+        if ($directDeliveryRequested && $event === 'InvoiceCreated') {
+            DirectDeliveryIntentContext::acknowledge($invoiceId);
+        }
+
+        return true;
     } catch (Throwable $error) {
         if (function_exists('logActivity')) {
             logActivity(
@@ -278,6 +298,8 @@ function sevdesk_enqueue_invoice(array $vars, string $event): void
                 . ': ' . get_class($error),
             );
         }
+
+        return false;
     }
 }
 
@@ -906,7 +928,7 @@ function sevdesk_email_pre_send(array $vars): array
         if (!$isInvoiceTemplate) {
             return $hasActiveAttachmentContext ? ['abortsend' => true] : [];
         }
-        $directNewInvoice = (string) $application->config->get(
+        $directConfiguration = (string) $application->config->get(
             'export_mode',
             'voucher_only',
         ) === 'invoice_only'
@@ -915,6 +937,9 @@ function sevdesk_email_pre_send(array $vars): array
                 'invoice_lifecycle_mode',
                 MappingRepository::LIFECYCLE_AFTER_PAYMENT_PROFORMA,
             ) === MappingRepository::LIFECYCLE_ISSUE_ON_CREATION;
+        $preparedCreationMail = DirectDeliveryIntentContext::isPrepared($invoiceId);
+        $directNewInvoice = $directConfiguration
+            && ($preparedCreationMail || strcasecmp($template, 'Invoice Created') === 0);
         if ($directNewInvoice) {
             // InvoiceCreated is documented to run after the initial email. For
             // autogen there is no guaranteed InvoiceCreationPreEmail hook.
@@ -922,8 +947,12 @@ function sevdesk_email_pre_send(array $vars): array
             // InvoiceCreated later hits the same dedupe key and cannot create a
             // second accounting action. This performs local database work only.
             InvoiceEmailGuardContext::register($invoiceId);
-            DirectDeliveryIntentContext::request($invoiceId);
-            sevdesk_enqueue_invoice(['invoiceid' => $invoiceId], 'InvoiceCreated');
+            if ($preparedCreationMail) {
+                DirectDeliveryIntentContext::confirm($invoiceId);
+            } else {
+                DirectDeliveryIntentContext::request($invoiceId);
+            }
+            sevdesk_enqueue_invoice(['invoiceid' => $invoiceId], 'InvoiceCreatedEmailPending');
             $hasPaidInvoiceGuard = true;
             $guardApplies = true;
         }

@@ -2424,17 +2424,25 @@ final class JobRepository
         ) {
             return;
         }
-        $directDeliveryRequested =
-            ($incomingCandidate['trigger'] ?? null) === 'InvoiceCreated'
+        $directCreationSignal =
+            in_array(
+                $incomingCandidate['trigger'] ?? null,
+                ['InvoiceCreated', 'InvoiceCreatedEmailPending'],
+                true,
+            )
             && ($incomingCandidate['requestedInvoiceLifecycleMode'] ?? null)
                 === DocumentTargetResolver::LIFECYCLE_ISSUE_ON_CREATION
             && ($incomingCandidate['requestedDocumentAuthority'] ?? null)
-                === DocumentTargetResolver::AUTHORITY_SEVDESK
+                === DocumentTargetResolver::AUTHORITY_SEVDESK;
+        $directDeliveryRequested = $directCreationSignal
             && ($incomingCandidate['delivery_requested'] ?? null) === true;
+        $directCreationConfirmed = $directCreationSignal
+            && ($incomingCandidate['trigger'] ?? null) === 'InvoiceCreated'
+            && ($incomingCandidate['directCreationConfirmed'] ?? null) === true;
         $paidHybridTrigger =
             ($incomingCandidate['trigger'] ?? null) === 'InvoicePaid'
             && ($incomingCandidate['requestedExportMode'] ?? null) === 'invoice_for_oss';
-        if (!$directDeliveryRequested && !$paidHybridTrigger) {
+        if (!$directCreationSignal && !$paidHybridTrigger) {
             return;
         }
 
@@ -2449,7 +2457,7 @@ final class JobRepository
         }
 
         $candidate = self::decodeCandidate($owner->candidate_json ?? null);
-        if ($directDeliveryRequested) {
+        if ($directCreationSignal) {
             $ownerLifecycle = $candidate['targetInvoiceLifecycleMode']
                 ?? $candidate['requestedInvoiceLifecycleMode']
                 ?? null;
@@ -2462,8 +2470,14 @@ final class JobRepository
             ) {
                 return;
             }
-            $candidate['delivery_requested'] = true;
-            $candidate['directDeliveryRequestedAt'] = $now;
+            if ($directDeliveryRequested) {
+                $candidate['delivery_requested'] = true;
+                $candidate['directDeliveryRequestedAt'] = $now;
+            }
+            if ($directCreationConfirmed) {
+                $candidate['directCreationConfirmed'] = true;
+                $candidate['directCreationConfirmedAt'] = $now;
+            }
             Capsule::table(Migrator::ITEMS_TABLE)
                 ->where('id', $owner->id)
                 ->where('dedupe_key', $dedupeKey)

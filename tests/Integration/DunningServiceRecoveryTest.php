@@ -295,6 +295,11 @@ final class DunningServiceRecoveryTest extends MariaDbTestCase
         self::assertSame(4001, $payload['voucherPosSave'][0]['accountDatev']['id']);
         self::assertSame(0.0, $payload['voucherPosSave'][0]['taxRate']);
         self::assertSame(5.0, $payload['voucherPosSave'][0]['sumGross']);
+        $positionRequest = self::historyRequest($history, 3);
+        self::assertSame('/api/v1/VoucherPos', $positionRequest->getUri()->getPath());
+        parse_str($positionRequest->getUri()->getQuery(), $positionQuery);
+        self::assertSame('7201', (string) ($positionQuery['voucher']['id'] ?? ''));
+        self::assertSame('Voucher', $positionQuery['voucher']['objectName'] ?? null);
         $stored = (new RelatedDocumentRepository())->find(
             42,
             RelatedDocumentRepository::ROLE_LATE_FEE_VOUCHER,

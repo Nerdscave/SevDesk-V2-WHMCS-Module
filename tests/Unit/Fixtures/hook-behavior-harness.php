@@ -58,6 +58,8 @@ namespace WHMCS\Module\Addon\SevDesk\Tests\Unit\Fixtures {
         public static array $massPaymentTargets = [];
 
         public static bool $massPaymentExact = true;
+
+        public static bool $failNextJobCreate = false;
     }
 
     final class FakeConfig
@@ -123,6 +125,10 @@ namespace WHMCS\Module\Addon\SevDesk\Tests\Unit\Fixtures {
          */
         public function create(string $type, array $items, array $filters = [], ?int $adminId = null): object
         {
+            if (HookState::$failNextJobCreate) {
+                HookState::$failNextJobCreate = false;
+                throw new \RuntimeException('Synthetic job persistence failure.');
+            }
             HookState::$jobs[] = ['type' => $type, 'items' => $items, 'filters' => $filters];
 
             return (object) ['id' => count(HookState::$jobs)];
@@ -493,6 +499,50 @@ namespace {
             'relid' => 42,
             'messagename' => 'Invoice Created',
         ]);
+        $pendingItem = HookState::$jobs[0]['items'][0] ?? [];
+        hook_callback('InvoiceCreated')(['invoiceid' => 42, 'status' => 'Unpaid']);
+        $confirmedItem = HookState::$jobs[1]['items'][0] ?? [];
+
+        emit_result([
+            'mailResult' => $mailResult,
+            'jobCount' => count(HookState::$jobs),
+            'pendingTrigger' => $pendingItem['candidate']['trigger'] ?? null,
+            'pendingConfirmed' => $pendingItem['candidate']['directCreationConfirmed'] ?? null,
+            'confirmedTrigger' => $confirmedItem['candidate']['trigger'] ?? null,
+            'confirmedDeliveryRequested' => $confirmedItem['candidate']['delivery_requested'] ?? null,
+            'confirmed' => $confirmedItem['candidate']['directCreationConfirmed'] ?? null,
+            'remoteCalls' => HookState::$remoteCalls,
+        ]);
+    }
+
+    if ($scenario === 'direct_later_invoice_mail') {
+        HookState::$config['invoice_lifecycle_mode'] = 'issue_on_creation';
+        HookState::$config['direct_invoice_canary_confirmed'] = 'on';
+        HookState::$config['invoice_delivery_channel'] = 'sevdesk';
+
+        $mailResult = hook_callback('EmailPreSend')([
+            'relid' => 42,
+            'messagename' => 'Invoice Payment Confirmation',
+        ]);
+
+        emit_result([
+            'mailResult' => $mailResult,
+            'jobCount' => count(HookState::$jobs),
+            'remoteCalls' => HookState::$remoteCalls,
+        ]);
+    }
+
+    if ($scenario === 'direct_pending_persistence_retry') {
+        HookState::$config['invoice_lifecycle_mode'] = 'issue_on_creation';
+        HookState::$config['direct_invoice_canary_confirmed'] = 'on';
+        HookState::$config['invoice_delivery_channel'] = 'sevdesk';
+        HookState::$failNextJobCreate = true;
+
+        $mailResult = hook_callback('EmailPreSend')([
+            'relid' => 42,
+            'messagename' => 'Invoice Created',
+        ]);
+        hook_callback('InvoiceCreated')(['invoiceid' => 42, 'status' => 'Unpaid']);
         $item = HookState::$jobs[0]['items'][0] ?? [];
 
         emit_result([
@@ -500,6 +550,31 @@ namespace {
             'jobCount' => count(HookState::$jobs),
             'trigger' => $item['candidate']['trigger'] ?? null,
             'deliveryRequested' => $item['candidate']['delivery_requested'] ?? null,
+            'confirmed' => $item['candidate']['directCreationConfirmed'] ?? null,
+            'logged' => HookState::$logs !== [],
+            'remoteCalls' => HookState::$remoteCalls,
+        ]);
+    }
+
+    if ($scenario === 'direct_authentication_alarm_pending') {
+        HookState::$config['invoice_lifecycle_mode'] = 'issue_on_creation';
+        HookState::$config['direct_invoice_canary_confirmed'] = 'on';
+        HookState::$config['invoice_delivery_channel'] = 'sevdesk';
+        HookState::$config['sync_enabled'] = '';
+        HookState::$config['health_alarm'] = 'api_authentication_failed';
+
+        $mailResult = hook_callback('EmailPreSend')([
+            'relid' => 42,
+            'messagename' => 'Invoice Created',
+        ]);
+        $item = HookState::$jobs[0]['items'][0] ?? [];
+
+        emit_result([
+            'mailResult' => $mailResult,
+            'jobCount' => count(HookState::$jobs),
+            'trigger' => $item['candidate']['trigger'] ?? null,
+            'deliveryRequested' => $item['candidate']['delivery_requested'] ?? null,
+            'confirmed' => $item['candidate']['directCreationConfirmed'] ?? null,
             'remoteCalls' => HookState::$remoteCalls,
         ]);
     }

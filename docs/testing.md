@@ -289,6 +289,12 @@ Die rc.9-Matrix muss mindestens folgende Fälle abdecken:
 - eine bewusst nicht angeforderte Originalmail führt nur zu `sendBy`;
 - die WHMCS-Core-Rechnungs- und Mahnmail wird jeweils genau einmal blockiert,
   während der zugehörige Hook weiterhin einen deduplizierten Job erzeugt;
+- eine initiale Direct-Mail erzeugt zunächst nur ein wartendes Delivery-Item;
+  erst der echte `InvoiceCreated`-Hook bestätigt es. Eine spätere andere
+  Invoice-Mail und ein nie bestätigter Intent erzeugen keinen Remote-Beleg;
+- scheitert die erste Jobpersistenz, bleibt die request-lokale Versandabsicht
+  bis zum nachfolgenden `InvoiceCreated` erhalten; unter Auth-Alarm bleibt das
+  persistierte Item unclaimbar;
 - eine Mahnung benötigt Originalzustellung, Status `Unpaid`, unveränderte
   Nummer, Primärfingerprint und offenen Betrag sowie eine neue Stufe;
 - Teilzahlung, Payment unmittelbar vor Versand, Guthaben, Refund,
@@ -322,6 +328,9 @@ Geprüft werden:
   demselben Verifier. Falsche Rule-/Kontowerte, fehlender eingefrorener Vertrag,
   Pagination über mehr als 100 Treffer und die volle 1.000er-Sicherheitsgrenze
   dürfen kein Mapping erzeugen;
+- Korrektur-Create und Refund-Marker-Recovery lesen den konkreten Voucher und
+  gefilterte `VoucherPos`; richtige Marker und Gesamtsumme bei abweichender
+  Position, Rate, Konto oder Netto-/Bruttokennzeichen bleiben `ambiguous`;
 - Invoice: normale `RE` im Draft-Status 100, unveränderte WHMCS-Nummer, Marker, Kontakt, `SevUser`, `Unity`, kleingeschriebenes `deliveryAddressCountry`, passende `StaticCountry`-Referenz, Netto/Brutto, Rule und WHMCS-Steuersatz;
 - normale Invoices übertragen die vollständige WHMCS-Rechnungsadresse mit `takeDefaultAddress=false`, auch wenn der vorhandene sevDesk-Kontakt keine `ContactAddress` besitzt; Readback, Recovery und Draft-Prüfung verlangen denselben Adresshash und dieselbe `StaticCountry`-ID;
 - unvollständige WHMCS-Adressen, nicht eindeutig auflösbare Länder sowie ein nach möglichem Write fehlender oder abweichender PII-freier Adresssnapshot blockieren ohne Invoice-Write;
@@ -329,6 +338,8 @@ Geprüft werden:
 - Rule-11-Invoice ohne eigenes Canary-Gate sowie mit fehlendem `REVENUE`-Scope in der aktuellen `ReceiptGuidance`: kein Create;
 - `sendBy`, `sendViaEmail`, finale `getPdf`-Antwort und `/Invoice/{id}/bookAmount`;
 - erneute exakte Draft-Prüfung direkt vor `sendBy` und `sendViaEmail`; eine zwischenzeitliche Header-, Adress- oder Positionsänderung verhindert jeden Write;
+- zusätzlich wird unmittelbar vor beiden Finalisierungs-Writes der aktuelle
+  WHMCS-Vertrag neu gelesen; eine Änderung nach Create friert das Item ein;
 - volle 1.000er-Seiten bei Invoice-Suche und Positionen sowie zehn vollständig
   gelesene 100er-Seiten bei Zahlungskandidaten blockieren als potenziell
   abgeschnitten;
@@ -495,6 +506,8 @@ Zu prüfen:
 - Ein Cancel während einer Lease wandelt einen danach zurückkehrenden sicheren Retry in `cancelled` um; ein Retry nach möglichem oder bestätigtem Remote-Effekt wird `ambiguous` und hält den Dedupe-Key.
 - Retry-Obergrenze wird eingehalten.
 - Ein 401/403-Alarm stoppt nach dem betroffenen Item alle weiteren Claims im selben und in späteren Runner-Läufen, bis das Setup ihn nach erfolgreicher Prüfung löscht.
+- Dasselbe gilt, wenn ein read-only Health- oder Setup-Aufruf zuerst 401/403
+  erkennt; der gemeinsame API-Client setzt den Alarm vor der Fehleranzeige.
 - Erfolgreiche Exporte besitzen genau ein typisiertes Mapping und genau ein Remote-Dokument; alte und neue Jobs erzeugen kein Cross-Type-Duplikat.
 - Historische und Bulk-Items lösen unabhängig von der Dokumenthoheit keine automatische Mail aus.
 - Historische Invoice-Items setzen `is_e_invoice=false`, auch wenn ZUGFeRD global für neue Invoices aktiv ist.

@@ -478,6 +478,7 @@ final class InvoiceExporter
                 $checkpoint,
                 $eInvoiceContext,
                 $invoiceAddressContext,
+                $preWriteGuard,
             );
         }
 
@@ -504,10 +505,14 @@ final class InvoiceExporter
         ?callable $checkpoint = null,
         ?EInvoiceContext $eInvoiceContext = null,
         ?InvoiceAddressContext $invoiceAddressContext = null,
+        ?callable $localContractGuard = null,
     ): ExportResult {
         $checkpoint = $checkpoint === null || $checkpoint instanceof Closure
             ? $checkpoint
             : Closure::fromCallable($checkpoint);
+        $localContractGuard = $localContractGuard === null || $localContractGuard instanceof Closure
+            ? $localContractGuard
+            : Closure::fromCallable($localContractGuard);
         if (self::numericId($remoteId) === null) {
             return ExportResult::failed(
                 $invoice->invoiceId,
@@ -536,6 +541,17 @@ final class InvoiceExporter
         );
         if ($draftVerification !== null) {
             return $draftVerification;
+        }
+
+        $localContractFailure = self::localContractFailure(
+            $invoice->invoiceId,
+            $remoteId,
+            $localContractGuard,
+            'invoice_contract_changed_before_open',
+            'Die WHMCS-Rechnung änderte sich vor dem Öffnen der sevdesk-Invoice.',
+        );
+        if ($localContractFailure !== null) {
+            return $localContractFailure;
         }
 
         if (
@@ -745,10 +761,14 @@ final class InvoiceExporter
         ?callable $checkpoint = null,
         ?EInvoiceContext $eInvoiceContext = null,
         ?InvoiceAddressContext $invoiceAddressContext = null,
+        ?callable $localContractGuard = null,
     ): ExportResult {
         $checkpoint = $checkpoint === null || $checkpoint instanceof Closure
             ? $checkpoint
             : Closure::fromCallable($checkpoint);
+        $localContractGuard = $localContractGuard === null || $localContractGuard instanceof Closure
+            ? $localContractGuard
+            : Closure::fromCallable($localContractGuard);
         $toEmail = trim($toEmail);
         $subject = trim($subject);
         $text = trim($text);
@@ -786,6 +806,17 @@ final class InvoiceExporter
         );
         if ($draftVerification !== null) {
             return $draftVerification;
+        }
+
+        $localContractFailure = self::localContractFailure(
+            $invoice->invoiceId,
+            $remoteId,
+            $localContractGuard,
+            'invoice_contract_changed_before_delivery',
+            'Die WHMCS-Rechnung änderte sich vor dem Versand der sevdesk-Invoice.',
+        );
+        if ($localContractFailure !== null) {
+            return $localContractFailure;
         }
 
         if (
@@ -1681,6 +1712,27 @@ final class InvoiceExporter
             'The sevdesk reference lookup failed before the Invoice write.',
             $context,
         );
+    }
+
+    private static function localContractFailure(
+        int $invoiceId,
+        string $remoteId,
+        ?Closure $guard,
+        string $code,
+        string $message,
+    ): ?ExportResult {
+        if ($guard === null) {
+            return null;
+        }
+        try {
+            $valid = $guard();
+        } catch (Throwable) {
+            $valid = false;
+        }
+
+        return $valid === true
+            ? null
+            : ExportResult::ambiguous($invoiceId, $code, $message, $remoteId);
     }
 
     /**

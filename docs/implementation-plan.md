@@ -586,7 +586,9 @@ Das Modul kann den Pfad technisch fail-closed ausführen. Produktiv freigegeben 
 2. WHMCS-Proforma, Paid-Nummerierung, Rechnungsdatum, offene Rechnungen, Theme
    Adapter v2 und aktive Jobs vor dem Direktbetrieb fail-closed prüfen.
 3. `InvoiceCreated` in einen unveränderlichen, offenen Invoice-Export übersetzen
-   und den Versandwunsch lokal deduplizieren.
+   und den Versandwunsch lokal deduplizieren. `EmailPreSend` persistiert dafür
+   nur einen wartenden Intent; erst der echte `InvoiceCreated`-Hook bestätigt
+   ihn monoton und gibt den Worker frei.
 4. WHMCS-Rechnungs- und Mahnmails unterdrücken, ohne den WHMCS-Ablauf oder dessen
    Reminder-Hooks zu unterbrechen.
 5. `create_invoice_reminder`, `cancel_invoice` und
@@ -608,7 +610,11 @@ Das Modul kann den Pfad technisch fail-closed ausführen. Produktiv freigegeben 
   WHMCS-Nummerierung und Canary-Zuständen;
 - additive Migration und mehrfache Zusatzdokumente;
 - Create-, Reminder-, Payment-, Update- und Cancellation-Rennen;
+- WHMCS-Vertragsänderung nach Invoice-Create, aber vor `sendBy` oder
+  `sendViaEmail`, sowie spätere historische Invoice-Mails ohne `InvoiceCreated`;
 - exakter MA-, SR- und Rule-22-Readback einschließlich PDF und ZUGFeRD-XML;
+- Rule-22- und Korrektur-Voucher lesen Positionen ausschließlich gefiltert über
+  `/VoucherPos`; ein Header ohne exakt passende Positionen erzeugt kein Mapping;
 - unbekannter Ausgang an jedem Create-, Cancel- und Delivery-Write;
 - keine doppelte Mail, keine doppelte Gebühr und keine automatische Vollbuchung
   der verkürzten Grundrechnung;

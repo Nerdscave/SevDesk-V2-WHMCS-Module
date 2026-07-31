@@ -1064,8 +1064,13 @@ final class DunningService
             return 'late_fee_id_invalid';
         }
         $positionResponse = $this->client->get(
-            '/Voucher/' . rawurlencode($remoteId) . '/getPositions',
-            ['limit' => 1000, 'offset' => 0],
+            '/VoucherPos',
+            [
+                'voucher[id]' => $remoteId,
+                'voucher[objectName]' => 'Voucher',
+                'limit' => 1000,
+                'offset' => 0,
+            ],
         );
         $positions = self::records($positionResponse, 'VoucherPos');
         self::assertCompletePage($positionResponse, count($positions), 1000);

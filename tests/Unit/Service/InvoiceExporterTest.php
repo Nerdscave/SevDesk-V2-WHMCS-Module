@@ -1582,6 +1582,40 @@ final class InvoiceExporterTest extends TestCase
         self::assertSame(['GET', 'GET'], $this->requestMethods($history));
     }
 
+    public function testChangedWhmcsContractIsRejectedAfterDraftReadbackBeforeSendBy(): void
+    {
+        $history = [];
+        $checkpoints = [];
+        $exporter = new InvoiceExporter(
+            $this->client([
+                $this->invoiceResponse(100),
+                $this->positionResponse(),
+            ], $history),
+            static fn (): string => '99',
+            static fn (): bool => true,
+            '7',
+            '8',
+        );
+
+        $result = $exporter->openForWhmcsAuthority(
+            $this->invoice(),
+            '99',
+            $this->taxDecision(),
+            '42',
+            'DE',
+            static function (string $checkpoint) use (&$checkpoints): void {
+                $checkpoints[] = $checkpoint;
+            },
+            invoiceAddressContext: $this->invoiceAddressContext(),
+            localContractGuard: static fn (): bool => false,
+        );
+
+        self::assertSame(ExportResult::AMBIGUOUS, $result->status);
+        self::assertSame('invoice_contract_changed_before_open', $result->code);
+        self::assertSame([], $checkpoints);
+        self::assertSame(['GET', 'GET'], $this->requestMethods($history));
+    }
+
     public function testChangedDraftTaxDistributionIsRejectedBeforeSendBy(): void
     {
         $history = [];
@@ -1651,6 +1685,43 @@ final class InvoiceExporterTest extends TestCase
 
         self::assertSame(ExportResult::AMBIGUOUS, $result->status);
         self::assertSame('invoice_delivery_prewrite_remote_position_identity_mismatch', $result->code);
+        self::assertSame([], $checkpoints);
+        self::assertSame(['GET', 'GET'], $this->requestMethods($history));
+    }
+
+    public function testChangedWhmcsContractIsRejectedAfterDraftReadbackBeforeDelivery(): void
+    {
+        $history = [];
+        $checkpoints = [];
+        $exporter = new InvoiceExporter(
+            $this->client([
+                $this->invoiceResponse(100),
+                $this->positionResponse(),
+            ], $history),
+            static fn (): string => '99',
+            static fn (): bool => true,
+            '7',
+            '8',
+        );
+
+        $result = $exporter->deliverViaSevdesk(
+            $this->invoice(),
+            '99',
+            $this->taxDecision(),
+            '42',
+            'DE',
+            'customer@example.test',
+            'Invoice RE-10',
+            'Your final Invoice is attached.',
+            static function (string $checkpoint) use (&$checkpoints): void {
+                $checkpoints[] = $checkpoint;
+            },
+            invoiceAddressContext: $this->invoiceAddressContext(),
+            localContractGuard: static fn (): bool => false,
+        );
+
+        self::assertSame(ExportResult::AMBIGUOUS, $result->status);
+        self::assertSame('invoice_contract_changed_before_delivery', $result->code);
         self::assertSame([], $checkpoints);
         self::assertSame(['GET', 'GET'], $this->requestMethods($history));
     }

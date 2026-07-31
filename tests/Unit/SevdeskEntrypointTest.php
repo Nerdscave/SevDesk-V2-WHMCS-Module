@@ -96,9 +96,14 @@ final class SevdeskEntrypointTest extends TestCase
         $method = $this->sourceBetween($source, 'function sevdesk_deactivate', 'function sevdesk_sidebar');
         $moduleGate = strpos($method, "set('module_active', '')");
         $syncGate = strpos($method, "set('sync_enabled', '')");
+        $authorityGuard = strpos($method, "->where('document_authority', 'sevdesk')");
 
+        self::assertNotFalse($authorityGuard);
+        self::assertStringContainsString('Migrator::ITEMS_TABLE', $method);
+        self::assertStringContainsString("->whereIn('status', ['pending', 'running', 'retry_wait', 'ambiguous'])", $method);
         self::assertNotFalse($moduleGate);
         self::assertNotFalse($syncGate);
+        self::assertLessThan($moduleGate, $authorityGuard);
         self::assertLessThan($syncGate, $moduleGate);
         self::assertGreaterThanOrEqual(2, substr_count($method, 'catch (Throwable $error)'));
         self::assertStringContainsString("'status' => 'error'", $method);

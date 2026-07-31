@@ -39,6 +39,7 @@ Vor dem ersten Write und im Health Check liest das Modul `/Tools/bookkeepingSyst
 | Voucher-PDF temporär hochladen | `POST /Voucher/Factory/uploadTempFile` |
 | Voucher samt Positionen anlegen | `POST /Voucher/Factory/saveVoucher` |
 | Voucher lesen/suchen/buchen | benötigte `Voucher`-GET-Endpunkte, `PUT /Voucher/{id}/bookAmount` |
+| Voucher-Positionen lesen | `GET /VoucherPos?voucher[id]=<id>&voucher[objectName]=Voucher` |
 | normale Invoice anlegen | `POST /Invoice/Factory/saveInvoice` |
 | Invoice und Positionen lesen | `GET /Invoice/{id}`, `GET /Invoice/{id}/getPositions` |
 | Invoice ohne Mail öffnen | `PUT /Invoice/{id}/sendBy` |
@@ -344,6 +345,10 @@ bleibt mailfrei. Eine `MA` darf in dieser Konfiguration nur das Mahndokument
 sein; sie ersetzt den Voucher nicht. Bei Buchhaltungsquelle `reminder` ist es
 umgekehrt und ein zusätzlicher Voucher verboten.
 
+Der Positions-Readback verwendet auch hier ausschließlich den gefilterten
+`GET /VoucherPos`; einen Unterendpunkt `/Voucher/{id}/getPositions` gibt der
+versionierte Voucher-Vertrag nicht her.
+
 ## Steuerregeln in sevDesk-Update 2.0
 
 | ID | Code/Fall | API-/Modulstatus |
@@ -442,6 +447,9 @@ Erlaubt ein Voucher-Konto laut Guidance nur `AUSFUHREN`, muss jede andere Rule l
   Korrekturpfad und der normale Invoice-Pfad vergleichen Payload und gelesene
   Remote-Werte dagegen exakt in normalisierten Minor Units; eine Abweichung von
   einem Cent blockiert den Write beziehungsweise die Bestätigung.
+- Korrektur-Voucher werden weder nach Create noch nach Marker-Recovery allein
+  anhand ihres Headers gemappt. Der konkrete Voucher und alle gefilterten
+  `VoucherPos` müssen den bestätigten Positionsvertrag exakt erfüllen.
 - Invoice- und Voucher-Payload müssen denselben gefrorenen Netto-/Bruttomodus abbilden.
 - Negative Positionen bleiben im normalen Export verboten. Einzige Ausnahme ist der oben beschriebene feste `PromoHosting`-Rabatt; er wird als exakt geprüfte negative `InvoicePos` übertragen. `discountSave` bleibt leer. Eine positive, unbesteuerte `LateFee` wird nicht als Invoice-Position übertragen, sondern folgt ausschließlich dem getrennten Mahngebührenvertrag.
 - Leere und Nullsummen-Rechnungen sind Prüffälle.
@@ -474,7 +482,7 @@ Zusätzlich sucht das Modul nach markerlosen Voucher-Kandidaten über Nummer, Da
 | Klasse | Verhalten |
 | --- | --- |
 | 400/409/422 | kein automatischer Retry; Payload, Rule oder Lifecycle korrigieren |
-| 401/403 | mandantenweiter Auth-Stopp bis erfolgreicher read-only Setupprüfung |
+| 401/403 | der gemeinsame API-Client setzt vor der Fehlerweitergabe den mandantenweiten Auth-Stopp; das gilt auch für Health- und Setup-Reads |
 | 400/404 bei GET nach Remote-ID | 404 oder 400 mit dem bereinigten Code `NOT_FOUND` darf in den eng begrenzten read-only Prüfungen Abwesenheit belegen; ein generisches 400 nie |
 | 429 | begrenzter Backoff, sofern noch kein unklarer Write vorliegt |
 | 5xx/Timeout | vor Write begrenzt retrybar; während/nach Write zuerst Reconciliation |

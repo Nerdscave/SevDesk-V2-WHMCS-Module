@@ -114,7 +114,7 @@ Rule 19 bleibt eine normale Invoice. Rules 18/20, B2G/XRechnung, historische E-R
 
 Jedes neue Invoice-Mapping friert einen von zwei Lebenszyklen ein. `after_payment_proforma` erzeugt die Endrechnung erst nach vollständiger Zahlung; WHMCS bleibt vor Zahlung mit seiner Proforma sichtbar. `issue_on_creation` erzeugt die offene sevDesk-Invoice direkt nach dem WHMCS-Create. Dieser Modus ist nur mit `invoice_only`, sevDesk-Hoheit und unveränderlichen WHMCS-Rechnungsdaten zulässig. Proforma, fortlaufende Paid-Nummern und „Set Invoice Date on Payment“ müssen aus sein. Bestehende Mappings behalten ihren bisherigen Lebenszyklus.
 
-Im Direktbetrieb bleibt WHMCS die Forderungsquelle. Es entscheidet über Rechnungsstatus, Fälligkeit, Mahnstufe und Zahlung, schreibt aber keine kundenseitige Endrechnung. `EmailPreSend` blockiert die parallele WHMCS-Rechnungs- oder Mahnmail und speichert lediglich die lokale Versandabsicht. `InvoiceCreated`, `InvoicePaymentReminder`, `InvoicePaid`, `InvoiceCancelled`, `InvoiceRefunded` und `UpdateInvoiceTotal` planen kurze, deduplizierte Jobs oder frieren weitere Aktionen ein. Jeder Worker liest WHMCS und das sevDesk-Grunddokument unmittelbar vor dem Write erneut.
+Im Direktbetrieb bleibt WHMCS die Forderungsquelle. Es entscheidet über Rechnungsstatus, Fälligkeit, Mahnstufe und Zahlung, schreibt aber keine kundenseitige Endrechnung. `EmailPreSend` blockiert die parallele WHMCS-Rechnungs- oder Mahnmail und speichert die initiale Versandabsicht als noch unbestätigtes, dedupliziertes Item. Erst der danach tatsächlich ausgeführte `InvoiceCreated`-Hook setzt monoton `directCreationConfirmed`; vorher darf der Worker keinen Dokument-Write beginnen. Eine spätere Invoice-Mail ohne nachfolgenden Create kann damit keinen Altbestand in den Direktlebenszyklus ziehen. `InvoicePaymentReminder`, `InvoicePaid`, `InvoiceCancelled`, `InvoiceRefunded` und `UpdateInvoiceTotal` planen kurze Jobs oder frieren weitere Aktionen ein. Jeder Worker liest WHMCS und das sevDesk-Grunddokument unmittelbar vor dem Write erneut.
 
 Der Direktbetrieb akzeptiert für die Erstausgabe nur `Unpaid` und `Paid`. Bei `Paid` wird eine bereits zugestellte Invoice nicht erneut versandt. Eine Mahnung setzt den unveränderten Primärfingerprint, eine nachweislich zugestellte Grundrechnung, denselben offenen Betrag, Status `Unpaid`, keine Teilzahlung und eine noch nicht erzeugte Mahnstufe voraus. Ein Payment-, Credit-, Refund-, Cancellation- oder Update-Rennen endet vor dem Versand. Es gibt weder automatische Zahlungsbuchung noch einen Mail- oder PDF-Fallback.
 
@@ -155,13 +155,13 @@ Der einzige freigegebene negative Positionsfall ist genau ein `PromoHosting`-Ein
 
 Diese Form ist eine bewusst enge Architekturkorrektur. Im Rule-1-Live-Canary bestand die Rechnung aus einer Hostingposition über 4,94 Euro brutto und einem Rabatt über 2,47 Euro brutto. sevDesk verteilte den globalen `discountSave` auf 2,08 Euro netto und 0,39 Euro Umsatzsteuer. WHMCS weist dagegen 2,07 Euro netto und 0,40 Euro Umsatzsteuer aus. Dieselbe Rechnung mit negativer `InvoicePos` behielt die WHMCS-Centverteilung exakt bei. Ein globaler Rabatt ist daher kein zulässiger Fallback.
 
-| Capability | Gate |
-| --- | --- |
-| Rule 11, 0 % | `small_business_invoice_canary_confirmed`, aktuelle Rule-11-`REVENUE`-Guidance und `invoice_discount_canary_confirmed` |
-| Rule 1, 19 %, deutscher Kunde | `invoice_discount_rule1_19_canary_confirmed` |
-| Rule 1, 19 %, EU-B2C mit bestätigter Inlandsbesteuerung | `invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed` |
-| Rule 17, 0 % | `invoice_discount_rule17_0_canary_confirmed` |
-| Rule 19, positiver einheitlicher Zielsteuersatz | `invoice_discount_rule19_canary_confirmed`; der Positions- und Rabattsteuersatz muss in der bestätigten Zielbesteuerung enthalten sein |
+| Capability                                              | Gate                                                                                                                                   |
+| ---------------------------------------------------------| ----------------------------------------------------------------------------------------------------------------------------------------|
+| Rule 11, 0 %                                            | `small_business_invoice_canary_confirmed`, aktuelle Rule-11-`REVENUE`-Guidance und `invoice_discount_canary_confirmed`                 |
+| Rule 1, 19 %, deutscher Kunde                           | `invoice_discount_rule1_19_canary_confirmed`                                                                                           |
+| Rule 1, 19 %, EU-B2C mit bestätigter Inlandsbesteuerung | `invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed`                                                                           |
+| Rule 17, 0 %                                            | `invoice_discount_rule17_0_canary_confirmed`                                                                                           |
+| Rule 19, positiver einheitlicher Zielsteuersatz         | `invoice_discount_rule19_canary_confirmed`; der Positions- und Rabattsteuersatz muss in der bestätigten Zielbesteuerung enthalten sein |
 
 Alle fünf Rabatt-Gates sind bei Installation und Upgrade aus. Die Settings für Rules 1, 17 und 19 enthalten nach der Bestätigung den exakten Capability-Key statt eines einfachen `on`; Rule 19 speichert den geprüften Zielsteuersatz zusätzlich. Der deutsche Rule-1-Fall und die bestätigte EU-B2C-Inlandsbesteuerung besitzen getrennte Settings. Gleiche Rule und gleicher Steuersatz reichen nicht aus, weil auch Steuerprofil und Länderklasse zum Vertrag gehören. Ein Wechsel des WHMCS-Steuermodus macht den gespeicherten Schlüssel ungültig. Der Worker friert diesen Capability-Key und einen SHA-256 über Anzahl, Text, Betrag, Typ, Relation, Steuerkennzeichen, Netto-/Bruttomodus und Steuersatz vor `invoice_write_requested` ein. Ein älterer Rule-11-Job ohne Capability-Key darf nur vor einem möglichen Write um den deterministisch gleichen Schlüssel ergänzt werden. Nach einem möglichen Write führt ein fehlender oder abweichender Schlüssel zu `ambiguous`.
 
@@ -281,11 +281,16 @@ Der Browser startet nur einen Job und liest später dessen Status. Remote-I/O l�
 
 `module_active` und eine gültige Laufzeitsignatur sind Grundvoraussetzungen. `runtime_review_required` sperrt Runner und Remote-fähige Modulaktionen während Erstinstallation, Fremdersatz, 2.0→2.1-Übergang oder eines Strukturfehlers. Nach der Bestandsfreigabe können bestätigte Adminjobs auch mit ausgeschalteter automatischer Synchronisation laufen.
 
-`sync_enabled` steuert zusätzlich die ereignisgetriebenen Exporthooks. sevDesk-Dokumenthoheit lässt sich deshalb nur mit eingeschalteter Synchronisation speichern. Eine enge Ausnahme gilt für `InvoicePaid` bei einem bereits gesetzten Authentifizierungsalarm: Ist die `invoice_only`-/sevDesk-Konfiguration aktiv, signiert, nicht im Review und durch den Canary bestätigt, darf der Hook trotz der Alarm-Sperre das deduplizierte Pending-Item speichern. Der Alarm verhindert dessen Verarbeitung, bis das Setup den Mandanten geprüft und Sync wieder aktiviert hat.
+Der WHMCS-Deaktivierungs-Callback bleibt fail-closed: Ein bestehendes
+sevDesk-hoheitliches Invoice-Mapping oder ein aktiver beziehungsweise unklarer
+sevDesk-hoheitlicher Exportjob verhindert die Deaktivierung, weil danach weder
+Client- noch Mail-Hooks die eingefrorene Dokumenthoheit schützen könnten.
+
+`sync_enabled` steuert zusätzlich die ereignisgetriebenen Exporthooks. sevDesk-Dokumenthoheit lässt sich deshalb nur mit eingeschalteter Synchronisation speichern. Eine enge Ausnahme gilt bei einem bereits gesetzten Authentifizierungsalarm für `InvoicePaid` sowie für die zweistufige initiale `InvoiceCreated`-Absicht: Ist die `invoice_only`-/sevDesk-Konfiguration aktiv, signiert, nicht im Review und durch den Canary bestätigt, darf der Hook trotz der Alarm-Sperre das deduplizierte Pending-Item speichern. Der Alarm verhindert dessen Verarbeitung, bis das Setup den Mandanten geprüft und Sync wieder aktiviert hat.
 
 Invoice-Modi brauchen außerdem `invoice_canary_confirmed` und die vollständigen Setupvoraussetzungen. Der lokale Schutz der Zahlungs-Mail ist kein Exporthook. Er schützt die konfigurierte sevDesk-Hoheit auch während Review-, Authentifizierungs- oder Sync-Pausen.
 
-Jeder 401/403-Pfad versucht zuerst den mandantenweiten Alarm. Sync-Stopp und, im Worker, die Jobpause werden unabhängig davon gespeichert.
+Jeder 401/403-Pfad versucht zuerst den mandantenweiten Alarm. Der gemeinsame sevDesk-Client führt diesen Schritt vor der bereinigten Fehlerweitergabe aus, sodass auch Health- und Setup-Reads den Claim-Stopp setzen. Sync-Stopp und, im Worker, die Jobpause werden unabhängig davon gespeichert.
 
 Scheitert der Alarm, speichert das Modul `runtime_review_required=on` und einen neuen Quarantäne-Token in einer Transaktion. Die gültige Signatur bleibt dabei erhalten, damit Mail- und PDF-Schutz weiterarbeiten. Scheitert auch die Token-Speicherung, setzt ein zweiter atomarer Schritt Review und ungültige Signatur. Nur wenn beide atomaren Fallbacks scheitern, versucht das Modul den Review-Marker ein letztes Mal einzeln zu setzen. Ein erfolgreich gespeicherter Fallback wird nicht später erneut gesetzt und kann daher keine inzwischen abgeschlossene Setup-Freigabe überschreiben.
 
@@ -323,7 +328,7 @@ Der bestehende Pfad bleibt fachlich unverändert:
 3. normale Invoice `RE` im Draft-Status 100 mit unveränderter WHMCS-Nummer, Marker und vollständiger WHMCS-Rechnungsadresse erstellen. `takeDefaultAddress=false` entkoppelt das Dokument von einer möglicherweise fehlenden sevDesk-Kontaktadresse; der bestehende Kontakt wird nicht geändert. Vor dem Write werden nur Länder-ID und PII-freier Adresshash eingefroren.
 4. Invoice und Positionen erneut lesen; ID, Nummer, Kontakt, Rule, Status, Währung, Netto/Brutto, Empfängeradresse, Positionen und Summen exakt vergleichen. Rule 19 verlangt außerdem einen zum eingefrorenen Zielland passenden Ländercode.
 5. erst danach Remote-ID, `document_type=invoice` und Dokumentnummer atomar mappen.
-6. unmittelbar vor `sendBy` oder `sendViaEmail` Draft-Header, Empfängeradresse und alle Positionen nochmals lesend gegen den gefrorenen Snapshot prüfen.
+6. unmittelbar vor `sendBy` oder `sendViaEmail` sowohl den aktuellen WHMCS-Rechnungsvertrag als auch Draft-Header, Empfängeradresse und alle Positionen nochmals lesend gegen den gefrorenen Snapshot prüfen.
 7. Invoice über `sendBy` ohne Kundenversand öffnen oder über den gewählten Versandpfad öffnen und zustellen.
 8. finale PDF laden, PDF-Signatur und Größenlimit prüfen und `document_ready_at`/`pdf_sha256` ergänzen; nach Zustellung zusätzlich `delivered_at` setzen.
 
@@ -392,7 +397,7 @@ Ein 401/403 beim PDF-Abruf setzt wie die Workerpfade den mandantenweiten Authent
 
 Der Mail-Hook fragt sevDesk nicht ab. Bei `invoice_only` und sevDesk-Hoheit registriert `InvoicePaidPreEmail` vor der ersten WHMCS-Zahlungs-Mail einen lokalen Schutzkontext, sobald `module_active` und die Laufzeitsignatur das aktive Rewrite belegen. Dabei wird noch kein Job angelegt. `InvoicePaid` bleibt der einzige Auslöser für Queue und Zustellung.
 
-Der Schutz bleibt auch während Review-, Authentifizierungs-, Canary- oder Sync-Pausen aktiv. So fällt die Dokumenthoheit bei einer Betriebsstörung nicht unbemerkt auf eine WHMCS-Endrechnung zurück. Ist bereits ein Authentifizierungsalarm gesetzt, darf `InvoicePaid` unter den beschriebenen Runtime- und Canary-Bedingungen das deduplizierte Exportitem speichern. Der Kundenbereich erhält damit einen dauerhaften Pending-Zustand; der Runner darf das Item wegen des Alarms noch nicht verarbeiten.
+Der Schutz bleibt auch während Review-, Authentifizierungs-, Canary- oder Sync-Pausen aktiv. So fällt die Dokumenthoheit bei einer Betriebsstörung nicht unbemerkt auf eine WHMCS-Endrechnung zurück. Ist bereits ein Authentifizierungsalarm gesetzt, dürfen `InvoicePaid` und die initiale Direct-Mail-Absicht unter den beschriebenen Runtime- und Canary-Bedingungen das deduplizierte Exportitem speichern. Der echte `InvoiceCreated`-Hook muss den Direct-Create weiterhin bestätigen. Der Kundenbereich erhält damit einen dauerhaften Pending-Zustand; der Runner darf das Item wegen des Alarms noch nicht verarbeiten.
 
 Bestehende Mappings behalten ihren gespeicherten Dokumentkontext. Spätere Invoice-Mails werden anhand dieses Mapping- oder Jobkontexts blockiert. Nur der genau vorregistrierte In-Memory-Anhang darf passieren. Lässt sich bei einer späteren Mail weder aus Templateart noch aus Mapping oder Job die gespeicherte Hoheit bestimmen und gibt es keinen lokalen Schutzkontext, protokolliert der Hook den Fehler bereinigt. Er unterdrückt dann nicht pauschal alle WHMCS-Mails und verwendet auch nicht die aktuelle globale Hoheit als Ersatz.
 
@@ -663,7 +668,7 @@ Der bestätigte Snapshot enthält jetzt zusätzlich `document_type` und Remote-I
 
 ## Korrektur-Voucher
 
-`CorrectionService` bleibt bewusst Voucher-spezifisch. Ein Invoice-Mapping wird mit `invoice_correction_not_supported` blockiert, bis ein separat entworfener und bestätigter `CreditNote`-Pfad existiert. Für Voucher gelten weiterhin Einzelfallbestätigung, positive Eingabepositionen, negative Ausgabe, Refund-Marker, exakte Summenprüfung und read-only Reconciliation. Chargebacks und automatische Massenerzeugung bleiben ausgeschlossen.
+`CorrectionService` bleibt bewusst Voucher-spezifisch. Ein Invoice-Mapping wird mit `invoice_correction_not_supported` blockiert, bis ein separat entworfener und bestätigter `CreditNote`-Pfad existiert. Für Voucher gelten weiterhin Einzelfallbestätigung, positive Eingabepositionen, negative Ausgabe, Refund-Marker, exakte Summenprüfung und read-only Reconciliation. Vor dem initialen Mapping und vor einer markerbasierten Wiederzuordnung liest der Service immer den konkreten Voucher sowie gefilterte `VoucherPos` und vergleicht Anzahl, Konto, Steuer, Netto-/Bruttomodus, Beschreibung und Betrag jeder Position. Chargebacks und automatische Massenerzeugung bleiben ausgeschlossen.
 
 WHMCS-Kundenguthaben bleibt ein eigener Sonderfall. Eine vollständig bewiesene Sammelzahlung exportiert ausschließlich die Originalrechnungen mit vollem Dokumentbrutto; der Container selbst ist kein Umsatzbeleg. Bulk, Hook und Worker verwenden dafür denselben Struktur- und Fingerprintvertrag. Die kombinierte Zahlung wird in sevDesk nicht automatisch aufgeteilt. Sonstiges Guthaben bleibt blockiert. Im Voucher-Einzelexport ist weiterhin nur die ausdrückliche Bestätigung `full_gross_voucher` zulässig.
 

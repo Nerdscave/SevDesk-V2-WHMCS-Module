@@ -35,9 +35,46 @@ final class HookBehaviorTest extends TestCase
         $result = $this->runScenario('direct_autogen_initial_email');
 
         self::assertSame(['abortsend' => true], $result['mailResult']);
+        self::assertSame(2, $result['jobCount']);
+        self::assertSame('InvoiceCreatedEmailPending', $result['pendingTrigger']);
+        self::assertFalse($result['pendingConfirmed']);
+        self::assertSame('InvoiceCreated', $result['confirmedTrigger']);
+        self::assertTrue($result['confirmedDeliveryRequested']);
+        self::assertTrue($result['confirmed']);
+        self::assertSame(0, $result['remoteCalls']);
+    }
+
+    public function testLaterInvoiceTemplateCannotSynthesizeAHistoricalCreate(): void
+    {
+        $result = $this->runScenario('direct_later_invoice_mail');
+
+        self::assertSame([], $result['mailResult']);
+        self::assertSame(0, $result['jobCount']);
+        self::assertSame(0, $result['remoteCalls']);
+    }
+
+    public function testInvoiceCreatedRetainsDeliveryIntentAfterPendingPersistenceFailure(): void
+    {
+        $result = $this->runScenario('direct_pending_persistence_retry');
+
+        self::assertSame(['abortsend' => true], $result['mailResult']);
         self::assertSame(1, $result['jobCount']);
         self::assertSame('InvoiceCreated', $result['trigger']);
         self::assertTrue($result['deliveryRequested']);
+        self::assertTrue($result['confirmed']);
+        self::assertTrue($result['logged']);
+        self::assertSame(0, $result['remoteCalls']);
+    }
+
+    public function testDirectCreationIntentIsDurableWhileAuthenticationAlarmBlocksTheRunner(): void
+    {
+        $result = $this->runScenario('direct_authentication_alarm_pending');
+
+        self::assertSame(['abortsend' => true], $result['mailResult']);
+        self::assertSame(1, $result['jobCount']);
+        self::assertSame('InvoiceCreatedEmailPending', $result['trigger']);
+        self::assertTrue($result['deliveryRequested']);
+        self::assertFalse($result['confirmed']);
         self::assertSame(0, $result['remoteCalls']);
     }
 

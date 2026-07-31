@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace WHMCS\Module\Addon\SevDesk\Api;
 
+use Closure;
 use GuzzleHttp\ClientInterface;
 use GuzzleHttp\Exception\GuzzleException;
 use JsonException;
@@ -32,12 +33,16 @@ final class SevdeskClient
 
     private readonly string $userAgent;
 
+    /** @var Closure(): void|null */
+    private readonly ?Closure $authenticationFailureHandler;
+
     public function __construct(
         private readonly ClientInterface $httpClient,
         #[\SensitiveParameter]
         string $apiToken,
         string $baseUrl = 'https://my.sevdesk.de/api/v1',
         string $userAgent = 'WHMCS-sevdesk/2.1.0-rc.9',
+        ?callable $authenticationFailureHandler = null,
     ) {
         $apiToken = trim($apiToken);
         if ($apiToken === '') {
@@ -79,6 +84,9 @@ final class SevdeskClient
         $this->apiToken = $apiToken;
         $this->baseUrl = $baseUrl;
         $this->userAgent = $userAgent;
+        $this->authenticationFailureHandler = $authenticationFailureHandler === null
+            ? null
+            : Closure::fromCallable($authenticationFailureHandler);
     }
 
     /**
@@ -354,6 +362,13 @@ final class SevdeskClient
         int $maxResponseBytes,
     ): array {
         $status = $response->getStatusCode();
+        if (($status === 401 || $status === 403) && $this->authenticationFailureHandler !== null) {
+            try {
+                ($this->authenticationFailureHandler)();
+            } catch (Throwable) {
+                // The original sanitized API failure remains authoritative.
+            }
+        }
         $body = self::readBoundedBody($response, $maxResponseBytes, $outcomeMayBeUnknown);
 
         $decoded = [];

@@ -30,6 +30,16 @@ final class DirectDeliveryIntentContext
         self::$requested[$invoiceId] = true;
     }
 
+    public static function isPrepared(int $invoiceId): bool
+    {
+        return isset(self::$prepared[$invoiceId]);
+    }
+
+    public static function isRequested(int $invoiceId): bool
+    {
+        return isset(self::$requested[$invoiceId]);
+    }
+
     /**
      * EmailPreSend itself is the proof for cron/autogen invoices because
      * WHMCS documents InvoiceCreationPreEmail as an admin-area hook.
@@ -43,11 +53,8 @@ final class DirectDeliveryIntentContext
         self::$requested[$invoiceId] = true;
     }
 
-    public static function consume(int $invoiceId): bool
+    public static function acknowledge(int $invoiceId): void
     {
-        $requested = isset(self::$requested[$invoiceId]);
         unset(self::$requested[$invoiceId], self::$prepared[$invoiceId]);
-
-        return $requested;
     }
 }

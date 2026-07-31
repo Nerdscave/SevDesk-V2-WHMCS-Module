@@ -58,9 +58,10 @@ final class ClientDeliveryContractTest extends TestCase
         self::assertStringContainsString("return ['attachments' => [\$attachment]]", $method);
         self::assertStringContainsString("return ['abortsend' => true]", $method);
         self::assertStringContainsString("return \$guardApplies ? ['abortsend' => true] : []", $method);
+        self::assertStringContainsString('DirectDeliveryIntentContext::isPrepared($invoiceId)', $method);
         self::assertStringContainsString('DirectDeliveryIntentContext::request($invoiceId)', $method);
         self::assertStringContainsString(
-            "sevdesk_enqueue_invoice(['invoiceid' => \$invoiceId], 'InvoiceCreated')",
+            "sevdesk_enqueue_invoice(['invoiceid' => \$invoiceId], 'InvoiceCreatedEmailPending')",
             $method,
         );
         self::assertStringContainsString("'invoice_lifecycle_mode'", $method);

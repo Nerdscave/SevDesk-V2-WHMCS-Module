@@ -158,6 +158,12 @@ Bei WHMCS-Dokumenthoheit bleibt die WHMCS-PDF maßgeblich. Im Proforma-Betrieb s
 
 Während einer Review-, Authentifizierungs- oder Sync-Pause wird in diesem Modus keine WHMCS-Endrechnung als Ersatz versendet. Trifft ein Paid-Ereignis während eines Authentifizierungsalarms ein, speichert das Modul nur den deduplizierten lokalen Pending-Job. Der Runner verarbeitet ihn erst nach einer erfolgreichen Mandantenprüfung. Eine dauerhafte PDF-Kopie in WHMCS gibt es in dieser Version nicht.
 
+Bei der initialen Direktbetriebs-Mail speichert `EmailPreSend` zunächst nur ein
+ungeprüftes Delivery-Item. Erst der anschließend ausgeführte echte
+`InvoiceCreated`-Hook bestätigt dieses Item und gibt den Dokument-Create frei.
+Eine spätere beliebige Invoice-Mail kann deshalb keinen historischen Export als
+neue Rechnung ausgeben.
+
 Für eine kundenseitige Zustellung gibt es zwei explizite Wege:
 
 - `sevdesk`: sevDesk öffnet und versendet die Invoice mit konfiguriertem Betreff und Text.

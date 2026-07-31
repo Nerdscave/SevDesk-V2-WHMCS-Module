@@ -20,6 +20,55 @@ use WHMCS\Module\Addon\SevDesk\Api\SevdeskClient;
 
 final class SevdeskClientTest extends TestCase
 {
+    public function testAuthenticationFailureInvokesTheTenantSafetyCallbackBeforeRethrow(): void
+    {
+        $calls = 0;
+        $stack = HandlerStack::create(new MockHandler([
+            new Response(403, [], '{"error":{"code":"FORBIDDEN"}}'),
+        ]));
+        $client = new SevdeskClient(
+            new Client(['handler' => $stack]),
+            'token',
+            authenticationFailureHandler: static function () use (&$calls): void {
+                ++$calls;
+            },
+        );
+
+        try {
+            $client->get('/Contact');
+            self::fail('The authentication failure must be rethrown after the safety callback.');
+        } catch (ApiException $exception) {
+            self::assertSame(403, $exception->httpStatus);
+        }
+
+        self::assertSame(1, $calls);
+    }
+
+    public function testMalformedAuthenticationResponseStillInvokesTheTenantSafetyCallback(): void
+    {
+        $calls = 0;
+        $stack = HandlerStack::create(new MockHandler([
+            new Response(401, [], 'not-json'),
+        ]));
+        $client = new SevdeskClient(
+            new Client(['handler' => $stack]),
+            'token',
+            authenticationFailureHandler: static function () use (&$calls): void {
+                ++$calls;
+            },
+        );
+
+        try {
+            $client->get('/Contact');
+            self::fail('Malformed authentication responses must still fail.');
+        } catch (ApiException $exception) {
+            self::assertSame(401, $exception->httpStatus);
+            self::assertSame('invalid_json', $exception->sevdeskCode);
+        }
+
+        self::assertSame(1, $calls);
+    }
+
     public function testItRejectsPlainHttpForNonLoopbackHosts(): void
     {
         $this->expectException(\InvalidArgumentException::class);

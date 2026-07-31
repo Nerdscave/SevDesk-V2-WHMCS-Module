@@ -197,6 +197,36 @@ final class CorrectionService
                 );
             }
 
+            try {
+                $readbackMismatch = $this->remoteCorrectionMismatch(
+                    $remoteId,
+                    $correction,
+                    $taxDecision,
+                    $positions,
+                    $refundMarker,
+                );
+            } catch (ApiException $exception) {
+                return self::result(
+                    'ambiguous',
+                    $exception->isAuthenticationFailure()
+                        ? 'api_authentication_failed'
+                        : 'correction_reconciliation_readback_failed',
+                    'The correction marker matched, but its Voucher and positions could not be proven by reads.',
+                    $remoteId,
+                    $reference,
+                    $exception->context(),
+                );
+            }
+            if ($readbackMismatch !== null) {
+                return self::result(
+                    'ambiguous',
+                    'correction_reconciliation_' . $readbackMismatch,
+                    'The correction marker matched, but its Voucher positions differ from the confirmed allocation.',
+                    $remoteId,
+                    $reference,
+                );
+            }
+
             $persistFailure = $this->persist($reference, $remoteId, true);
             if ($persistFailure !== null) {
                 return $persistFailure;
@@ -329,38 +359,33 @@ final class CorrectionService
             );
         }
 
-        $remoteGross = $remoteVoucher['sumGross'] ?? $remoteVoucher['total'] ?? null;
-        if (!is_int($remoteGross) && !is_float($remoteGross) && !is_string($remoteGross)) {
-            return self::result(
-                'ambiguous',
-                'correction_remote_total_missing',
-                'The created correction voucher has no verifiable total. Reconcile before retrying.',
-                $remoteId,
-                $reference,
-            );
-        }
         try {
-            $remoteMinor = Decimal::toMinorUnits((string) $remoteGross);
-        } catch (\InvalidArgumentException) {
+            $readbackMismatch = $this->remoteCorrectionMismatch(
+                $remoteId,
+                $correction,
+                $taxDecision,
+                $positions,
+                $refundMarker,
+            );
+        } catch (ApiException $exception) {
             return self::result(
                 'ambiguous',
-                'correction_remote_total_invalid',
-                'The created correction voucher returned an invalid total. Reconcile before retrying.',
+                $exception->isAuthenticationFailure()
+                    ? 'api_authentication_failed'
+                    : 'correction_remote_readback_failed',
+                'The created correction voucher could not be proven by exact Voucher and position reads.',
                 $remoteId,
                 $reference,
+                $exception->context(),
             );
         }
-        if ($remoteMinor !== -$correction['refundMinorUnits']) {
+        if ($readbackMismatch !== null) {
             return self::result(
                 'ambiguous',
-                'correction_remote_total_mismatch',
-                'The correction voucher total differs from the confirmed refund. No mapping was written.',
+                'correction_remote_' . $readbackMismatch,
+                'The created correction Voucher or its positions differ from the confirmed refund allocation.',
                 $remoteId,
                 $reference,
-                [
-                    'expectedMinorUnits' => -$correction['refundMinorUnits'],
-                    'remoteMinorUnits' => $remoteMinor,
-                ],
             );
         }
 
@@ -746,6 +771,111 @@ final class CorrectionService
         } catch (\InvalidArgumentException) {
             return false;
         }
+    }
+
+    /**
+     * @param array{
+     *     invoiceId:int,
+     *     originalVoucherId:string,
+     *     contactId:string,
+     *     refundMinorUnits:int,
+     *     currency:string,
+     *     voucherDate:string
+     * } $correction
+     * @param non-empty-list<LineItem> $positions
+     */
+    private function remoteCorrectionMismatch(
+        string $remoteId,
+        array $correction,
+        TaxDecision $taxDecision,
+        array $positions,
+        string $refundMarker,
+    ): ?string {
+        $voucher = self::unwrapVoucher($this->client->get(
+            '/Voucher/' . rawurlencode($remoteId),
+            ['embed' => 'supplier,taxRule'],
+        ));
+        if (
+            self::numericId($voucher['id'] ?? null) !== $remoteId
+            || (string) ($voucher['objectName'] ?? '') !== 'Voucher'
+            || (int) ($voucher['status'] ?? 0) !== 100
+            || (string) ($voucher['voucherType'] ?? '') !== 'VOU'
+            || trim((string) ($voucher['voucherDate'] ?? '')) !== self::apiDate($correction['voucherDate'])
+            || !$this->remoteCandidateMatches($voucher, $correction, $taxDecision, $refundMarker)
+        ) {
+            return 'voucher_mismatch';
+        }
+
+        $remotePositions = self::records($this->client->get('/VoucherPos', [
+            'voucher[id]' => $remoteId,
+            'voucher[objectName]' => 'Voucher',
+            'limit' => 1000,
+            'offset' => 0,
+        ]), 'VoucherPos');
+        if (count($remotePositions) !== count($positions)) {
+            return 'position_count_mismatch';
+        }
+
+        foreach ($positions as $index => $expected) {
+            $remote = $remotePositions[$index];
+            $remoteVoucherId = self::numericId(
+                $remote['voucher']['id'] ?? $remote['voucherId'] ?? null,
+            );
+            $accountId = self::numericId($remote['accountDatev']['id'] ?? null);
+            $amount = $expected->net ? ($remote['sumNet'] ?? null) : ($remote['sumGross'] ?? null);
+            if (
+                $remoteVoucherId !== $remoteId
+                || $accountId !== $taxDecision->accountDatevId
+                || self::remoteBoolean($remote['net'] ?? null) !== $expected->net
+                || trim((string) ($remote['comment'] ?? '')) !== mb_substr($expected->description, 0, 255)
+                || !$this->sameDecimal($remote['taxRate'] ?? null, $expected->taxRate)
+                || !$this->sameMinorUnits($amount, -abs(Decimal::toMinorUnits($expected->amount)))
+            ) {
+                return 'position_mismatch';
+            }
+        }
+
+        return null;
+    }
+
+    private function sameDecimal(mixed $actual, string $expected): bool
+    {
+        if (!is_int($actual) && !is_float($actual) && !is_string($actual)) {
+            return false;
+        }
+        try {
+            return round(Decimal::toFloat((string) $actual), 4)
+                === round(Decimal::toFloat($expected), 4);
+        } catch (\InvalidArgumentException) {
+            return false;
+        }
+    }
+
+    private function sameMinorUnits(mixed $actual, int $expected): bool
+    {
+        if (!is_int($actual) && !is_float($actual) && !is_string($actual)) {
+            return false;
+        }
+        try {
+            return Decimal::toMinorUnits((string) $actual) === $expected;
+        } catch (\InvalidArgumentException) {
+            return false;
+        }
+    }
+
+    private static function remoteBoolean(mixed $value): ?bool
+    {
+        if (is_bool($value)) {
+            return $value;
+        }
+        if ($value === 1 || $value === '1') {
+            return true;
+        }
+        if ($value === 0 || $value === '0') {
+            return false;
+        }
+
+        return null;
     }
 
     /**

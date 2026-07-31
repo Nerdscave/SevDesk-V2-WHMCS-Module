@@ -217,6 +217,41 @@ function sevdesk_upgrade(array $vars): void
 /** @return array{status:string,description:string} */
 function sevdesk_deactivate(): array
 {
+    try {
+        $sevdeskAuthorityMapping = Capsule::schema()->hasTable(Migrator::MAPPING_TABLE)
+            && Capsule::table(Migrator::MAPPING_TABLE)
+                ->where('document_type', 'invoice')
+                ->where('document_authority', 'sevdesk')
+                ->exists();
+        $sevdeskAuthorityJob = Capsule::schema()->hasTable(Migrator::ITEMS_TABLE)
+            && Capsule::table(Migrator::ITEMS_TABLE)
+                ->where('action', 'export_document')
+                ->whereIn('status', ['pending', 'running', 'retry_wait', 'ambiguous'])
+                ->where(static function (\Illuminate\Database\Query\Builder $query): void {
+                    $query->where('candidate_json', 'like', '%"targetDocumentAuthority":"sevdesk"%')
+                        ->orWhere('candidate_json', 'like', '%"requestedDocumentAuthority":"sevdesk"%');
+                })
+                ->exists();
+        if ($sevdeskAuthorityMapping || $sevdeskAuthorityJob) {
+            return [
+                'status' => 'error',
+                'description' => 'Das Modul kann nicht deaktiviert werden, solange Zuordnungen mit '
+                    . 'eingefrorener sevdesk-Dokumenthoheit bestehen. Lassen Sie das Modul installiert '
+                    . 'und stoppen Sie nur die Synchronisierung, bis ein kontrollierter Rollback bestätigt ist.',
+            ];
+        }
+    } catch (Throwable $error) {
+        if (function_exists('logActivity')) {
+            logActivity('sevdesk deactivation could not verify frozen document authority: ' . get_class($error));
+        }
+
+        return [
+            'status' => 'error',
+            'description' => 'Die eingefrorene Dokumenthoheit konnte nicht sicher geprüft werden. '
+                . 'Das Modul bleibt zum Schutz vorhandener Rechnungen aktiv.',
+        ];
+    }
+
     $config = new Config();
     $moduleDisabled = false;
     $syncDisabled = false;

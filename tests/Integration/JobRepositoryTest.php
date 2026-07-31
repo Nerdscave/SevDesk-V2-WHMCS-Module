@@ -142,14 +142,15 @@ final class JobRepositoryTest extends MariaDbTestCase
     public function testDirectEmailIntentUpgradesTheExistingPrimaryOwnerMonotonically(): void
     {
         $baseCandidate = [
-            'trigger' => 'InvoiceCreated',
+            'trigger' => 'InvoiceCreatedEmailPending',
             'requestedExportMode' => 'invoice_only',
             'requestedDocumentAuthority' => 'sevdesk',
             'requestedInvoiceLifecycleMode' => 'issue_on_creation',
             'requestedOssProfile' => 'blocked',
             'requestedEuB2cMode' => 'blocked',
             'requestedDeliveryChannel' => 'sevdesk',
-            'delivery_requested' => false,
+            'delivery_requested' => true,
+            'directCreationConfirmed' => false,
         ];
         $ownerJob = $this->jobs->create('automatic_export', [[
             'invoice_id' => 426,
@@ -157,7 +158,8 @@ final class JobRepositoryTest extends MariaDbTestCase
             'dedupe_key' => 'export_voucher:426',
             'candidate' => $baseCandidate,
         ]]);
-        $baseCandidate['delivery_requested'] = true;
+        $baseCandidate['trigger'] = 'InvoiceCreated';
+        $baseCandidate['directCreationConfirmed'] = true;
         $duplicateJob = $this->jobs->create('automatic_export', [[
             'invoice_id' => 426,
             'action' => 'export_document',
@@ -170,9 +172,14 @@ final class JobRepositoryTest extends MariaDbTestCase
         $candidate = json_decode((string) $owner->candidate_json, true, 32, JSON_THROW_ON_ERROR);
 
         self::assertTrue($candidate['delivery_requested']);
+        self::assertTrue($candidate['directCreationConfirmed']);
         self::assertMatchesRegularExpression(
             '/^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}$/',
             (string) $candidate['directDeliveryRequestedAt'],
+        );
+        self::assertMatchesRegularExpression(
+            '/^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}$/',
+            (string) $candidate['directCreationConfirmedAt'],
         );
         self::assertSame('pending', $owner->status);
         self::assertSame('skipped', $duplicate->status);
