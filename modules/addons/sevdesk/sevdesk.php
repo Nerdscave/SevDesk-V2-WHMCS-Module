@@ -41,7 +41,7 @@ function sevdesk_config(): array
         'name' => 'sevdesk Integration',
         'description' => 'Fortsetzbarer WHMCS→sevdesk Voucher-/Invoice-Export. '
             . 'Die betriebliche Konfiguration erfolgt ausschließlich auf der Modul-Seite „Einrichtung“.',
-        'version' => '2.1.0-rc.10',
+        'version' => '2.1.0-rc.11',
         'author' => 'Nerdscave',
         'language' => 'german',
         // WHMCS persists fields declared here without passing through the guarded

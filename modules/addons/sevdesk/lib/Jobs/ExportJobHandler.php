@@ -1781,14 +1781,21 @@ final class ExportJobHandler
         string $status,
     ): TaxDecision {
         if (self::historicalZeroTaxOverrideRequested($candidate)) {
+            $overrideVersion = trim((string) ($candidate['historicalZeroTaxOverrideVersion'] ?? ''));
             $accountDatevId = trim((string) ($candidate['historicalZeroTaxAccountDatevId'] ?? ''));
             $cutoff = trim((string) ($candidate['historicalZeroTaxUntil'] ?? ''));
             $contextValid = self::truthy($candidate['historicalBackfill'] ?? false)
                 && self::truthy($candidate['historicalZeroTaxManualReclassificationRequired'] ?? false)
-                && (string) ($candidate['historicalZeroTaxOverrideVersion'] ?? '') === 'rule17_voucher_v1'
+                && in_array($overrideVersion, [
+                    HistoricalZeroTaxOverridePolicy::VOUCHER_VERSION,
+                    HistoricalZeroTaxOverridePolicy::INVOICE_DISCOUNT_VERSION,
+                ], true)
                 && (string) ($candidate['historicalZeroTaxRuleId'] ?? '')
                     === HistoricalZeroTaxOverridePolicy::TAX_RULE_ID
-                && preg_match('/^[1-9]\d*$/', $accountDatevId) === 1;
+                && (
+                    $overrideVersion === HistoricalZeroTaxOverridePolicy::INVOICE_DISCOUNT_VERSION
+                    || preg_match('/^[1-9]\d*$/', $accountDatevId) === 1
+                );
             if (!$contextValid) {
                 return TaxDecision::block(
                     'historical_zero_tax_override_context_invalid',
@@ -1805,15 +1812,31 @@ final class ExportJobHandler
                     HistoricalZeroTaxOverridePolicy::PROFILE,
                 );
             }
-            $eligibilityFailure = HistoricalZeroTaxOverridePolicy::validateInvoice(
-                $invoice,
-                $status,
-                true,
-                $smallBusinessPeriod,
-                $cutoff,
-            );
+            $eligibilityFailure = $overrideVersion
+                === HistoricalZeroTaxOverridePolicy::INVOICE_DISCOUNT_VERSION
+                ? HistoricalZeroTaxOverridePolicy::validateDiscountInvoice(
+                    $invoice,
+                    $status,
+                    true,
+                    $smallBusinessPeriod,
+                    $cutoff,
+                )
+                : HistoricalZeroTaxOverridePolicy::validateInvoice(
+                    $invoice,
+                    $status,
+                    true,
+                    $smallBusinessPeriod,
+                    $cutoff,
+                );
             if ($eligibilityFailure === null && $this->whmcs->isAddFundsInvoice($invoiceId)) {
                 $eligibilityFailure = 'historical_zero_tax_override_structure_blocked';
+            }
+            if (
+                $eligibilityFailure === null
+                && $overrideVersion === HistoricalZeroTaxOverridePolicy::INVOICE_DISCOUNT_VERSION
+                && !TaxPolicy::isThirdCountryCode($contact->countryCode)
+            ) {
+                $eligibilityFailure = 'historical_zero_tax_discount_country_blocked';
             }
             if ($eligibilityFailure !== null) {
                 return TaxDecision::block(
@@ -1823,10 +1846,12 @@ final class ExportJobHandler
                 );
             }
 
-            return ($this->taxPolicy)()->decideHistoricalZeroTaxVoucher(
-                $accountDatevId,
-                $invoice->lineItems,
-            );
+            return $overrideVersion === HistoricalZeroTaxOverridePolicy::INVOICE_DISCOUNT_VERSION
+                ? ($this->taxPolicy)()->decideHistoricalZeroTaxDiscountInvoice($invoice->lineItems)
+                : ($this->taxPolicy)()->decideHistoricalZeroTaxVoucher(
+                    $accountDatevId,
+                    $invoice->lineItems,
+                );
         }
 
         $arguments = [
@@ -2070,25 +2095,40 @@ final class ExportJobHandler
 
         $action = (string) ($item->action ?? '');
         if (self::historicalZeroTaxOverrideRequested($candidate)) {
-            $target = $tax->allowed
+            $invoiceDiscountOverride = (string) ($candidate['historicalZeroTaxOverrideVersion'] ?? '')
+                === HistoricalZeroTaxOverridePolicy::INVOICE_DISCOUNT_VERSION;
+            $overrideAllowed = $tax->allowed
                 && $tax->taxRuleId === HistoricalZeroTaxOverridePolicy::TAX_RULE_ID
-                && $tax->guidanceValidated
+                && ($invoiceDiscountOverride ? $this->config->bool('invoice_canary_confirmed') : $tax->guidanceValidated);
+            $target = $overrideAllowed
                 ? DocumentTargetDecision::select(
-                    DocumentTargetDecision::DOCUMENT_VOUCHER,
+                    $invoiceDiscountOverride
+                        ? DocumentTargetDecision::DOCUMENT_INVOICE
+                        : DocumentTargetDecision::DOCUMENT_VOUCHER,
                     DocumentTargetResolver::AUTHORITY_WHMCS,
-                    DocumentTargetResolver::MODE_VOUCHER_ONLY,
+                    $invoiceDiscountOverride
+                        ? DocumentTargetResolver::MODE_INVOICE_ONLY
+                        : DocumentTargetResolver::MODE_VOUCHER_ONLY,
                     DocumentTargetResolver::OSS_BLOCKED,
                     HistoricalZeroTaxOverridePolicy::TAX_RULE_ID,
                     'historical_zero_tax_manual_override',
-                    'Provisional historical zero-tax Voucher; manual reclassification is required.',
+                    $invoiceDiscountOverride
+                        ? 'Provisional historical zero-tax Invoice; manual reclassification is required.'
+                        : 'Provisional historical zero-tax Voucher; manual reclassification is required.',
                 )
                 : DocumentTargetDecision::block(
                     DocumentTargetResolver::AUTHORITY_WHMCS,
-                    DocumentTargetResolver::MODE_VOUCHER_ONLY,
+                    $invoiceDiscountOverride
+                        ? DocumentTargetResolver::MODE_INVOICE_ONLY
+                        : DocumentTargetResolver::MODE_VOUCHER_ONLY,
                     DocumentTargetResolver::OSS_BLOCKED,
                     $tax->taxRuleId,
-                    $tax->code,
-                    $tax->message,
+                    $invoiceDiscountOverride && !$this->config->bool('invoice_canary_confirmed')
+                        ? 'invoice_canary_not_confirmed'
+                        : $tax->code,
+                    $invoiceDiscountOverride && !$this->config->bool('invoice_canary_confirmed')
+                        ? 'The documented sevdesk tenant canary has not been explicitly confirmed.'
+                        : $tax->message,
                 );
         } elseif (in_array($action, ['export_voucher', 'reconcile_voucher'], true)) {
             $target = $tax->allowed && $tax->taxRuleId !== null
@@ -2394,14 +2434,28 @@ final class ExportJobHandler
         array $candidate,
     ): bool {
         if (self::historicalZeroTaxOverrideRequested($candidate)) {
-            return self::truthy($candidate['historicalBackfill'] ?? false)
+            $overrideVersion = (string) ($candidate['historicalZeroTaxOverrideVersion'] ?? '');
+            $commonMatches = self::truthy($candidate['historicalBackfill'] ?? false)
                 && self::truthy($candidate['historicalZeroTaxManualReclassificationRequired'] ?? false)
-                && (string) ($candidate['historicalZeroTaxOverrideVersion'] ?? '') === 'rule17_voucher_v1'
-                && $target->documentType === DocumentTargetDecision::DOCUMENT_VOUCHER
                 && $target->documentAuthority === DocumentTargetResolver::AUTHORITY_WHMCS
-                && $target->exportMode === DocumentTargetResolver::MODE_VOUCHER_ONLY
                 && $target->ossProfile === DocumentTargetResolver::OSS_BLOCKED
-                && $target->taxRuleId === HistoricalZeroTaxOverridePolicy::TAX_RULE_ID
+                && $target->taxRuleId === HistoricalZeroTaxOverridePolicy::TAX_RULE_ID;
+            if (!$commonMatches) {
+                return false;
+            }
+            if ($overrideVersion === HistoricalZeroTaxOverridePolicy::INVOICE_DISCOUNT_VERSION) {
+                return $target->documentType === DocumentTargetDecision::DOCUMENT_INVOICE
+                    && $target->exportMode === DocumentTargetResolver::MODE_INVOICE_ONLY
+                    && (string) $this->config->get(
+                        'export_mode',
+                        DocumentTargetResolver::MODE_VOUCHER_ONLY,
+                    ) === DocumentTargetResolver::MODE_INVOICE_ONLY
+                    && $this->config->bool('invoice_canary_confirmed');
+            }
+
+            return $overrideVersion === HistoricalZeroTaxOverridePolicy::VOUCHER_VERSION
+                && $target->documentType === DocumentTargetDecision::DOCUMENT_VOUCHER
+                && $target->exportMode === DocumentTargetResolver::MODE_VOUCHER_ONLY
                 && trim((string) ($candidate['targetAccountDatevId'] ?? ''))
                     === trim((string) ($candidate['historicalZeroTaxAccountDatevId'] ?? ''));
         }

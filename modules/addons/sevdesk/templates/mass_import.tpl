@@ -40,15 +40,17 @@
             <p>
                 Dieser Sonderweg ist nur für bezahlte Rechnungen aus dem bestätigten
                 Kleinunternehmerzeitraum gedacht, wenn sevdesk Rule 11 im aktuellen Mandanten
-                nicht mehr fertigstellen kann. Er erzeugt mailfreie Voucher mit Rule 17 auf
-                einem aktuell bestätigten 0-%-Erlöskonto. Die steuerliche Zuordnung ist bewusst
-                nur vorläufig und muss vor einer Auswertung oder Abgabe in sevdesk manuell
-                berichtigt werden.
+                nicht mehr fertigstellen kann. Normale Fälle werden mailfrei als Voucher mit
+                Rule 17 auf dem gewählten 0-%-Erlöskonto erfasst. Genau ein bereits per Canary
+                geprüfter PromoHosting-Rabatt darf bei Drittlandskunden stattdessen als
+                Rule-17-Invoice angelegt werden; eine eigene Kontowahl ist bei Invoices nicht
+                möglich. Die steuerliche Zuordnung bleibt in beiden Fällen vorläufig und muss
+                später manuell geprüft werden.
             </p>
             <div class="checkbox">
                 <label>
                     <input type="checkbox" name="historical_zero_tax_override" value="1"{if $filters.historical_zero_tax_override} checked{/if}>
-                    Vorläufigen Rule-17-Voucherpfad für diesen Dry-Run verwenden
+                    Vorläufigen Rule-17-Altbestandspfad für diesen Dry-Run verwenden
                 </label>
             </div>
             <div class="form-group">
@@ -70,7 +72,7 @@
             <div class="checkbox">
                 <label>
                     <input type="checkbox" name="historical_zero_tax_override_confirmed" value="1"{if $filters.historical_zero_tax_override_confirmed} checked{/if}>
-                    Ich bestätige, dass diese Voucher nur der vorläufigen Nacherfassung dienen,
+                    Ich bestätige, dass diese Belege nur der vorläufigen Nacherfassung dienen,
                     keine Kundenmail ausgelöst werden darf und die Kontierung später manuell geprüft wird.
                 </label>
             </div>

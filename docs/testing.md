@@ -708,7 +708,7 @@ Ein Release darf erst freigegeben werden, wenn:
     getrennt geprüft.
 17. das Positivlisten-Releasearchiv die eigenständige `UPGRADE.md` und die GPL-Lizenz enthält, aber weder Tests, `vendor/` noch lokale Arbeitsdaten. Die Release Notes werden separat am GitHub-Pre-Release veröffentlicht.
 
-`2.1.0-rc.10` darf als klar gekennzeichnete GitHub-Vorabversion veröffentlicht
+`2.1.0-rc.11` darf als klar gekennzeichnete GitHub-Vorabversion veröffentlicht
 werden, sobald die automatisierten Repository-Checks und der Archivscan grün
 sind. Das ist keine pauschale Produktivfreigabe. Ein kontrollierter Nachlauf
 darf nur die Steuer-, Rabatt- und Late-Fee-Capabilities verwenden, deren
@@ -718,10 +718,13 @@ gesperrt.
 
 Der manuelle 0-%-Altbestandsnotweg braucht zusätzlich Tests für die
 Guidance-Positivliste, beschädigte Listen, Bezahlstatus, Stichtag, EUR,
-positive 0-%-Positionen, exakte Summen und die Blockade von Guthaben, Rabatt,
+positive 0-%-Positionen und exakte Summen. Der Rabattzweig prüft genau einen
+strukturellen `PromoHosting`-Rabatt, Drittland, `invoice_only`, beide
+Invoice-Canaries sowie die Blockade von DE/EU, Guthaben, weiteren Rabatten,
 AddFunds, Late Fee und normalen Hook-Exports. Ein kontrollierter Live-Canary
 muss Voucherziel, Rule 17, Konto, PDF, Marker, Mapping, ausbleibenden
-Mailversand und read-only Recovery bestätigen, bevor ein größerer Nachlauf
-beginnt.
+Mailversand und read-only Recovery bestätigen. Für den Rabattzweig werden
+statt Konto die exakten Invoice-Positionen, Summen, der Capability-Key und der
+Rabattfingerprint geprüft, bevor ein größerer Nachlauf beginnt.
 
 Offene Punkte in Steuerlogik, Idempotenz oder Mappingmigration blockieren auch eine Vorabversion.

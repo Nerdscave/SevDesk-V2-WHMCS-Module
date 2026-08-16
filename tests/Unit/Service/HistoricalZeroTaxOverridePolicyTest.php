@@ -126,6 +126,38 @@ final class HistoricalZeroTaxOverridePolicyTest extends TestCase
         );
     }
 
+    public function testOneZeroTaxDiscountCanUseTheSeparateHistoricalInvoiceContract(): void
+    {
+        self::assertNull(HistoricalZeroTaxOverridePolicy::validateDiscountInvoice(
+            $this->invoice(discount: true, total: '90.00'),
+            'Paid',
+            true,
+            true,
+            '2025-12-31',
+        ));
+
+        self::assertSame(
+            'historical_zero_tax_override_structure_blocked',
+            HistoricalZeroTaxOverridePolicy::validateDiscountInvoice(
+                $this->invoice(discount: false),
+                'Paid',
+                true,
+                true,
+                '2025-12-31',
+            ),
+        );
+        self::assertSame(
+            'historical_zero_tax_override_structure_blocked',
+            HistoricalZeroTaxOverridePolicy::validateDiscountInvoice(
+                $this->invoice(discount: true, credit: '1.00', total: '90.00'),
+                'Paid',
+                true,
+                true,
+                '2025-12-31',
+            ),
+        );
+    }
+
     private function invoice(
         string $credit = '0.00',
         string $rate = '0',

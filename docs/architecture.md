@@ -73,22 +73,27 @@ Rule 11 ist die begrenzte Ausnahme: sevDesk wählt das Erlöskonto bei einer Inv
 
 ### Architekturentscheidung: vorläufiger 0-%-Altbestandsnotweg
 
-**Status:** in rc.10 implementiert, ausschließlich manuell im historischen
+**Status:** in rc.11 implementiert, ausschließlich manuell im historischen
 Sammelexport erreichbar.
 
 Der Notweg ist keine weitere Steuerklassifikation. Er darf den normalen
 Rule-11-Pfad nur nach einer ausdrücklichen Bestätigung im Sammelexport ersetzen
 und wird weder von Hooks noch vom Einzel- oder Kurzexport gewählt. Zulässig
 sind ausschließlich bezahlte EUR-Rechnungen innerhalb des fest eingestellten
-Kleinunternehmerzeitraums. Steuer, Guthaben und Rabatt müssen null sein; jede
-Position und die Gesamtsumme müssen positiv und centgenau sein. AddFunds,
-Late Fees und Sammelzahlungen sind ausgeschlossen.
+Kleinunternehmerzeitraums. Steuer und Guthaben müssen null sein; jede positive
+Position und die Gesamtsumme müssen centgenau sein. AddFunds, Late Fees und
+Sammelzahlungen sind ausgeschlossen.
 
 Der Dry-Run liest `ReceiptGuidance` frisch und bietet nur `REVENUE`-Konten an,
 die Rule 17 mit 0 % erlauben. Der Job friert Notweg-Version, Enddatum, Rule,
 Konto und die Pflicht zur manuellen Umbuchung ein. Der Worker prüft Zeitraum,
-Rechnungsstruktur und Guidance vor dem Write erneut und wählt unabhängig vom
-globalen Invoice-Modus einen WHMCS-geführten Voucher. Die Auslieferung bleibt
+Rechnungsstruktur und Guidance vor dem Write erneut und wählt für positive
+Rechnungen unabhängig vom globalen Invoice-Modus einen WHMCS-geführten
+Voucher. Eine Rechnung mit genau einem strukturell belegten `PromoHosting`-
+Rabatt darf nur bei einem Drittlandskunden, `invoice_only`, bestätigtem
+Invoice-Canary und exakt passendem Rule-17-Rabatt-Canary als Invoice angelegt
+werden. Dieser Invoice-Pfad friert eine eigene Vertragsversion ein und
+übernimmt kein `accountDatev`. Die Auslieferung bleibt in beiden Fällen
 mailfrei. Bestehende Mappings werden weder verändert noch neu interpretiert.
 
 Diese Belege bilden § 19 UStG in sevDesk absichtlich nicht korrekt ab. Der

@@ -71,7 +71,8 @@ final class AdminInvoiceQuickExportContractTest extends TestCase
         self::assertStringContainsString("'candidate' => \$candidate", $single);
         self::assertStringContainsString("'candidate' => \$this->requestedExportContext()", $quick);
         self::assertStringContainsString('$requestedContext = $this->requestedExportContext();', $bulk);
-        self::assertStringContainsString("'candidate' => \$requestedContext", $bulk);
+        self::assertStringContainsString('$candidate = $requestedContext;', $bulk);
+        self::assertStringContainsString("'candidate' => \$candidate", $bulk);
         self::assertStringContainsString("\$requestedContext['historicalBackfill'] = true", $bulk);
         self::assertStringContainsString("\$requestedContext['delivery_requested'] = false", $bulk);
         self::assertStringContainsString("\$requestedContext['requestedEInvoiceMode'] = 'off'", $bulk);
@@ -141,7 +142,8 @@ final class AdminInvoiceQuickExportContractTest extends TestCase
         self::assertStringContainsString('HistoricalZeroTaxOverridePolicy::accountIsEligible(', $bulk);
         self::assertStringContainsString("'historicalBackfill'] = true", $bulk);
         self::assertStringContainsString("'delivery_requested'] = false", $bulk);
-        self::assertStringContainsString("'historicalZeroTaxOverrideVersion'] = 'rule17_voucher_v1'", $bulk);
+        self::assertStringContainsString('HistoricalZeroTaxOverridePolicy::INVOICE_DISCOUNT_VERSION', $bulk);
+        self::assertStringContainsString('HistoricalZeroTaxOverridePolicy::VOUCHER_VERSION', $bulk);
         self::assertStringContainsString("'historicalZeroTaxManualReclassificationRequired'] = true", $bulk);
     }
 

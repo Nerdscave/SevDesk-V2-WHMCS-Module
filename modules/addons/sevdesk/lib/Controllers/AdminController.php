@@ -503,23 +503,33 @@ final class AdminController
                     $requestedContext['delivery_requested'] = false;
                     $requestedContext['requestedEInvoiceMode'] = 'off';
                     $requestedContext['requestedEInvoiceCanaryConfirmed'] = false;
-                    if ($historicalOverride !== null) {
-                        $requestedContext['historicalZeroTaxOverride'] = true;
-                        $requestedContext['historicalZeroTaxOverrideVersion'] = 'rule17_voucher_v1';
-                        $requestedContext['historicalZeroTaxAccountDatevId'] =
-                            $historicalOverride['accountDatevId'];
-                        $requestedContext['historicalZeroTaxRuleId'] =
-                            HistoricalZeroTaxOverridePolicy::TAX_RULE_ID;
-                        $requestedContext['historicalZeroTaxUntil'] = $historicalOverride['cutoff'];
-                        $requestedContext['historicalZeroTaxManualReclassificationRequired'] = true;
-                    }
                     foreach ($invoices as $invoice) {
                         if ($invoice['exportable'] && in_array($invoice['id'], $selected, true)) {
+                            $candidate = $requestedContext;
+                            if ($historicalOverride !== null) {
+                                $candidate['historicalZeroTaxOverride'] = true;
+                                $candidate['historicalZeroTaxOverrideVersion'] =
+                                    ($invoice['document_type'] ?? null)
+                                        === DocumentTargetDecision::DOCUMENT_INVOICE
+                                    ? HistoricalZeroTaxOverridePolicy::INVOICE_DISCOUNT_VERSION
+                                    : HistoricalZeroTaxOverridePolicy::VOUCHER_VERSION;
+                                if (
+                                    $candidate['historicalZeroTaxOverrideVersion']
+                                    === HistoricalZeroTaxOverridePolicy::VOUCHER_VERSION
+                                ) {
+                                    $candidate['historicalZeroTaxAccountDatevId'] =
+                                        $historicalOverride['accountDatevId'];
+                                }
+                                $candidate['historicalZeroTaxRuleId'] =
+                                    HistoricalZeroTaxOverridePolicy::TAX_RULE_ID;
+                                $candidate['historicalZeroTaxUntil'] = $historicalOverride['cutoff'];
+                                $candidate['historicalZeroTaxManualReclassificationRequired'] = true;
+                            }
                             $allowed[] = [
                                 'invoice_id' => $invoice['id'],
                                 'action' => 'export_document',
                                 'dedupe_key' => 'export_voucher:' . $invoice['id'],
-                                'candidate' => $requestedContext,
+                                'candidate' => $candidate,
                             ];
                         }
                     }
@@ -3751,45 +3761,87 @@ final class AdminController
                     if (!$snapshot instanceof InvoiceSnapshot) {
                         throw new \LogicException('Historical zero-tax snapshot is unavailable.');
                     }
-                    $overrideFailure = HistoricalZeroTaxOverridePolicy::validateInvoice(
-                        $snapshot,
-                        (string) $invoice->status,
-                        $historicalBackfill,
-                        $smallBusinessApplies,
-                        (string) $historicalZeroTaxOverride['cutoff'],
-                    );
+                    $hasDiscount = $snapshot->discounts !== [];
+                    $overrideFailure = $hasDiscount
+                        ? HistoricalZeroTaxOverridePolicy::validateDiscountInvoice(
+                            $snapshot,
+                            (string) $invoice->status,
+                            $historicalBackfill,
+                            $smallBusinessApplies,
+                            (string) $historicalZeroTaxOverride['cutoff'],
+                        )
+                        : HistoricalZeroTaxOverridePolicy::validateInvoice(
+                            $snapshot,
+                            (string) $invoice->status,
+                            $historicalBackfill,
+                            $smallBusinessApplies,
+                            (string) $historicalZeroTaxOverride['cutoff'],
+                        );
                     if ($overrideFailure === null && ($addFunds || $lateFeeMinor > 0)) {
                         $overrideFailure = 'historical_zero_tax_override_structure_blocked';
                     }
-                    $voucherTaxPolicy ??= $this->application->taxPolicy();
-                    $decision = $overrideFailure === null
-                        ? $voucherTaxPolicy->decideHistoricalZeroTaxVoucher(
-                            (string) $historicalZeroTaxOverride['accountDatevId'],
-                            $lines,
+                    if (
+                        $overrideFailure === null
+                        && $hasDiscount
+                        && (
+                            !$invoiceOnly
+                            || !TaxPolicy::isThirdCountryCode($country)
                         )
-                        : \WHMCS\Module\Addon\SevDesk\Domain\TaxDecision::block(
-                            $overrideFailure,
-                            'The invoice does not satisfy the narrow historical zero-tax override.',
-                            HistoricalZeroTaxOverridePolicy::PROFILE,
-                        );
-                    $target = $decision->allowed && $decision->taxRuleId !== null
-                        ? DocumentTargetDecision::select(
-                            DocumentTargetDecision::DOCUMENT_VOUCHER,
-                            DocumentTargetResolver::AUTHORITY_WHMCS,
-                            DocumentTargetResolver::MODE_VOUCHER_ONLY,
-                            DocumentTargetResolver::OSS_BLOCKED,
-                            $decision->taxRuleId,
-                            'historical_zero_tax_manual_override',
-                            'Vorläufiger mailfreier 0-%-Voucher; spätere manuelle Umbuchung erforderlich.',
-                        )
-                        : DocumentTargetDecision::block(
-                            DocumentTargetResolver::AUTHORITY_WHMCS,
-                            DocumentTargetResolver::MODE_VOUCHER_ONLY,
-                            DocumentTargetResolver::OSS_BLOCKED,
-                            $decision->taxRuleId,
-                            $decision->code,
-                            $decision->message,
-                        );
+                    ) {
+                        $overrideFailure = 'historical_zero_tax_discount_country_blocked';
+                    }
+                    if ($overrideFailure === null && $hasDiscount) {
+                        $invoiceTaxPolicy ??= $this->application->invoiceTaxPolicy(true);
+                        $decision = $invoiceTaxPolicy->decideHistoricalZeroTaxDiscountInvoice($lines);
+                        $target = $decision->allowed && $decision->taxRuleId !== null
+                            ? DocumentTargetDecision::select(
+                                DocumentTargetDecision::DOCUMENT_INVOICE,
+                                DocumentTargetResolver::AUTHORITY_WHMCS,
+                                DocumentTargetResolver::MODE_INVOICE_ONLY,
+                                DocumentTargetResolver::OSS_BLOCKED,
+                                $decision->taxRuleId,
+                                'historical_zero_tax_manual_override',
+                                'Vorläufige mailfreie Rule-17-Invoice; spätere manuelle Zuordnung erforderlich.',
+                            )
+                            : DocumentTargetDecision::block(
+                                DocumentTargetResolver::AUTHORITY_WHMCS,
+                                DocumentTargetResolver::MODE_INVOICE_ONLY,
+                                DocumentTargetResolver::OSS_BLOCKED,
+                                $decision->taxRuleId,
+                                $decision->code,
+                                $decision->message,
+                            );
+                    } else {
+                        $voucherTaxPolicy ??= $this->application->taxPolicy();
+                        $decision = $overrideFailure === null
+                            ? $voucherTaxPolicy->decideHistoricalZeroTaxVoucher(
+                                (string) $historicalZeroTaxOverride['accountDatevId'],
+                                $lines,
+                            )
+                            : \WHMCS\Module\Addon\SevDesk\Domain\TaxDecision::block(
+                                $overrideFailure,
+                                'The invoice does not satisfy the narrow historical zero-tax override.',
+                                HistoricalZeroTaxOverridePolicy::PROFILE,
+                            );
+                        $target = $decision->allowed && $decision->taxRuleId !== null
+                            ? DocumentTargetDecision::select(
+                                DocumentTargetDecision::DOCUMENT_VOUCHER,
+                                DocumentTargetResolver::AUTHORITY_WHMCS,
+                                DocumentTargetResolver::MODE_VOUCHER_ONLY,
+                                DocumentTargetResolver::OSS_BLOCKED,
+                                $decision->taxRuleId,
+                                'historical_zero_tax_manual_override',
+                                'Vorläufiger mailfreier 0-%-Voucher; spätere manuelle Umbuchung erforderlich.',
+                            )
+                            : DocumentTargetDecision::block(
+                                DocumentTargetResolver::AUTHORITY_WHMCS,
+                                DocumentTargetResolver::MODE_VOUCHER_ONLY,
+                                DocumentTargetResolver::OSS_BLOCKED,
+                                $decision->taxRuleId,
+                                $decision->code,
+                                $decision->message,
+                            );
+                    }
                 } elseif ($invoiceOnly) {
                     if ($invoiceTaxPolicy === null) {
                         throw new \LogicException('Invoice tax policy is unavailable.');

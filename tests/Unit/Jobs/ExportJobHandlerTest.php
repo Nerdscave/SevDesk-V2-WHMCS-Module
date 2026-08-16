@@ -253,6 +253,67 @@ final class ExportJobHandlerTest extends TestCase
         self::assertSame('voucher', $checkpointContext['targetDocumentType'] ?? null);
     }
 
+    public function testHistoricalZeroTaxDiscountOverrideFreezesAMailFreeInvoiceTarget(): void
+    {
+        $config = new Config();
+        (new \ReflectionProperty(Config::class, 'values'))->setValue($config, [
+            'export_mode' => 'invoice_only',
+            'invoice_canary_confirmed' => 'on',
+            'invoice_sev_user_id' => '41',
+            'invoice_unity_id' => '7',
+        ]);
+        $handler = (new \ReflectionClass(ExportJobHandler::class))->newInstanceWithoutConstructor();
+        (new \ReflectionProperty(ExportJobHandler::class, 'config'))->setValue($handler, $config);
+        $method = new \ReflectionMethod(ExportJobHandler::class, 'frozenOrNewTarget');
+        $candidate = [
+            'historicalBackfill' => true,
+            'historicalZeroTaxOverride' => true,
+            'historicalZeroTaxOverrideVersion' => 'rule17_invoice_discount_v1',
+            'historicalZeroTaxRuleId' => '17',
+            'historicalZeroTaxUntil' => '2025-12-31',
+            'historicalZeroTaxManualReclassificationRequired' => true,
+            'requestedExportMode' => 'invoice_only',
+            'requestedDocumentAuthority' => 'whmcs',
+            'requestedInvoiceLifecycleMode' => 'after_payment_proforma',
+            'requestedLateFeeMode' => 'blocked',
+            'requestedOssProfile' => 'blocked',
+            'requestedEuB2cMode' => 'blocked',
+        ];
+        $tax = TaxDecision::allowInvoice(
+            'third_country',
+            '17',
+            'Synthetic provisional decision.',
+            ['0'],
+        );
+        $checkpointContext = [];
+
+        $target = $method->invoke(
+            $handler,
+            (object) ['action' => 'export_document', 'checkpoint' => 'queued'],
+            $candidate,
+            $tax,
+            'Paid',
+            'INV-2025-2',
+            static function (string $checkpoint, array $context) use (&$checkpointContext): bool {
+                self::assertSame('document_type_selected', $checkpoint);
+                $checkpointContext = $context;
+
+                return true;
+            },
+        );
+
+        self::assertInstanceOf(DocumentTargetDecision::class, $target);
+        self::assertTrue($target->allowed);
+        self::assertSame('invoice', $target->documentType);
+        self::assertSame('invoice_only', $target->exportMode);
+        self::assertSame('whmcs', $target->documentAuthority);
+        self::assertSame('17', $target->taxRuleId);
+        self::assertNull($checkpointContext['targetAccountDatevId'] ?? null);
+        self::assertSame('41', $checkpointContext['targetSevUserId'] ?? null);
+        self::assertSame('7', $checkpointContext['targetUnityId'] ?? null);
+        self::assertSame('off', $checkpointContext['targetEInvoiceMode'] ?? null);
+    }
+
     private function failureOutcome(int $httpStatus, bool $definiteWriteRejected, string $checkpoint): JobOutcome
     {
         $handler = (new \ReflectionClass(ExportJobHandler::class))->newInstanceWithoutConstructor();

@@ -9,18 +9,23 @@ use WHMCS\Module\Addon\SevDesk\Domain\Decimal;
 use WHMCS\Module\Addon\SevDesk\Domain\InvoiceSnapshot;
 
 /**
- * Narrow operator override for a historical, manually reclassified 0% Voucher.
+ * Narrow operator override for historical, manually reclassified 0% documents.
  *
  * This is not a tax classification. It only provides a recoverable import path
  * when the current sevdesk tenant cannot finalise the historically correct
- * Rule 11 document. The selected Rule 17 account must still be authorised by
- * current Receipt Guidance and the resulting Voucher requires later review.
+ * Rule 11 document. Positive invoices use a Voucher whose Rule 17 account is
+ * authorised by current Receipt Guidance. The separate discount branch uses
+ * a canary-gated Rule 17 Invoice because InvoicePos cannot carry accountDatev.
  */
 final class HistoricalZeroTaxOverridePolicy
 {
     public const PROFILE = 'historical_zero_tax_manual_override';
 
     public const TAX_RULE_ID = '17';
+
+    public const VOUCHER_VERSION = 'rule17_voucher_v1';
+
+    public const INVOICE_DISCOUNT_VERSION = 'rule17_invoice_discount_v1';
 
     /**
      * @param array<array-key,mixed> $guidance
@@ -161,6 +166,59 @@ final class HistoricalZeroTaxOverridePolicy
             ) {
                 return 'historical_zero_tax_override_structure_blocked';
             }
+        }
+
+        return null;
+    }
+
+    public static function validateDiscountInvoice(
+        InvoiceSnapshot $invoice,
+        string $status,
+        bool $historicalBackfill,
+        bool $smallBusinessPeriod,
+        string $cutoff,
+    ): ?string {
+        if (!$historicalBackfill) {
+            return 'historical_zero_tax_override_requires_backfill';
+        }
+        if ($status !== 'Paid') {
+            return 'historical_zero_tax_override_requires_paid';
+        }
+        if (!$smallBusinessPeriod) {
+            return 'historical_zero_tax_override_outside_small_business_period';
+        }
+
+        $cutoffDate = DateTimeImmutable::createFromFormat('!Y-m-d', trim($cutoff));
+        if (
+            !$cutoffDate instanceof DateTimeImmutable
+            || $cutoffDate->format('Y-m-d') !== trim($cutoff)
+            || DateTimeImmutable::getLastErrors() !== false
+            || $invoice->invoiceDate > $cutoffDate
+        ) {
+            return 'historical_zero_tax_override_cutoff_invalid';
+        }
+        if (
+            $invoice->currency !== 'EUR'
+            || $invoice->totalMinorUnits() <= 0
+            || $invoice->appliedCreditMinorUnits() !== 0
+            || count($invoice->discounts) !== 1
+            || $invoice->expectedTaxMinorUnits() !== 0
+            || $invoice->calculatedDocumentGrossMinorUnits() !== $invoice->totalMinorUnits()
+        ) {
+            return 'historical_zero_tax_override_structure_blocked';
+        }
+        foreach ($invoice->lineItems as $lineItem) {
+            if (
+                Decimal::toMinorUnits($lineItem->amount) <= 0
+                || Decimal::toMinorUnits($lineItem->taxRate) !== 0
+            ) {
+                return 'historical_zero_tax_override_structure_blocked';
+            }
+        }
+
+        $discount = $invoice->discounts[0];
+        if (Decimal::toMinorUnits($discount->taxRate) !== 0) {
+            return 'historical_zero_tax_override_structure_blocked';
         }
 
         return null;

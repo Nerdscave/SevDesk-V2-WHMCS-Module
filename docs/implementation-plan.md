@@ -38,6 +38,13 @@ Umbuchung. Er akzeptiert nur bezahlte EUR-Rechnungen mit positiven Positionen
 und ohne Steuer, Guthaben, Rabatt, AddFunds oder Late Fee. Der normale
 Tax-Resolver und alle automatischen Hooks verwenden diesen Notweg nicht.
 
+`2.1.0-rc.11` ergänzt innerhalb dieses manuellen Notwegs genau einen bereits
+per Canary geprüften Rabattfall. Eine bezahlte Drittlandrechnung mit einem
+strukturell eindeutigen `PromoHosting`-Rabatt darf in `invoice_only` als
+mailfreie Rule-17-Invoice angelegt werden. Normaler Invoice-Canary und exakter
+Rule-17-Rabatt-Canary bleiben Pflicht. DE-/EU-Rabatte und alle übrigen
+Sonderfälle bleiben gesperrt.
+
 Der Invoice-Canary bleibt ein hartes Release-Gate. Bis dahin blockiert `invoice_canary_confirmed=off` alle Invoice-Modi. Rule-11-Invoices benötigen zusätzlich `small_business_invoice_canary_confirmed` und eine aktuelle `ReceiptGuidance` mit Rule 11, 0 % und `REVENUE`-Scope. ZUGFeRD hat mit `e_invoice_canary_confirmed` ein eigenes Gate. Die fünf Rabatt-Gates sind `invoice_discount_canary_confirmed`, `invoice_discount_rule1_19_canary_confirmed`, `invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed`, `invoice_discount_rule17_0_canary_confirmed` und `invoice_discount_rule19_canary_confirmed`. Das additive Upgrade behält `voucher_only` bei und setzt die neuen Gates auf aus. Der 2.0-Betrieb stoppt beim Upgrade einmalig mit `sync_enabled=off` und `runtime_review_required=on`.
 
 ## Feste Produktentscheidungen
@@ -660,6 +667,26 @@ Ein kleiner kontrollierter Monatslauf erzeugt ausschließlich die zuvor
 ausgewählten Voucher, verschickt keine Mail und lässt sich anhand von Mapping,
 Marker, PDF und Summen vollständig zurückprüfen. Vor jeder sevDesk-Auswertung
 werden die Belege manuell richtig zugeordnet.
+
+## Phase 14a: RC.11 – historische Drittlandrabatte
+
+1. Genau einen strukturell belegten `PromoHosting`-Rabatt im manuellen
+   0-%-Altbestandslauf erkennen.
+2. Nur Drittland, EUR, Rule 17, `invoice_only`, normalen Invoice-Canary und den
+   exakten Rule-17-Rabatt-Canary zulassen.
+3. Zieltyp, Vertragsversion, Capability-Key und Rabattfingerprint vor dem
+   ersten Write einfrieren.
+4. Den Beleg als WHMCS-geführte Invoice ohne Kundenmail und ohne E-Rechnung
+   anlegen. Ein eigenes `accountDatev` ist für Invoice-Positionen nicht
+   verfügbar.
+5. DE-/EU-Rabatte, Guthaben, Late Fees, AddFunds, mehrere Rabatte und
+   abweichende Steuersätze weiterhin blockieren.
+
+### Exit-Kriterium
+
+Der Dry-Run gibt ausschließlich die bereits per Rule-17-Rabatt-Canary
+abgedeckten Drittlandfälle frei. Create, Readback, PDF, Mapping und Recovery
+sind centgenau; keine Mail wird ausgelöst.
 
 ## Phase 15: Erweiterungen nach stabilem Invoice-Rollout
 

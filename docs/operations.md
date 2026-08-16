@@ -2,7 +2,7 @@
 
 ## Freigabestatus
 
-Dieses Runbook gilt für den Arbeitsstand `2.1.0-rc.10`. Der RC ist für kontrollierte Test- und Nachlaufinstallationen gedacht. Die automatisierten Prüfungen unter PHP 8.3 mit XMLReader und MariaDB sowie die technischen Live-Läufe für normale Invoices, Rule 19 und ZUGFeRD wurden mit synthetischen Daten ausgeführt. Der direkte sevDesk-Versand, echte Kundensitzungen und die Rechteprüfung waren erfolgreich. Zwei WHMCS-Postfachläufe enthielten dagegen die WHMCS-Core-PDF. WHMCS 8.13 führt den Hook zwar aus, kann dessen Binäranhang aber noch nicht übernehmen. Der Kanal `whmcs_template` ist auf der Zielplattform daher gesperrt.
+Dieses Runbook gilt für den Arbeitsstand `2.1.0-rc.11`. Der RC ist für kontrollierte Test- und Nachlaufinstallationen gedacht. Die automatisierten Prüfungen unter PHP 8.3 mit XMLReader und MariaDB sowie die technischen Live-Läufe für normale Invoices, Rule 19 und ZUGFeRD wurden mit synthetischen Daten ausgeführt. Der direkte sevDesk-Versand, echte Kundensitzungen und die Rechteprüfung waren erfolgreich. Zwei WHMCS-Postfachläufe enthielten dagegen die WHMCS-Core-PDF. WHMCS 8.13 führt den Hook zwar aus, kann dessen Binäranhang aber noch nicht übernehmen. Der Kanal `whmcs_template` ist auf der Zielplattform daher gesperrt.
 
 rc.9 ergänzt Direktrechnung, Mahnung, Storno und die getrennte
 Late-Fee-Buchung. Diese Wege sind implementiert, aber noch nicht live
@@ -397,21 +397,26 @@ Dieses Gate ist vom allgemeinen Invoice-Canary und vom Rule-11-Rabatt-Canary get
 
 Der Anlass ist ein reproduzierter Livebefund: sevDesk akzeptierte eine normale Rule-11-Invoice zunächst als Draft. `sendBy` scheiterte danach mit HTTP 422 und Code 7100, weil `KLEINUNTERNEHMER_P19` für das automatisch gewählte Konto beziehungsweise dessen Scope nicht zulässig war. Das Modul kann dieses Konto bei einer Invoice nicht über `InvoicePos.accountDatev` vorgeben.
 
-[sevDesk empfiehlt beim Wechsel der Besteuerungsart](https://hilfe.sevdesk.de/de/articles/9382213-einstellung-zu-buchhaltung-steuer), offene Vorgänge aus dem Kleinunternehmerzeitraum vorher abzuschließen. Der normale Export bleibt deshalb gesperrt, wenn Rule 11 im aktuellen Mandanten nicht mehr finalisierbar ist. rc.10 bietet für einen bewusst vorläufigen Nachlauf einen getrennten Notweg; er verändert die normale Steuerentscheidung nicht.
+[sevDesk empfiehlt beim Wechsel der Besteuerungsart](https://hilfe.sevdesk.de/de/articles/9382213-einstellung-zu-buchhaltung-steuer), offene Vorgänge aus dem Kleinunternehmerzeitraum vorher abzuschließen. Der normale Export bleibt deshalb gesperrt, wenn Rule 11 im aktuellen Mandanten nicht mehr finalisierbar ist. rc.11 bietet für einen bewusst vorläufigen Nachlauf einen getrennten Notweg; er verändert die normale Steuerentscheidung nicht.
 
 ### Vorläufiger 0-%-Altbestandsnotweg
 
 Dieser Ablauf ist nur vertretbar, wenn die Belege später vor jeder
 sevDesk-Auswertung oder Abgabe manuell richtig zugeordnet werden. Im
-Sammelexport werden Zeitraum, „Vorläufigen Rule-17-Voucherpfad verwenden“, ein
+Sammelexport werden Zeitraum, „Vorläufigen Rule-17-Altbestandspfad verwenden“, ein
 von der aktuellen Guidance angebotenes Konto und die Bestätigung der späteren
-Umbuchung gewählt. Der Dry-Run muss für jede ausgewählte Zeile `voucher`, Rule
-17, das gewählte Konto und „manuelle Umbuchung erforderlich“ anzeigen.
+Umbuchung gewählt. Der Dry-Run muss für jede ausgewählte Zeile Zieltyp, Rule
+17 und „manuelle Umbuchung erforderlich“ anzeigen. Bei einem Voucher muss
+zusätzlich das gewählte Konto erscheinen.
 
 Der Pfad verarbeitet ausschließlich bezahlte EUR-Rechnungen innerhalb des
 festen Kleinunternehmerzeitraums. Steuer und alle Positionssätze müssen 0 %
 sein; Positionen und Gesamtsumme müssen positiv und centgenau sein. Rechnungen
-mit Guthaben, Sammelzahlung, Rabatt, AddFunds oder Late Fee bleiben gesperrt.
+mit Guthaben, Sammelzahlung, AddFunds oder Late Fee bleiben gesperrt. Eine
+Ausnahme gilt für genau einen strukturell belegten `PromoHosting`-Rabatt eines
+Drittlandskunden: In `invoice_only` darf er mit bestätigtem Invoice- und
+Rule-17-Rabatt-Canary als Invoice übertragen werden. Diese Invoice übernimmt
+kein eigenes `accountDatev`. DE-/EU-Fälle und andere Rabatte bleiben gesperrt.
 Der Job ist mailfrei, erzeugt keine E-Rechnung und ändert weder vorhandene
 Mappings noch WHMCS-Rechnungen.
 

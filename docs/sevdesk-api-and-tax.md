@@ -374,16 +374,21 @@ Der Tax-Resolver verwendet unter anderem Kleinunternehmerstatus, Land, Organisat
 
 Der Kleinunternehmerstatus kann mit einem Enddatum versehen werden. Rule 11 gilt dann nur für Rechnungsdaten bis einschließlich dieses Tages. Sie hat in diesem Zeitraum auch Vorrang vor dem bestätigten AddFunds-Sonderprofil; dadurch kann AddFunds weder auf Rule 1 ausweichen noch die Rule-11-Invoice-Gates umgehen. Nach dem Stichtag wird das AddFunds-Profil wieder gewählt, muss aber weiterhin einen zulässigen Rule-/Rate-Vertrag erfüllen. Ohne Enddatum bleibt der aktivierte Schalter aus Gründen der Upgrade-Kompatibilität unbegrenzt wirksam. Bei aktivem Kleinunternehmerprofil wird ein ungültiger gespeicherter Stichtag nicht als „Regelbesteuerung“ interpretiert, sondern blockiert den Export. Im Modus `invoice_only` kommen der Rule-11-Invoice-Canary und die aktuelle Mandantenfähigkeit hinzu; `invoice_for_oss` lässt diese Fälle weiterhin als Voucher laufen.
 
-Der manuelle 0-%-Altbestandsnotweg aus rc.10 ist davon getrennt. Er
+Der manuelle 0-%-Altbestandsnotweg aus rc.11 ist davon getrennt. Er
 klassifiziert keinen Steuerfall und wird nie von Hooks oder normalen
 Einzel-Exports gewählt. Im bestätigten historischen Sammelexport darf er eine
 bezahlte EUR-Rechnung aus dem fest begrenzten Kleinunternehmerzeitraum
 vorläufig als Voucher mit Rule 17 abbilden. Das gewählte Konto muss bei
 Vorschau und Worker aktuell als `REVENUE` für Rule 17 mit 0 % gemeldet werden.
-Positive 0-%-Positionen und eine centgenaue Summe sind Pflicht. Guthaben,
-Sammelzahlungen, Rabatte, AddFunds, Late Fees und Fremdwährungen bleiben
-blockiert. Diese Kontierung bildet nicht § 19 UStG ab und muss vor jeder
-Auswertung oder Abgabe in sevDesk manuell berichtigt werden.
+Positive 0-%-Positionen und eine centgenaue Summe sind Pflicht. Genau ein
+strukturell belegter `PromoHosting`-Rabatt ist nur für Drittlandskunden als
+Rule-17-Invoice zulässig. Dafür müssen `invoice_only`, der normale
+Invoice-Canary und der exakte Rule-17-Rabatt-Canary aktiv sein. Da `InvoicePos`
+kein `accountDatev` annimmt, kann dieser Beleg nicht auf das im Formular
+gewählte Übergangskonto gezwungen werden. Guthaben, Sammelzahlungen, andere
+Rabatte, AddFunds, Late Fees und Fremdwährungen bleiben blockiert. Diese
+Kontierung bildet nicht § 19 UStG ab und muss vor jeder Auswertung oder Abgabe
+in sevDesk manuell berichtigt werden.
 
 Nach dem Kleinunternehmer-Stichtag akzeptiert Rule 1 nur noch 7 % oder 19 %. Das gilt unabhängig davon, ob die Regel über das deutsche Standardprofil, EU-B2C mit bestätigter Inlandsbesteuerung oder das AddFunds-Sonderprofil gewählt wurde. Enthält die WHMCS-Rechnung weiterhin eine Position mit 0 %, wird sie vor jedem Voucher- oder Invoice-Write mit `domestic_zero_tax_rate_outside_small_business_period` blockiert. Das Modul rät in diesem Fall keinen anderen Steuergrund und ändert die WHMCS-Rechnung nicht.
 

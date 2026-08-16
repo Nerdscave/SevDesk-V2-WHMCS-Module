@@ -353,6 +353,23 @@ final class TaxPolicyTest extends TestCase
         self::assertSame('historical_zero_tax_override_structure_blocked', $positiveTax->code);
     }
 
+    public function testHistoricalZeroTaxDiscountInvoiceSelectsRuleSeventeenWithoutVoucherAccount(): void
+    {
+        $decision = $this->policy()->decideHistoricalZeroTaxDiscountInvoice([
+            new LineItem('Historical service', '100', '0', false),
+        ]);
+
+        self::assertTrue($decision->allowed);
+        self::assertSame('third_country', $decision->profile);
+        self::assertSame('17', $decision->taxRuleId);
+        self::assertNull($decision->accountDatevId);
+        self::assertFalse($decision->guidanceValidated);
+        self::assertSame(['0'], $decision->allowedTaxRates);
+        self::assertTrue(TaxPolicy::isThirdCountryCode('US'));
+        self::assertFalse(TaxPolicy::isThirdCountryCode('DE'));
+        self::assertFalse(TaxPolicy::isThirdCountryCode('FR'));
+    }
+
     public function testVoucherRuleElevenCannotSelfAuthoriseAPositiveGuidanceRate(): void
     {
         $guidance = $this->guidance();

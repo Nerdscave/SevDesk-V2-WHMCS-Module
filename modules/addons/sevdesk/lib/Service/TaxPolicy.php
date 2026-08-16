@@ -369,6 +369,46 @@ final class TaxPolicy
         );
     }
 
+    /**
+     * Select the separately canary-gated Rule-17 Invoice used for one exact
+     * PromoHosting discount on a historical third-country invoice. InvoicePos
+     * has no accountDatev, so the result intentionally carries no account.
+     *
+     * @param list<LineItem> $lineItems
+     */
+    public function decideHistoricalZeroTaxDiscountInvoice(array $lineItems): TaxDecision
+    {
+        self::assertLineItems($lineItems);
+        foreach ($lineItems as $lineItem) {
+            if (
+                Decimal::toMinorUnits($lineItem->amount) <= 0
+                || self::normaliseNumericRate($lineItem->taxRate) !== '0'
+            ) {
+                return TaxDecision::block(
+                    'historical_zero_tax_override_structure_blocked',
+                    'The provisional historical Invoice accepts only positive zero-tax positions.',
+                    'third_country',
+                );
+            }
+        }
+
+        return TaxDecision::allowInvoice(
+            'third_country',
+            HistoricalZeroTaxOverridePolicy::TAX_RULE_ID,
+            'Provisional historical zero-tax third-country Invoice selected for later manual reclassification.',
+            ['0'],
+        );
+    }
+
+    public static function isThirdCountryCode(string $countryCode): bool
+    {
+        $countryCode = strtoupper(trim($countryCode));
+
+        return preg_match('/^[A-Z]{2}$/', $countryCode) === 1
+            && $countryCode !== 'DE'
+            && !in_array($countryCode, self::EU_COUNTRIES, true);
+    }
+
     public function invoiceRuleElevenTenantScopeSupported(): bool
     {
         return $this->invoiceRuleElevenTenantScopeSupported;

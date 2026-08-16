@@ -1,6 +1,6 @@
 # Sicherer Ersatz eines bestehenden WHMCS-sevDesk-Moduls
 
-Diese Anleitung gehört zu `2.1.0-rc.10`. Der RC ist eine Vorabversion für kontrollierte Test- und Nachlaufinstallationen. Die technischen Invoice- und ZUGFeRD-Läufe unter WHMCS 8.13.4 sind weitgehend abgeschlossen. Zwei Postfachtests haben bestätigt, dass WHMCS 8.13 Binäranhänge aus `EmailPreSend` nicht übernimmt. Der Versandweg `whmcs_template` ist deshalb gesperrt; bei sevDesk-Dokumenthoheit steht der direkte sevDesk-Versand zur Verfügung. Für die vollständige Freigabe fehlen außerdem Invoice-`bookAmount`, der rabattfreie Rule-11-Invoice-Canary, die fünf getrennten Rabatt-Canaries, die produktiven Voucher-Steuerfälle und die fachliche Abnahme.
+Diese Anleitung gehört zu `2.1.0-rc.11`. Der RC ist eine Vorabversion für kontrollierte Test- und Nachlaufinstallationen. Die technischen Invoice- und ZUGFeRD-Läufe unter WHMCS 8.13.4 sind weitgehend abgeschlossen. Zwei Postfachtests haben bestätigt, dass WHMCS 8.13 Binäranhänge aus `EmailPreSend` nicht übernimmt. Der Versandweg `whmcs_template` ist deshalb gesperrt; bei sevDesk-Dokumenthoheit steht der direkte sevDesk-Versand zur Verfügung. Für die vollständige Freigabe fehlen außerdem Invoice-`bookAmount`, der rabattfreie Rule-11-Invoice-Canary, noch nicht einzeln bestätigte Rabatt- und Voucher-Steuerfälle sowie die fachliche Abnahme.
 
 RC.9 ergänzt `mod_sevdesk.invoice_lifecycle_mode` und die Tabelle
 `mod_sevdesk_related_documents`. Dort stehen ausschließlich technische
@@ -14,6 +14,12 @@ historischen Sammelexport steht ein ausdrücklich manueller, mailfreier
 Rule-17-Voucherpfad für 0-%-Belege aus einem fest begrenzten
 Kleinunternehmerzeitraum zur Verfügung. Er wird nicht automatisch aktiv und
 ist nur für eine spätere manuelle Umbuchung gedacht.
+
+RC.11 ergänzt in diesem manuellen Lauf einen ebenso mailfreien Invoice-Zweig
+für Drittlandrechnungen mit genau einem strukturell belegten `PromoHosting`-
+Rabatt. Er wird nur in `invoice_only` und mit dem bereits bestätigten exakten
+Rule-17-Rabatt-Canary freigegeben. Invoice-Positionen übernehmen kein eigenes
+`accountDatev`; auch diese Belege müssen später manuell geprüft werden.
 
 Diese Version verwendet weiterhin den Addon-Namen und Ordner `sevdesk` sowie
 die Mappingtabelle `mod_sevdesk`. Der Austausch erhält vorhandene Zuordnungen
