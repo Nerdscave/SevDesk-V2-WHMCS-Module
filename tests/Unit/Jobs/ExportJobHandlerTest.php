@@ -6,6 +6,8 @@ namespace Tests\Unit\Jobs;
 
 use PHPUnit\Framework\TestCase;
 use WHMCS\Module\Addon\SevDesk\Config;
+use WHMCS\Module\Addon\SevDesk\Domain\DocumentTargetDecision;
+use WHMCS\Module\Addon\SevDesk\Domain\TaxDecision;
 use WHMCS\Module\Addon\SevDesk\Jobs\ExportJobHandler;
 use WHMCS\Module\Addon\SevDesk\Jobs\JobOutcome;
 use WHMCS\Module\Addon\SevDesk\Repository\MappingRepository;
@@ -197,6 +199,58 @@ final class ExportJobHandlerTest extends TestCase
         $method = new \ReflectionMethod(ExportJobHandler::class, 'isAfterConfiguredStart');
 
         self::assertFalse($method->invoke($handler, '2026-07-27'));
+    }
+
+    public function testHistoricalZeroTaxOverrideForcesAFrozenVoucherTargetUnderInvoiceOnly(): void
+    {
+        $handler = (new \ReflectionClass(ExportJobHandler::class))->newInstanceWithoutConstructor();
+        $method = new \ReflectionMethod(ExportJobHandler::class, 'frozenOrNewTarget');
+        $candidate = [
+            'historicalBackfill' => true,
+            'historicalZeroTaxOverride' => true,
+            'historicalZeroTaxOverrideVersion' => 'rule17_voucher_v1',
+            'historicalZeroTaxAccountDatevId' => '4120',
+            'historicalZeroTaxRuleId' => '17',
+            'historicalZeroTaxUntil' => '2025-12-31',
+            'historicalZeroTaxManualReclassificationRequired' => true,
+            'requestedExportMode' => 'invoice_only',
+            'requestedDocumentAuthority' => 'whmcs',
+            'requestedInvoiceLifecycleMode' => 'after_payment_proforma',
+            'requestedLateFeeMode' => 'blocked',
+            'requestedOssProfile' => 'blocked',
+            'requestedEuB2cMode' => 'blocked',
+        ];
+        $tax = TaxDecision::allow(
+            'historical_zero_tax_manual_override',
+            '4120',
+            '17',
+            'Synthetic provisional decision.',
+        )->withValidatedGuidance(['0']);
+        $checkpointContext = [];
+
+        $target = $method->invoke(
+            $handler,
+            (object) ['action' => 'export_document', 'checkpoint' => 'queued'],
+            $candidate,
+            $tax,
+            'Paid',
+            'INV-2025-1',
+            static function (string $checkpoint, array $context) use (&$checkpointContext): bool {
+                self::assertSame('document_type_selected', $checkpoint);
+                $checkpointContext = $context;
+
+                return true;
+            },
+        );
+
+        self::assertInstanceOf(DocumentTargetDecision::class, $target);
+        self::assertTrue($target->allowed);
+        self::assertSame('voucher', $target->documentType);
+        self::assertSame('voucher_only', $target->exportMode);
+        self::assertSame('whmcs', $target->documentAuthority);
+        self::assertSame('17', $target->taxRuleId);
+        self::assertSame('4120', $checkpointContext['targetAccountDatevId'] ?? null);
+        self::assertSame('voucher', $checkpointContext['targetDocumentType'] ?? null);
     }
 
     private function failureOutcome(int $httpStatus, bool $definiteWriteRejected, string $checkpoint): JobOutcome

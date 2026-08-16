@@ -1,6 +1,6 @@
 # Sicherer Ersatz eines bestehenden WHMCS-sevDesk-Moduls
 
-Diese Anleitung gehört zu `2.1.0-rc.9`. Der RC ist eine Vorabversion für kontrollierte Test- und Nachlaufinstallationen. Die technischen Invoice- und ZUGFeRD-Läufe unter WHMCS 8.13.4 sind weitgehend abgeschlossen. Zwei Postfachtests haben bestätigt, dass WHMCS 8.13 Binäranhänge aus `EmailPreSend` nicht übernimmt. Der Versandweg `whmcs_template` ist deshalb gesperrt; bei sevDesk-Dokumenthoheit steht der direkte sevDesk-Versand zur Verfügung. Für die vollständige Freigabe fehlen außerdem Invoice-`bookAmount`, der rabattfreie Rule-11-Invoice-Canary, die fünf getrennten Rabatt-Canaries, die produktiven Voucher-Steuerfälle und die fachliche Abnahme.
+Diese Anleitung gehört zu `2.1.0-rc.10`. Der RC ist eine Vorabversion für kontrollierte Test- und Nachlaufinstallationen. Die technischen Invoice- und ZUGFeRD-Läufe unter WHMCS 8.13.4 sind weitgehend abgeschlossen. Zwei Postfachtests haben bestätigt, dass WHMCS 8.13 Binäranhänge aus `EmailPreSend` nicht übernimmt. Der Versandweg `whmcs_template` ist deshalb gesperrt; bei sevDesk-Dokumenthoheit steht der direkte sevDesk-Versand zur Verfügung. Für die vollständige Freigabe fehlen außerdem Invoice-`bookAmount`, der rabattfreie Rule-11-Invoice-Canary, die fünf getrennten Rabatt-Canaries, die produktiven Voucher-Steuerfälle und die fachliche Abnahme.
 
 RC.9 ergänzt `mod_sevdesk.invoice_lifecycle_mode` und die Tabelle
 `mod_sevdesk_related_documents`. Dort stehen ausschließlich technische
@@ -8,6 +8,12 @@ Verweise auf Mahnungen, Stornorechnungen und Late-Fee-Voucher. Die Migration
 legt beides additiv an, erhält bestehende Mappings und startet weder Export noch
 Mailversand. `after_payment_proforma`, `dunning_mode=off` und
 `late_fee_mode=blocked` bleiben die sicheren Upgrade-Werte.
+
+RC.10 ergänzt keine Datenbankspalte und ändert keinen vorhandenen Beleg. Im
+historischen Sammelexport steht ein ausdrücklich manueller, mailfreier
+Rule-17-Voucherpfad für 0-%-Belege aus einem fest begrenzten
+Kleinunternehmerzeitraum zur Verfügung. Er wird nicht automatisch aktiv und
+ist nur für eine spätere manuelle Umbuchung gedacht.
 
 Diese Version verwendet weiterhin den Addon-Namen und Ordner `sevdesk` sowie
 die Mappingtabelle `mod_sevdesk`. Der Austausch erhält vorhandene Zuordnungen

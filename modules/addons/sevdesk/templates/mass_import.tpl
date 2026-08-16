@@ -34,6 +34,49 @@
         </div>
     </div>
 
+    <div class="panel panel-warning">
+        <div class="panel-heading"><h3 class="panel-title">Vorläufiger 0-%-Altbestandspfad</h3></div>
+        <div class="panel-body">
+            <p>
+                Dieser Sonderweg ist nur für bezahlte Rechnungen aus dem bestätigten
+                Kleinunternehmerzeitraum gedacht, wenn sevdesk Rule 11 im aktuellen Mandanten
+                nicht mehr fertigstellen kann. Er erzeugt mailfreie Voucher mit Rule 17 auf
+                einem aktuell bestätigten 0-%-Erlöskonto. Die steuerliche Zuordnung ist bewusst
+                nur vorläufig und muss vor einer Auswertung oder Abgabe in sevdesk manuell
+                berichtigt werden.
+            </p>
+            <div class="checkbox">
+                <label>
+                    <input type="checkbox" name="historical_zero_tax_override" value="1"{if $filters.historical_zero_tax_override} checked{/if}>
+                    Vorläufigen Rule-17-Voucherpfad für diesen Dry-Run verwenden
+                </label>
+            </div>
+            <div class="form-group">
+                <label class="control-label" for="historical-zero-tax-account">Vorläufiges 0-%-Erlöskonto</label>
+                <select id="historical-zero-tax-account" name="historical_zero_tax_account_datev_id" class="form-control">
+                    <option value="">Bitte ein aktuell bestätigtes Konto wählen</option>
+                    {foreach from=$historicalZeroTaxAccounts item=account}
+                        <option value="{$account.id|escape:'html':'UTF-8'}"{if $filters.historical_zero_tax_account_datev_id === $account.id} selected{/if}>
+                            {$account.accountNumber|default:$account.id|escape:'html':'UTF-8'} — {$account.name|escape:'html':'UTF-8'}
+                        </option>
+                    {/foreach}
+                </select>
+                {if $filters.submitted && !$historicalZeroTaxAccounts|@count}
+                    <p class="help-block">sevdesk meldet derzeit kein verwendbares REVENUE-Konto für Rule 17 mit 0 %.</p>
+                {elseif !$filters.submitted}
+                    <p class="help-block">Nach dem ersten Dry-Run zeigt das Modul hier die aktuell von sevdesk bestätigten Konten.</p>
+                {/if}
+            </div>
+            <div class="checkbox">
+                <label>
+                    <input type="checkbox" name="historical_zero_tax_override_confirmed" value="1"{if $filters.historical_zero_tax_override_confirmed} checked{/if}>
+                    Ich bestätige, dass diese Voucher nur der vorläufigen Nacherfassung dienen,
+                    keine Kundenmail ausgelöst werden darf und die Kontierung später manuell geprüft wird.
+                </label>
+            </div>
+        </div>
+    </div>
+
     {if $invoices|@count}
         <div class="panel panel-default">
             <div class="panel-heading clearfix">
@@ -91,6 +134,7 @@
                                     {include file="partials/status_badge.tpl" status="pending"}
                                     <small>Ziel {$invoice.document_type|default:'—'|escape:'html':'UTF-8'} · Hoheit {$invoice.document_authority|default:'—'|escape:'html':'UTF-8'} · Rule {$invoice.tax_rule|escape:'html':'UTF-8'}{if $invoice.document_type === 'invoice'} · kein frei gewähltes accountDatev{else} · Konto {$invoice.account_datev|escape:'html':'UTF-8'}{/if}</small>
                                     <small>{$invoice.delivery_state|default:'—'|escape:'html':'UTF-8'}</small>
+                                    {if $invoice.manual_reclassification_required}<small><strong>Manuelle Umbuchung vor sevdesk-Auswertung erforderlich</strong></small>{/if}
                                 {/if}
                             </td>
                         </tr>
@@ -99,7 +143,7 @@
                 </table>
             </div>
             <div class="panel-footer text-right">
-                <button type="submit" name="import" value="1" class="btn btn-primary" data-requires-selection data-confirm="Ausgewählte Rechnungen jetzt mailfrei als Altbestandsjob einreihen? Bereits vorhandene vollständige Zuordnungen werden weiterhin übersprungen.">
+                <button type="submit" name="import" value="1" class="btn btn-primary" data-requires-selection data-confirm="Ausgewählte Rechnungen jetzt mailfrei als Altbestandsjob einreihen? Beim vorläufigen 0-%-Pfad entstehen echte sevdesk-Voucher, die später manuell umgebucht werden müssen. Bereits vorhandene vollständige Zuordnungen werden weiterhin übersprungen.">
                     <i class="fas fa-play" aria-hidden="true"></i> Mailfreien Altbestandsjob anlegen
                 </button>
             </div>

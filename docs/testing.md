@@ -708,12 +708,20 @@ Ein Release darf erst freigegeben werden, wenn:
     getrennt geprüft.
 17. das Positivlisten-Releasearchiv die eigenständige `UPGRADE.md` und die GPL-Lizenz enthält, aber weder Tests, `vendor/` noch lokale Arbeitsdaten. Die Release Notes werden separat am GitHub-Pre-Release veröffentlicht.
 
-`2.1.0-rc.9` darf als klar gekennzeichnete GitHub-Vorabversion veröffentlicht
+`2.1.0-rc.10` darf als klar gekennzeichnete GitHub-Vorabversion veröffentlicht
 werden, sobald die automatisierten Repository-Checks und der Archivscan grün
 sind. Das ist keine pauschale Produktivfreigabe. Ein kontrollierter Nachlauf
 darf nur die Steuer-, Rabatt- und Late-Fee-Capabilities verwenden, deren
 Einzelnachweise im verbundenen Mandanten bestanden sind. Die finale `2.1.0`
 bleibt bis zu allen oben genannten Zielumgebungs- und Canary-Nachweisen
 gesperrt.
+
+Der manuelle 0-%-Altbestandsnotweg braucht zusätzlich Tests für die
+Guidance-Positivliste, beschädigte Listen, Bezahlstatus, Stichtag, EUR,
+positive 0-%-Positionen, exakte Summen und die Blockade von Guthaben, Rabatt,
+AddFunds, Late Fee und normalen Hook-Exports. Ein kontrollierter Live-Canary
+muss Voucherziel, Rule 17, Konto, PDF, Marker, Mapping, ausbleibenden
+Mailversand und read-only Recovery bestätigen, bevor ein größerer Nachlauf
+beginnt.
 
 Offene Punkte in Steuerlogik, Idempotenz oder Mappingmigration blockieren auch eine Vorabversion.

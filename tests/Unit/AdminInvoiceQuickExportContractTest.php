@@ -82,7 +82,7 @@ final class AdminInvoiceQuickExportContractTest extends TestCase
 
         $dryRun = $this->methodSource(
             $controller,
-            'private function decorateDryRun(array $rows, bool $historicalBackfill = false): array',
+            'private function decorateDryRun(',
             'private function dryRunTaxReason(',
         );
         self::assertStringContainsString('$activeExportOwners', $dryRun);
@@ -123,6 +123,26 @@ final class AdminInvoiceQuickExportContractTest extends TestCase
             self::assertStringContainsString("'" . $field . "'", $snapshot);
         }
         self::assertStringContainsString("'delivery_requested' => false", $snapshot);
+    }
+
+    public function testHistoricalZeroTaxOverrideIsExplicitMailFreeAndFrozen(): void
+    {
+        $controller = file_get_contents(
+            dirname(__DIR__, 2) . '/modules/addons/sevdesk/lib/Controllers/AdminController.php',
+        );
+        self::assertIsString($controller);
+        $bulk = $this->methodSource(
+            $controller,
+            'public function massImport(): void',
+            'public function jobs(): void',
+        );
+
+        self::assertStringContainsString('historical_zero_tax_override_confirmed', $bulk);
+        self::assertStringContainsString('HistoricalZeroTaxOverridePolicy::accountIsEligible(', $bulk);
+        self::assertStringContainsString("'historicalBackfill'] = true", $bulk);
+        self::assertStringContainsString("'delivery_requested'] = false", $bulk);
+        self::assertStringContainsString("'historicalZeroTaxOverrideVersion'] = 'rule17_voucher_v1'", $bulk);
+        self::assertStringContainsString("'historicalZeroTaxManualReclassificationRequired'] = true", $bulk);
     }
 
     private function methodSource(string $source, string $startMarker, string $endMarker): string

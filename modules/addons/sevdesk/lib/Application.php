@@ -126,7 +126,7 @@ final class Application
             new Client(),
             $token,
             'https://my.sevdesk.de/api/v1',
-            'WHMCS-sevdesk/2.1.0-rc.9',
+            'WHMCS-sevdesk/2.1.0-rc.10',
             function (): void {
                 $this->config->tripAuthenticationSafetyGates();
             },

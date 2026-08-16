@@ -41,7 +41,7 @@ final class SevdeskClient
         #[\SensitiveParameter]
         string $apiToken,
         string $baseUrl = 'https://my.sevdesk.de/api/v1',
-        string $userAgent = 'WHMCS-sevdesk/2.1.0-rc.9',
+        string $userAgent = 'WHMCS-sevdesk/2.1.0-rc.10',
         ?callable $authenticationFailureHandler = null,
     ) {
         $apiToken = trim($apiToken);

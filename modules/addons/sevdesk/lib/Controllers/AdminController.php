@@ -26,6 +26,7 @@ use WHMCS\Module\Addon\SevDesk\Service\CorrectionService;
 use WHMCS\Module\Addon\SevDesk\Service\DocumentTargetResolver;
 use WHMCS\Module\Addon\SevDesk\Service\DunningService;
 use WHMCS\Module\Addon\SevDesk\Service\EInvoiceEligibilityService;
+use WHMCS\Module\Addon\SevDesk\Service\HistoricalZeroTaxOverridePolicy;
 use WHMCS\Module\Addon\SevDesk\Service\InvoiceDiscountCapabilityPolicy;
 use WHMCS\Module\Addon\SevDesk\Service\InvoiceItemExportPolicy;
 use WHMCS\Module\Addon\SevDesk\Service\InvoiceItemNormalizer;
@@ -396,17 +397,83 @@ final class AdminController
 
     public function massImport(): void
     {
+        $historicalOverrideEnabled = isset($_POST['historical_zero_tax_override']);
+        $historicalOverrideConfirmed = isset($_POST['historical_zero_tax_override_confirmed']);
+        $historicalOverrideAccount = trim((string) (
+            $_POST['historical_zero_tax_account_datev_id']
+            ?? ''
+        ));
         $filters = [
             'date_start' => (string) ($_POST['date_start'] ?? ''),
             'date_end' => (string) ($_POST['date_end'] ?? ''),
             'submitted' => $this->isPost(),
+            'historical_zero_tax_override' => $historicalOverrideEnabled,
+            'historical_zero_tax_override_confirmed' => $historicalOverrideConfirmed,
+            'historical_zero_tax_account_datev_id' => $historicalOverrideAccount,
         ];
         $invoices = [];
         $job = null;
+        $historicalZeroTaxAccounts = [];
+        $historicalOverride = null;
         if ($this->isPost()) {
             $this->csrf->assertPost();
             try {
                 $this->assertJobMutationAllowed();
+                try {
+                    $guidance = $this->application->referenceData()->receiptGuidance(
+                        $historicalOverrideEnabled,
+                    );
+                    $historicalZeroTaxAccounts = HistoricalZeroTaxOverridePolicy::eligibleAccounts(
+                        $guidance,
+                    );
+                } catch (Throwable $error) {
+                    if ($historicalOverrideEnabled) {
+                        throw new RuntimeException(
+                            'Die aktuellen sevdesk-Konten konnten nicht vollständig geprüft werden. '
+                                . 'Der vorläufige 0-%-Pfad bleibt gesperrt.',
+                            previous: $error,
+                        );
+                    }
+                    $guidance = [];
+                }
+                if ($historicalOverrideEnabled) {
+                    if (!$historicalOverrideConfirmed) {
+                        throw new RuntimeException(
+                            'Der vorläufige 0-%-Altbestandspfad benötigt die ausdrückliche Bestätigung der späteren manuellen Umbuchung.',
+                        );
+                    }
+                    if (
+                        !$this->application->config->bool('smallBusinessOwner')
+                        || !$this->application->config->bool('import_only_paid', true)
+                    ) {
+                        throw new RuntimeException(
+                            'Der vorläufige 0-%-Altbestandspfad benötigt das aktive Kleinunternehmerprofil und „nur bezahlte Rechnungen“.',
+                        );
+                    }
+                    $smallBusinessUntil = Config::parseSmallBusinessUntil(
+                        (string) $this->application->config->get('small_business_until', ''),
+                    );
+                    if (!$smallBusinessUntil instanceof DateTimeImmutable) {
+                        throw new RuntimeException(
+                            'Für den vorläufigen 0-%-Altbestandspfad muss ein festes Ende des Kleinunternehmerzeitraums hinterlegt sein.',
+                        );
+                    }
+                    if (
+                        !HistoricalZeroTaxOverridePolicy::accountIsEligible(
+                            $guidance,
+                            $historicalOverrideAccount,
+                        )
+                    ) {
+                        throw new RuntimeException(
+                            'Das gewählte Übergangskonto ist aktuell nicht als REVENUE mit Rule 17 und 0 % bestätigt.',
+                        );
+                    }
+                    $historicalOverride = [
+                        'enabled' => true,
+                        'accountDatevId' => $historicalOverrideAccount,
+                        'cutoff' => $smallBusinessUntil->format('Y-m-d'),
+                    ];
+                }
                 [$from, $until] = $this->dateRange($filters['date_start'], $filters['date_end']);
                 $rows = $this->application->whmcs->invoicesBetween(
                     $from,
@@ -420,7 +487,7 @@ final class AdminController
                         . 'die Vorschau wurde nicht abgeschnitten und kein Job angelegt.',
                     );
                 }
-                $invoices = $this->decorateDryRun($rows, true);
+                $invoices = $this->decorateDryRun($rows, true, $historicalOverride);
 
                 if (isset($_POST['import'])) {
                     $selected = array_values(array_unique(array_filter(
@@ -436,6 +503,16 @@ final class AdminController
                     $requestedContext['delivery_requested'] = false;
                     $requestedContext['requestedEInvoiceMode'] = 'off';
                     $requestedContext['requestedEInvoiceCanaryConfirmed'] = false;
+                    if ($historicalOverride !== null) {
+                        $requestedContext['historicalZeroTaxOverride'] = true;
+                        $requestedContext['historicalZeroTaxOverrideVersion'] = 'rule17_voucher_v1';
+                        $requestedContext['historicalZeroTaxAccountDatevId'] =
+                            $historicalOverride['accountDatevId'];
+                        $requestedContext['historicalZeroTaxRuleId'] =
+                            HistoricalZeroTaxOverridePolicy::TAX_RULE_ID;
+                        $requestedContext['historicalZeroTaxUntil'] = $historicalOverride['cutoff'];
+                        $requestedContext['historicalZeroTaxManualReclassificationRequired'] = true;
+                    }
                     foreach ($invoices as $invoice) {
                         if ($invoice['exportable'] && in_array($invoice['id'], $selected, true)) {
                             $allowed[] = [
@@ -454,6 +531,12 @@ final class AdminController
                             'date_end' => $until->format('Y-m-d'),
                             'mail_free' => true,
                             'e_invoice' => false,
+                            'manual_reclassification_required' => $historicalOverride !== null,
+                            'historical_zero_tax_rule' => $historicalOverride !== null
+                                ? HistoricalZeroTaxOverridePolicy::TAX_RULE_ID
+                                : null,
+                            'historical_zero_tax_account_datev_id' => $historicalOverride['accountDatevId']
+                                ?? null,
                         ], $this->adminId());
                         $job = $this->application->jobs->findJob($jobId);
                         $queuedCount = (int) Capsule::table(Migrator::ITEMS_TABLE)
@@ -491,6 +574,7 @@ final class AdminController
             'filters' => $filters,
             'invoices' => $invoices,
             'job' => $job,
+            'historicalZeroTaxAccounts' => $historicalZeroTaxAccounts,
         ]);
     }
 
@@ -3278,10 +3362,14 @@ final class AdminController
 
     /**
      * @param list<object> $rows
+     * @param null|array{enabled:true,accountDatevId:string,cutoff:string} $historicalZeroTaxOverride
      * @return list<array<string,mixed>>
      */
-    private function decorateDryRun(array $rows, bool $historicalBackfill = false): array
-    {
+    private function decorateDryRun(
+        array $rows,
+        bool $historicalBackfill = false,
+        ?array $historicalZeroTaxOverride = null,
+    ): array {
         if ($rows === []) {
             return [];
         }
@@ -3339,6 +3427,7 @@ final class AdminController
         ], true);
         $invoiceTaxPolicy = $invoiceCapable ? $this->application->invoiceTaxPolicy(true) : null;
         $voucherTaxPolicy = $exportMode === DocumentTargetResolver::MODE_VOUCHER_ONLY
+            || $historicalZeroTaxOverride !== null
             ? $this->application->taxPolicy()
             : null;
         $taxType = strtolower((string) ($GLOBALS['CONFIG']['TaxType'] ?? 'Exclusive'));
@@ -3658,7 +3747,50 @@ final class AdminController
                     $lines,
                     trim((string) ($invoice->companyname ?? '')) !== '',
                 ];
-                if ($invoiceOnly) {
+                if ($historicalZeroTaxOverride !== null) {
+                    if (!$snapshot instanceof InvoiceSnapshot) {
+                        throw new \LogicException('Historical zero-tax snapshot is unavailable.');
+                    }
+                    $overrideFailure = HistoricalZeroTaxOverridePolicy::validateInvoice(
+                        $snapshot,
+                        (string) $invoice->status,
+                        $historicalBackfill,
+                        $smallBusinessApplies,
+                        (string) $historicalZeroTaxOverride['cutoff'],
+                    );
+                    if ($overrideFailure === null && ($addFunds || $lateFeeMinor > 0)) {
+                        $overrideFailure = 'historical_zero_tax_override_structure_blocked';
+                    }
+                    $voucherTaxPolicy ??= $this->application->taxPolicy();
+                    $decision = $overrideFailure === null
+                        ? $voucherTaxPolicy->decideHistoricalZeroTaxVoucher(
+                            (string) $historicalZeroTaxOverride['accountDatevId'],
+                            $lines,
+                        )
+                        : \WHMCS\Module\Addon\SevDesk\Domain\TaxDecision::block(
+                            $overrideFailure,
+                            'The invoice does not satisfy the narrow historical zero-tax override.',
+                            HistoricalZeroTaxOverridePolicy::PROFILE,
+                        );
+                    $target = $decision->allowed && $decision->taxRuleId !== null
+                        ? DocumentTargetDecision::select(
+                            DocumentTargetDecision::DOCUMENT_VOUCHER,
+                            DocumentTargetResolver::AUTHORITY_WHMCS,
+                            DocumentTargetResolver::MODE_VOUCHER_ONLY,
+                            DocumentTargetResolver::OSS_BLOCKED,
+                            $decision->taxRuleId,
+                            'historical_zero_tax_manual_override',
+                            'Vorläufiger mailfreier 0-%-Voucher; spätere manuelle Umbuchung erforderlich.',
+                        )
+                        : DocumentTargetDecision::block(
+                            DocumentTargetResolver::AUTHORITY_WHMCS,
+                            DocumentTargetResolver::MODE_VOUCHER_ONLY,
+                            DocumentTargetResolver::OSS_BLOCKED,
+                            $decision->taxRuleId,
+                            $decision->code,
+                            $decision->message,
+                        );
+                } elseif ($invoiceOnly) {
                     if ($invoiceTaxPolicy === null) {
                         throw new \LogicException('Invoice tax policy is unavailable.');
                     }
@@ -3682,11 +3814,13 @@ final class AdminController
                     $decision = $voucherTaxPolicy->decide(...$arguments);
                 }
 
-                $target = $this->application->documentTargetResolver()->resolve(
-                    $decision,
-                    (string) $invoice->status === 'Paid',
-                    $effectiveInvoiceNumber !== '',
-                );
+                if (!$target instanceof DocumentTargetDecision) {
+                    $target = $this->application->documentTargetResolver()->resolve(
+                        $decision,
+                        (string) $invoice->status === 'Paid',
+                        $effectiveInvoiceNumber !== '',
+                    );
+                }
                 $discountCapability = null;
                 if (
                     $target->allowed
@@ -3805,7 +3939,11 @@ final class AdminController
                 'document_authority' => $documentAuthority,
                 'delivery_state' => $documentAuthority === DocumentTargetResolver::AUTHORITY_SEVDESK
                     ? 'Dieser Admin-/Backfill-Export wird ohne automatische Mail bereitgestellt'
-                    : 'Kein Kundenversand aus sevdesk',
+                    : ($historicalZeroTaxOverride !== null && $exportable
+                        ? 'Mailfrei; vor Abgabe in sevdesk manuell richtig zuordnen'
+                        : 'Kein Kundenversand aus sevdesk'),
+                'manual_reclassification_required' => $historicalZeroTaxOverride !== null
+                    && $exportable,
                 'help_url' => $decision?->code === 'unsupported_oss' ? 'https://api.sevdesk.de/' : null,
             ];
         }

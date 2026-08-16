@@ -54,7 +54,7 @@ final class InvoiceTaxConfigurationContractTest extends TestCase
         $controller = $this->source('lib/Controllers/AdminController.php');
         $method = $this->between(
             $controller,
-            'private function decorateDryRun(array $rows, bool $historicalBackfill = false): array',
+            'private function decorateDryRun(',
             'private function dryRunTaxReason(string $code, string $fallback = \'\'): string',
         );
 

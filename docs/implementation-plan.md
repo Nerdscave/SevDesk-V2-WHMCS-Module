@@ -29,6 +29,15 @@ WHMCS-Automation nur als Termin- und Statusquelle. Daneben entstehen getrennte,
 idempotente Jobs für `MA`, `SR` und einen mailfreien Rule-22-Gebührenvoucher.
 Alle neuen Remote-Wege haben eigene Canaries und bleiben bei einem Upgrade aus.
 
+`2.1.0-rc.10` ergänzt keinen neuen automatischen Steuerfall. Der Sammelexport
+erhält stattdessen einen ausdrücklich zu bestätigenden Notweg für historische
+0-%-Kleinunternehmerbelege, wenn der inzwischen umgestellte sevDesk-Mandant
+Rule 11 nicht mehr fertigstellen kann. Der Pfad erzwingt mailfreie Voucher,
+Rule 17, ein frisch bestätigtes 0-%-REVENUE-Konto und eine spätere manuelle
+Umbuchung. Er akzeptiert nur bezahlte EUR-Rechnungen mit positiven Positionen
+und ohne Steuer, Guthaben, Rabatt, AddFunds oder Late Fee. Der normale
+Tax-Resolver und alle automatischen Hooks verwenden diesen Notweg nicht.
+
 Der Invoice-Canary bleibt ein hartes Release-Gate. Bis dahin blockiert `invoice_canary_confirmed=off` alle Invoice-Modi. Rule-11-Invoices benötigen zusätzlich `small_business_invoice_canary_confirmed` und eine aktuelle `ReceiptGuidance` mit Rule 11, 0 % und `REVENUE`-Scope. ZUGFeRD hat mit `e_invoice_canary_confirmed` ein eigenes Gate. Die fünf Rabatt-Gates sind `invoice_discount_canary_confirmed`, `invoice_discount_rule1_19_canary_confirmed`, `invoice_discount_rule1_19_eu_b2c_domestic_canary_confirmed`, `invoice_discount_rule17_0_canary_confirmed` und `invoice_discount_rule19_canary_confirmed`. Das additive Upgrade behält `voucher_only` bei und setzt die neuen Gates auf aus. Der 2.0-Betrieb stoppt beim Upgrade einmalig mit `sync_enabled=off` und `runtime_review_required=on`.
 
 ## Feste Produktentscheidungen
@@ -630,7 +639,29 @@ bis Live-Gate 2 aus. Eine finale 2.1.0 braucht zusätzlich PHP 8.3, den
 vollständigen MariaDB-Integrationslauf und den synthetischen
 WHMCS-8.13.4-Hooknachweis.
 
-## Phase 14: Erweiterungen nach stabilem Invoice-Rollout
+## Phase 14: RC.10 – manueller 0-%-Altbestandsnotweg
+
+### Aufgaben
+
+1. Den Notweg ausschließlich im bestätigten historischen Sammelexport anbieten.
+2. Das Konto bei Vorschau und Worker frisch gegen `REVENUE`, Rule 17 und 0 %
+   prüfen und die Entscheidung vor dem ersten Write einfrieren.
+3. Bezahlstatus, EUR, Kleinunternehmerzeitraum, positive 0-%-Positionen,
+   fehlende Rabatte, fehlendes Guthaben sowie den mailfreien Versandvertrag
+   vor jedem Write erneut prüfen.
+4. AddFunds, Late Fees, Sammelzahlungen und strukturell unklare Belege weiterhin
+   als Prüffälle behandeln.
+5. Zieltyp, Rule, Konto und Pflicht zur manuellen Umbuchung in Vorschau und Job
+   sichtbar machen.
+
+### Exit-Kriterium
+
+Ein kleiner kontrollierter Monatslauf erzeugt ausschließlich die zuvor
+ausgewählten Voucher, verschickt keine Mail und lässt sich anhand von Mapping,
+Marker, PDF und Summen vollständig zurückprüfen. Vor jeder sevDesk-Auswertung
+werden die Belege manuell richtig zugeordnet.
+
+## Phase 15: Erweiterungen nach stabilem Invoice-Rollout
 
 Erst nach diesen Gates kommen Invoice-`CreditNote`, Rules 18/20, B2G/XRechnung, Produktklassifikation, Fremdwährung, dauerhafte Dokumentspiegelung, automatische Refund-/Chargeback-Flows oder zusätzliche USt-ID-Dienste infrage. Jede Erweiterung braucht einen konkreten Geschäftsfall, einen API-Nachweis, eine eigene Recovery-Regel und Tests.
 

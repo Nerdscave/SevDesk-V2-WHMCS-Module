@@ -87,7 +87,7 @@ final class SevdeskClientTest extends TestCase
 
         self::assertSame([['id' => 12]], $client->get('/Contact', ['customerNumber' => '42']));
         self::assertSame('raw-api-token', $history[0]['request']->getHeaderLine('Authorization'));
-        self::assertSame('WHMCS-sevdesk/2.1.0-rc.9', $history[0]['request']->getHeaderLine('User-Agent'));
+        self::assertSame('WHMCS-sevdesk/2.1.0-rc.10', $history[0]['request']->getHeaderLine('User-Agent'));
         self::assertSame(5.0, $history[0]['options']['connect_timeout']);
         self::assertSame(30.0, $history[0]['options']['timeout']);
         self::assertFalse($history[0]['options']['allow_redirects']);

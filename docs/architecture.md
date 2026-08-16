@@ -71,6 +71,32 @@ Bestätigung einer innergemeinschaftlichen Warenlieferung.
 
 Rule 11 ist die begrenzte Ausnahme: sevDesk wählt das Erlöskonto bei einer Invoice selbst, weil `InvoicePos` kein `accountDatev` annimmt. Deshalb benötigt jede Rule-11-Invoice zusätzlich `small_business_invoice_canary_confirmed`. Vor Setupfreigabe, Dry-Run, Health Check und Worker muss die aktuelle `ReceiptGuidance` außerdem mindestens ein `REVENUE`-Konto ausweisen, das Rule 11 mit 0 % erlaubt. Das Ergebnis dient nur als Mandantenfähigkeit; es wird kein Konto in das Invoice-Payload geschrieben. Voucher mit Rule 11 bleiben beim bisherigen Konto-/Guidance-Vertrag.
 
+### Architekturentscheidung: vorläufiger 0-%-Altbestandsnotweg
+
+**Status:** in rc.10 implementiert, ausschließlich manuell im historischen
+Sammelexport erreichbar.
+
+Der Notweg ist keine weitere Steuerklassifikation. Er darf den normalen
+Rule-11-Pfad nur nach einer ausdrücklichen Bestätigung im Sammelexport ersetzen
+und wird weder von Hooks noch vom Einzel- oder Kurzexport gewählt. Zulässig
+sind ausschließlich bezahlte EUR-Rechnungen innerhalb des fest eingestellten
+Kleinunternehmerzeitraums. Steuer, Guthaben und Rabatt müssen null sein; jede
+Position und die Gesamtsumme müssen positiv und centgenau sein. AddFunds,
+Late Fees und Sammelzahlungen sind ausgeschlossen.
+
+Der Dry-Run liest `ReceiptGuidance` frisch und bietet nur `REVENUE`-Konten an,
+die Rule 17 mit 0 % erlauben. Der Job friert Notweg-Version, Enddatum, Rule,
+Konto und die Pflicht zur manuellen Umbuchung ein. Der Worker prüft Zeitraum,
+Rechnungsstruktur und Guidance vor dem Write erneut und wählt unabhängig vom
+globalen Invoice-Modus einen WHMCS-geführten Voucher. Die Auslieferung bleibt
+mailfrei. Bestehende Mappings werden weder verändert noch neu interpretiert.
+
+Diese Belege bilden § 19 UStG in sevDesk absichtlich nicht korrekt ab. Der
+Betreiber muss sie deshalb vor jeder sevDesk-Auswertung oder Abgabe manuell
+richtig zuordnen. Ein abgeschlossener Kleinunternehmernachlauf ist kein Grund,
+den Notweg für spätere Rechnungen aktiv zu lassen; es gibt keinen globalen
+Schalter.
+
 Die lokale Unique-Annahme für `sevdesk_id` bleibt erhalten. Der externe Canary muss deshalb bestätigen, dass Voucher- und Invoice-IDs im verwendeten Mandanten sicher eindeutig behandelt werden können. Können IDs kollidieren oder funktionieren Rule 19 beziehungsweise Markerabgleich nicht stabil, wird `invoice_for_oss` nicht freigegeben und diese Architekturentscheidung muss neu bewertet werden.
 
 ## Externes Release-Gate: Invoice-API-Canary

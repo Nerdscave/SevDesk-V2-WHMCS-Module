@@ -318,6 +318,57 @@ final class TaxPolicy
         return self::validateEuB2bRates($decision, $lineItems);
     }
 
+    /**
+     * Validate the deliberately provisional Rule-17 Voucher used only by the
+     * historical 0% backfill override. Country and customer type are ignored
+     * because this method is not a tax classification; its caller must first
+     * prove the narrow historical contract.
+     *
+     * @param list<LineItem> $lineItems
+     */
+    public function decideHistoricalZeroTaxVoucher(string $accountDatevId, array $lineItems): TaxDecision
+    {
+        self::assertLineItems($lineItems);
+        $accountDatevId = trim($accountDatevId);
+        if (preg_match('/^[1-9]\d*$/', $accountDatevId) !== 1) {
+            return TaxDecision::block(
+                'historical_zero_tax_override_account_invalid',
+                'The provisional historical account must be a positive numeric ID.',
+                HistoricalZeroTaxOverridePolicy::PROFILE,
+            );
+        }
+        foreach ($lineItems as $lineItem) {
+            if (
+                Decimal::toMinorUnits($lineItem->amount) <= 0
+                || self::normaliseNumericRate($lineItem->taxRate) !== '0'
+            ) {
+                return TaxDecision::block(
+                    'historical_zero_tax_override_structure_blocked',
+                    'The provisional historical Voucher accepts only positive zero-tax positions.',
+                    HistoricalZeroTaxOverridePolicy::PROFILE,
+                );
+            }
+        }
+        if ($this->receiptGuidance === null) {
+            return TaxDecision::block(
+                'historical_zero_tax_override_guidance_missing',
+                'Current Receipt Guidance is required for the provisional historical Voucher.',
+                HistoricalZeroTaxOverridePolicy::PROFILE,
+            );
+        }
+
+        return $this->validateAgainstReceiptGuidance(
+            TaxDecision::allow(
+                HistoricalZeroTaxOverridePolicy::PROFILE,
+                $accountDatevId,
+                HistoricalZeroTaxOverridePolicy::TAX_RULE_ID,
+                'Provisional historical zero-tax Voucher selected for later manual reclassification.',
+            ),
+            $this->receiptGuidance,
+            $lineItems,
+        );
+    }
+
     public function invoiceRuleElevenTenantScopeSupported(): bool
     {
         return $this->invoiceRuleElevenTenantScopeSupported;

@@ -4,7 +4,7 @@ Dieses Repository enthält ein Drop-in-Replacement für ein nicht mehr gepflegte
 
 Für den nativen E-Rechnungspfad muss PHP außerdem `XMLReader` bereitstellen. Das Setup und der Worker blockieren ZUGFeRD, wenn die Erweiterung fehlt.
 
-Die wählbaren Invoice-Modi gehören zu 2.1.0. Der aktuelle Arbeitsstand ist `2.1.0-rc.9` und nur für kontrollierte Test- und Nachlaufinstallationen vorgesehen. Der Voucher-, Booking- und Korrekturumfang aus 2.0.0 bleibt erhalten. RC.9 ergänzt einen abgesicherten Direktbetrieb sowie eine getrennte Behandlung von Mahnungen, Stornorechnungen und positiven, unbesteuerten WHMCS-Late-Fees. Alle neuen Abläufe sind standardmäßig ausgeschaltet.
+Die wählbaren Invoice-Modi gehören zu 2.1.0. Der aktuelle Arbeitsstand ist `2.1.0-rc.10` und nur für kontrollierte Test- und Nachlaufinstallationen vorgesehen. Der Voucher-, Booking- und Korrekturumfang aus 2.0.0 bleibt erhalten. RC.10 übernimmt den Direktbetrieb und die Late-Fee-Trennung aus rc.9 und ergänzt einen eng begrenzten Notweg für historische 0-%-Belege, die ein inzwischen umgestellter sevDesk-Mandant nicht mehr mit Rule 11 fertigstellen kann. Alle neuen Abläufe sind standardmäßig ausgeschaltet.
 
 > Die technischen Invoice- und ZUGFeRD-Pfade wurden mit synthetischen Daten unter WHMCS 8.13.4 und PHP 8.3 geprüft. Rule 19, `getXml`, `getPdf`, `sendBy`, der direkte sevDesk-Versand sowie eigene und fremde Kundensitzungen waren erfolgreich. Beide Postfachläufe über eine WHMCS-Mailvorlage enthielten dagegen die normale WHMCS-PDF. Der Grund ist inzwischen geklärt: WHMCS 8.13 führt `EmailPreSend` aus, unterstützt dessen Binäranhänge aber noch nicht. Der Kanal `whmcs_template` ist auf der Zielplattform deshalb gesperrt; verfügbar bleibt `sevdesk sendViaEmail`. Eine normale Rule-11-Invoice wurde als Draft angenommen, scheiterte beim Öffnen aber am automatisch gewählten sevDesk-Konten-Scope. Deshalb bleiben Rule-11-Invoices hinter einem zusätzlichen Canary und einer aktuellen Guidance-Prüfung gesperrt. Invoice-`bookAmount`, die noch nicht einzeln bestandenen Rabatt- und Voucher-Canaries sowie die fachliche Abnahme bleiben offene Gates. Bei neuen Installationen und Freigaberollouts bleibt auch `sync_enabled` aus.
 >
@@ -87,6 +87,8 @@ Die Dokumenthoheit ist davon getrennt:
 Upgrade-Default und sichere Grundstellung bleiben `whmcs + voucher_only + OSS blocked`; E-Rechnungen sind aus. Bestehende Mappings werden nicht neu exportiert. Voucher bleiben Voucher, und die für eine bestehende Invoice gewählte Dokumenthoheit bleibt erhalten. Der neue Laufzeitnachweis pausiert automatische Exporte beim ersten 2.1-Upgrade einmalig bis zur Betreiberprüfung. Im Upgrade-Lebenszyklus sind Invoice-Ziele paid-only. Nur der getrennt freizugebende Direktbetrieb darf eine offene Invoice bei Erstellung ausgeben. Beide Wege benötigen eine effektive WHMCS-Rechnungsnummer. Maßgeblich ist das gespeicherte `invoicenum`; bei Legacy-Zeilen ohne separate Nummer verwendet das Modul rein lesend die unveränderliche interne Invoice-ID. `tblinvoices` wird dabei nicht nachträglich geändert.
 
 Die Kleinunternehmerregelung lässt sich auf Rechnungen bis zu einem Stichtag begrenzen. Maßgeblich ist das Rechnungsdatum. Innerhalb dieses Zeitraums wird Rule 11 mit 0 % vor der Einordnung nach Land, Kundenart und einem bestätigten AddFunds-Sonderprofil gewählt. Nach dem Stichtag greift AddFunds wieder auf sein eigenes, ausdrücklich bestätigtes Profil zurück. Auch dort ist Rule 1 mit 0 % nicht zulässig; für steuerfreie Guthabenfälle braucht es eine fachlich passende, bestätigte Regel. Ein leeres Enddatum behält bewusst das Verhalten älterer Installationen bei und wendet den aktivierten Schalter ohne zeitliche Grenze an. Bei aktivem Kleinunternehmerprofil blockiert ein ungültiger gespeicherter Wert die Steuerentscheidung, statt auf die normale Besteuerung zurückzufallen.
+
+Wenn sevDesk Rule 11 nach einem Wechsel der Besteuerungsart nicht mehr fertigstellen kann, gibt es im Sammelexport einen separaten, nicht automatisch aktiven Notweg. Er ist kein Ersatz für die richtige Steuerregel. Nach ausdrücklicher Bestätigung erzeugt er nur für bezahlte EUR-Rechnungen aus dem fest begrenzten Kleinunternehmerzeitraum mailfreie Voucher mit Rule 17 und einem aktuell von `ReceiptGuidance` bestätigten 0-%-Erlöskonto. Rabatte, Guthaben, Sammelzahlungen, AddFunds, Late Fees und andere unklare Fälle bleiben draußen. Die so erfassten Voucher müssen vor jeder sevDesk-Auswertung oder Abgabe manuell richtig zugeordnet werden.
 
 Für einen gestuften produktiven Umstieg bietet sich nach bestandenem Invoice-Canary zunächst `invoice_only + whmcs + E-Rechnung aus` an. Das ist kein stiller Upgrade-Default: Der Betreiber wählt den Modus nach der Übergangsinventur bewusst aus. sevDesk-Hoheit und ZUGFeRD folgen erst nach ihren zusätzlichen Liveprüfungen.
 
@@ -238,8 +240,8 @@ API-Token, WHMCS-Konfiguration, unredigierte Exporte/Dumps, Kundendaten, Rechnun
 | [docs/testing.md](docs/testing.md) | Teststrategie und verbindliche Invoice-Canaries |
 | [docs/operations.md](docs/operations.md) | Einrichtung, Nachlauf, Versand und Recovery |
 | [docs/sevdesk-openapi.yaml](docs/sevdesk-openapi.yaml) | unveränderte lokale sevDesk-OpenAPI-Referenz |
-| [RELEASE_NOTES_2.1.0-rc.9.md](RELEASE_NOTES_2.1.0-rc.9.md) | Release Notes für die aktuelle Vorabversion |
-| [RELEASE_NOTES_2.1.0-rc.8.md](RELEASE_NOTES_2.1.0-rc.8.md) | Notizen zur vorherigen Vorabversion |
+| [RELEASE_NOTES_2.1.0-rc.10.md](RELEASE_NOTES_2.1.0-rc.10.md) | Release Notes für die aktuelle Vorabversion |
+| [RELEASE_NOTES_2.1.0-rc.9.md](RELEASE_NOTES_2.1.0-rc.9.md) | Notizen zur vorherigen Vorabversion |
 
 ## Freigabegrenzen
 

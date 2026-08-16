@@ -313,6 +313,46 @@ final class TaxPolicyTest extends TestCase
         self::assertTrue($decision->guidanceValidated);
     }
 
+    public function testHistoricalZeroTaxVoucherUsesOnlyCurrentRuleSeventeenRevenueGuidance(): void
+    {
+        $guidance = $this->guidance();
+        $guidance[] = [
+            'accountDatevId' => 4120,
+            'allowedReceiptTypes' => ['REVENUE'],
+            'allowedTaxRules' => [['id' => 17, 'taxRates' => ['ZERO']]],
+        ];
+        $decision = (new TaxPolicy(
+            $this->profiles(),
+            TaxPolicy::EU_B2C_BLOCKED,
+            $guidance,
+        ))->decideHistoricalZeroTaxVoucher('4120', [
+            new LineItem('Historical service', '100', '0', false),
+        ]);
+
+        self::assertTrue($decision->allowed);
+        self::assertSame('historical_zero_tax_manual_override', $decision->profile);
+        self::assertSame('17', $decision->taxRuleId);
+        self::assertSame('4120', $decision->accountDatevId);
+        self::assertTrue($decision->guidanceValidated);
+    }
+
+    public function testHistoricalZeroTaxVoucherRejectsMissingGuidanceAndPositiveTax(): void
+    {
+        $missingGuidance = (new TaxPolicy($this->profiles()))->decideHistoricalZeroTaxVoucher(
+            '4120',
+            [new LineItem('Historical service', '100', '0', false)],
+        );
+        $positiveTax = $this->policy()->decideHistoricalZeroTaxVoucher(
+            '400',
+            [new LineItem('Historical service', '119', '19', false)],
+        );
+
+        self::assertFalse($missingGuidance->allowed);
+        self::assertSame('historical_zero_tax_override_guidance_missing', $missingGuidance->code);
+        self::assertFalse($positiveTax->allowed);
+        self::assertSame('historical_zero_tax_override_structure_blocked', $positiveTax->code);
+    }
+
     public function testVoucherRuleElevenCannotSelfAuthoriseAPositiveGuidanceRate(): void
     {
         $guidance = $this->guidance();
