@@ -10,6 +10,8 @@ use GuzzleHttp\Handler\MockHandler;
 use GuzzleHttp\HandlerStack;
 use GuzzleHttp\Psr7\Response;
 use Illuminate\Database\Capsule\Manager as IlluminateCapsule;
+use PHPUnit\Framework\Attributes\PreserveGlobalState;
+use PHPUnit\Framework\Attributes\RunInSeparateProcess;
 use ReflectionMethod;
 use ReflectionProperty;
 use RuntimeException;
@@ -23,6 +25,7 @@ use WHMCS\Module\Addon\SevDesk\Repository\JobRepository;
 use WHMCS\Module\Addon\SevDesk\Support\AdvisoryLockName;
 use WHMCS\Module\Addon\SevDesk\Support\Csrf;
 use WHMCS\Module\Addon\SevDesk\Tests\Integration\Support\MariaDbTestCase;
+use WHMCS\Module\Addon\SevDesk\Tests\Integration\Support\SetupResponseSmarty;
 use WHMCS\Module\Addon\SevDesk\View;
 
 final class AdminSetupBehaviorTest extends MariaDbTestCase
@@ -309,6 +312,98 @@ final class AdminSetupBehaviorTest extends MariaDbTestCase
         $this->expectSetupFailure($application, 'allgemeinen Rule-11-Invoice-Canary');
 
         self::assertFalse($application->config->bool('invoice_discount_canary_confirmed'));
+    }
+
+    public function testRule19DiscountRateAcceptsCommaAndStoresAnExactCapability(): void
+    {
+        $application = $this->applicationWithInvoiceReferences();
+        $_POST['export_mode'] = 'invoice_only';
+        $_POST['invoice_canary_confirmed'] = 'on';
+        $_POST['invoice_sev_user_id'] = '7';
+        $_POST['invoice_unity_id'] = '8';
+        $_POST['oss_profile'] = 'rule19_digital_services_confirmed';
+        $_POST['oss_profile_acknowledged'] = '1';
+        $_POST['invoice_discount_rule19_canary_confirmed'] = 'on';
+        $_POST['invoice_discount_rule19_canary_rate'] = '21,5';
+        $_POST['transition_inventory_confirmed'] = '1';
+        $_POST['transition_inventory_fingerprint'] = $this->transitionInventoryFingerprint($application);
+
+        $this->invokeSaveSetup($application);
+
+        self::assertSame('21.50', $application->config->get('invoice_discount_rule19_canary_rate'));
+        self::assertStringContainsString(
+            '_rule_19_rate_2150_whmcs_',
+            (string) $application->config->get('invoice_discount_rule19_canary_confirmed'),
+        );
+    }
+
+    public function testMissingConfirmedRateRollsBackNewTokenAndKeepsHooksDisabled(): void
+    {
+        $application = $this->application();
+        $application->config->set('sevdesk_api_key', 'synthetic-original-token');
+        $application->config->set('sync_enabled', 'on');
+        $_POST['sevdesk_api_key'] = 'synthetic-replacement-token';
+        $_POST['invoice_discount_rule19_canary_confirmed'] = 'on';
+        $_POST['invoice_discount_rule19_canary_rate'] = '';
+
+        $this->expectSetupFailure($application, 'Rule-19-Rabattprüfung');
+
+        self::assertSame('synthetic-original-token', $application->config->get('sevdesk_api_key'));
+        self::assertFalse($application->config->bool('sync_enabled'));
+        self::assertSame('', $application->config->get('invoice_discount_rule19_canary_confirmed'));
+        $this->assertRunnerLockIsFree();
+    }
+
+    #[RunInSeparateProcess]
+    #[PreserveGlobalState(false)]
+    public function testFailedSetupRendersTheDraftAndFieldErrorWhileDatabaseKeepsStoredValues(): void
+    {
+        define('ROOTDIR', dirname(__DIR__, 2));
+        class_alias(SetupResponseSmarty::class, 'WHMCS\\Smarty');
+        session_start();
+        $GLOBALS['CONFIG'] = [
+            'EnableProformaInvoicing' => '',
+            'SequentialInvoiceNumbering' => '',
+            'TaxPaidInvoiceDate' => '',
+            'Template' => 'synthetic',
+        ];
+        $_SERVER['REQUEST_METHOD'] = 'POST';
+        $_SESSION['sevdesk_csrf'] = 'synthetic-csrf';
+        $_POST['token'] = 'synthetic-csrf';
+        $_POST['sevdesk_api_key'] = 'synthetic-unsaved-token';
+        $_POST['accountingTypeGeneral'] = '555';
+        $_POST['sevdesk_email_body'] = 'Changed message';
+        $_POST['invoice_discount_rule19_canary_confirmed'] = 'on';
+        $_POST['invoice_discount_rule19_canary_rate'] = '';
+        $application = $this->application();
+        $csrf = new Csrf();
+        $controller = new AdminController($application, new View($csrf), $csrf, 'addonmodules.php?module=sevdesk');
+
+        $controller->setup();
+
+        $response = SetupResponseSmarty::$variables;
+        self::assertTrue($response['setupSaveFailed']);
+        self::assertTrue($response['setupTokenNeedsReentry']);
+        self::assertSame('555', $response['settings']['accountingTypeGeneral']);
+        self::assertSame('Changed message', $response['settings']['sevdesk_email_body']);
+        self::assertTrue($response['settings']['invoice_discount_rule19_canary_current']);
+        self::assertArrayNotHasKey('sevdesk_api_key', $response['settings']);
+        self::assertArrayHasKey('invoice-discount-rule19-canary-rate', $response['setupErrors']);
+        self::assertStringContainsString('Rule-19-Rabattprüfung', $response['flash']['message']);
+        self::assertSame('', (string) $application->config->get('accountingTypeGeneral', ''));
+        self::assertSame('', (string) $application->config->get('sevdesk_api_key', ''));
+        session_destroy();
+    }
+
+    public function testInactiveRule19RateDoesNotBlockVoucherSetupOrEnableTheCapability(): void
+    {
+        $application = $this->application();
+        $_POST['invoice_discount_rule19_canary_rate'] = '';
+
+        $this->invokeSaveSetup($application);
+
+        self::assertSame('voucher_only', $application->config->get('export_mode'));
+        self::assertSame('', $application->config->get('invoice_discount_rule19_canary_confirmed'));
     }
 
     public function testDomesticAndEuB2cRuleOneDiscountCanariesAreStoredIndependently(): void

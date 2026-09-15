@@ -343,6 +343,15 @@ Der Invoice-Canary bleibt ein hartes Release-Gate. Bis dahin blockiert `invoice_
 
 ### UX-Abnahme
 
+- Setupfehler erhalten den Formularentwurf, benennen das betroffene Feld und
+  unterscheiden ungespeicherte Eingaben vom tatsächlichen Synchronisationsstatus.
+- Die Verbindung steht vor der Übergangsinventur. Konten und Pflichtreferenzen
+  lassen sich mit dem eingegebenen API-Token vor dem ersten Speichern lesen. Teilfehler nennen die betroffene Liste; vorhandene IDs
+  bleiben auch ohne aktuellen Treffer erhalten.
+- Der Rule-19-Rabattsteuersatz hat ein eigenständiges Prozentfeld, eine sichtbare
+  Formathilfe und eine per Tastatur oder Klick erreichbare Erklärung zur
+  Abgrenzung von Testfreigabe, TaxRule-ID und WHMCS-Steuersatz.
+
 - Nutzer sieht während eines Laufs Gesamt, offen, laufend, erfolgreich, übersprungen, fehlgeschlagen und manuell zu prüfen.
 - Fehlertext nennt konkrete Rechnung und Ursache, aber keine Token/PII.
 - Seite kann neu geladen werden, ohne Job oder Auswahl zu verlieren.

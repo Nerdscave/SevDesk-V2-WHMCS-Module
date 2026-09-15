@@ -101,6 +101,153 @@
         });
     }
 
+    function initSetup() {
+        var form = root.querySelector('#sevdesk-setup-form');
+        if (!form) {
+            return;
+        }
+        each('.sd-setup-rate .sd-info', function (details) {
+            details.addEventListener('keydown', function (event) {
+                if (event.key === 'Escape') {
+                    details.open = false;
+                    details.querySelector('summary').focus();
+                }
+            });
+        }, form);
+        var rate = form.querySelector('[data-rule19-rate]');
+        var confirmation = form.querySelector('#invoice-discount-rule19-canary-confirmed');
+        if (rate && confirmation) {
+            function validateRate() {
+                var value = rate.value.trim().replace(',', '.');
+                var valid = /^\d{1,3}(?:\.\d{1,2})?$/.test(value) && Number(value) >= 0.01 && Number(value) <= 100;
+                rate.required = confirmation.checked;
+                rate.setCustomValidity(confirmation.checked && !valid
+                    ? 'Bitte den geprüften Zielsteuersatz eingeben, z. B. 21 oder 21,5, ohne %-Zeichen (0,01 bis 100).'
+                    : '');
+            }
+            rate.addEventListener('input', validateRate);
+            confirmation.addEventListener('change', validateRate);
+            validateRate();
+        }
+
+        each('[data-setup-error]', function (link) {
+            var field = document.getElementById(link.getAttribute('data-setup-error'));
+            if (!field) {
+                return;
+            }
+            link.id = 'error-' + field.id;
+            field.setAttribute('aria-invalid', 'true');
+            field.setAttribute('aria-describedby', (field.getAttribute('aria-describedby') || '') + ' ' + link.id);
+            var group = field.closest('.form-group');
+            if (group) {
+                group.classList.add('has-error');
+            }
+            link.addEventListener('click', function () { field.focus(); });
+        }, form);
+        var errors = form.querySelector('[data-setup-errors]');
+        if (errors) {
+            errors.focus();
+        }
+
+        var button = form.querySelector('[data-setup-references]');
+        var status = form.querySelector('[data-setup-reference-status]');
+        if (!button || !status || !window.fetch) {
+            return;
+        }
+
+        function replaceReferences(fieldName, rows, accounts) {
+            var field = form.elements.namedItem(fieldName);
+            if (!field || !Array.isArray(rows) || !rows.length) {
+                return;
+            }
+            var current = field.value;
+            var select = document.createElement('select');
+            select.id = field.id;
+            select.name = field.name;
+            select.className = field.className;
+            select.required = field.required;
+            select.disabled = field.disabled;
+            if (field.hasAttribute('aria-describedby')) {
+                select.setAttribute('aria-describedby', field.getAttribute('aria-describedby'));
+            }
+            select.add(new Option('Bitte wählen', ''));
+            rows.forEach(function (row) {
+                var label = accounts
+                    ? (row.accountNumber ? row.accountNumber + ' — ' : '') + (row.name || 'Unbenanntes Konto')
+                    : row.name;
+                select.add(new Option(label + ' (ID ' + row.id + ')', String(row.id)));
+            });
+            if (current && !rows.some(function (row) { return String(row.id) === current; })) {
+                select.add(new Option('Bisherige ID ' + current + ' – nicht in der geladenen Liste; bitte prüfen', current));
+            }
+            select.value = current;
+            field.replaceWith(select);
+        }
+
+        button.addEventListener('click', function () {
+            var tokenField = form.elements.namedItem('sevdesk_api_key');
+            var requestedToken = tokenField.value;
+            var body = new FormData();
+            body.append('token', form.elements.namedItem('token').value);
+            body.append('sevdesk_api_key', requestedToken);
+            button.disabled = true;
+            status.textContent = 'Konten und Auswahllisten werden aus sevDesk geladen …';
+            var abort = new AbortController();
+            var timeout = window.setTimeout(function () { abort.abort(); }, 60000);
+            fetch(button.getAttribute('data-url'), {
+                method: 'POST', credentials: 'same-origin', body: body, signal: abort.signal,
+                headers: { 'Accept': 'application/json' }
+            }).then(function (response) {
+                if (!response.headers.get('content-type') || response.headers.get('content-type').indexOf('application/json') < 0) {
+                    throw new Error('Die Antwort konnte nicht gelesen werden. Bitte Anmeldung und Verbindung prüfen. Ihre Eingaben bleiben erhalten.');
+                }
+                return response.json();
+            }).then(function (data) {
+                if (data.error) {
+                    throw new Error(data.error);
+                }
+                if (tokenField.value !== requestedToken) {
+                    throw new Error('Der Token wurde während des Ladens geändert. Bitte die Listen erneut laden.');
+                }
+                [
+                    'accountingTypeGeneral', 'accountingTypeInterCommunityBusiness',
+                    'accountingTypeInterCommunityConsumer', 'accountingTypeThirdPartyCountry',
+                    'accountingTypeCredit', 'accountingTypeSmallBusinessOwner', 'late_fee_rule22_account_datev_id'
+                ].forEach(function (name) { replaceReferences(name, data.accountOptions, true); });
+                replaceReferences('invoice_sev_user_id', data.sevUsers, false);
+                replaceReferences('invoice_unity_id', data.unities, false);
+                replaceReferences('e_invoice_payment_method_id', data.paymentMethods, false);
+                status.textContent = '';
+                var messages = Object.keys(data.errors || {}).map(function (key) { return data.errors[key]; });
+                var loaded = [];
+                [['accountOptions', 'Erlöskonten'], ['sevUsers', 'Benutzer'], ['unities', 'Einheiten'], ['paymentMethods', 'Zahlungsmethoden']].forEach(function (entry) {
+                    if (Array.isArray(data[entry[0]]) && data[entry[0]].length) {
+                        loaded.push(data[entry[0]].length + ' ' + entry[1]);
+                    }
+                });
+                if (loaded.length) {
+                    var success = document.createElement('p');
+                    success.className = 'text-success';
+                    success.textContent = 'Geladen: ' + loaded.join(', ') + '. Sie können die Einträge jetzt unten auswählen. Einstellungen sind noch nicht gespeichert.';
+                    status.appendChild(success);
+                }
+                messages.forEach(function (message) {
+                    var warning = document.createElement('p');
+                    warning.className = 'text-warning';
+                    warning.textContent = message;
+                    status.appendChild(warning);
+                });
+            }).catch(function (error) {
+                status.textContent = error.name === 'AbortError'
+                    ? 'Das Laden dauert zu lange. Bitte erneut versuchen. Ihre Eingaben bleiben erhalten.'
+                    : (error instanceof TypeError ? 'Verbindung unterbrochen. Bitte erneut laden. Ihre Eingaben bleiben erhalten.' : error.message);
+            }).finally(function () {
+                window.clearTimeout(timeout);
+                button.disabled = false;
+            });
+        });
+    }
+
     function initSelections() {
         var checkboxes = Array.prototype.slice.call(root.querySelectorAll('[data-export-checkbox]'));
         var selectAllButtons = root.querySelectorAll('[data-select-all]');
@@ -420,6 +567,7 @@
     }
 
     initConditionalFields();
+    initSetup();
     initSelections();
     initCorrectionForm();
     initForms();

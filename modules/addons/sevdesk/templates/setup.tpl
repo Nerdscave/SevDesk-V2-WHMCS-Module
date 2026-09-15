@@ -1,10 +1,29 @@
 {include file="partials/layout_top.tpl" pageTitle="Einrichtung"}
 
-<form method="post" action="{$moduleLink|escape:'html':'UTF-8'}&amp;a=setup" data-loading-form>
+<form id="sevdesk-setup-form" method="post" action="{$moduleLink|escape:'html':'UTF-8'}&amp;a=setup" data-loading-form>
     <input type="hidden" name="token" value="{$csrfToken|escape:'html':'UTF-8'}">
     <input type="hidden" name="save" value="1">
     <input type="hidden" name="runtime_quarantine_token" value="{$settings.runtime_quarantine_token|default:''|escape:'html':'UTF-8'}">
     <input type="hidden" name="transition_inventory_fingerprint" value="{$transitionInventory.fingerprint|default:''|escape:'html':'UTF-8'}">
+
+    {if $setupSaveFailed}
+        <div class="alert alert-warning" role="status">
+            <strong>Ihre Eingaben stehen weiterhin im Formular und sind noch nicht gespeichert.</strong>
+            <p>Bitte den gemeldeten Fehler korrigieren und erneut speichern. Bestätigungen zur Bestandsprüfung müssen erneut gesetzt werden.</p>
+            {if $setupTokenNeedsReentry}<p>Der neu eingegebene API-Token wurde nicht gespeichert. Bitte erneut eingeben; das Passwortfeld bleibt aus Sicherheitsgründen leer.</p>{/if}
+            {if !$setupSyncEnabled}<p>Die automatische Einreihung ist derzeit ausgeschaltet. Sie wird erst nach erfolgreichem Speichern mit aktiviertem Synchronisationsschalter wieder eingeschaltet.</p>{/if}
+        </div>
+    {/if}
+    {if $setupErrors|@count}
+        <div class="alert alert-danger" role="alert" tabindex="-1" data-setup-errors>
+            <strong>Bitte diese Eingaben prüfen:</strong>
+            <ul>
+                {foreach from=$setupErrors key=fieldId item=fieldError}
+                    <li><a href="#{$fieldId|escape:'html':'UTF-8'}" data-setup-error="{$fieldId|escape:'html':'UTF-8'}">{$fieldError|escape:'html':'UTF-8'}</a></li>
+                {/foreach}
+            </ul>
+        </div>
+    {/if}
 
     {if $settings.runtime_review_required === 'on' || $settings.runtime_review_required === true || $settings.runtime_review_required == 1}
         <div class="alert alert-danger" role="alert">
@@ -19,34 +38,8 @@
         </div>
     {/if}
 
-    <div class="panel panel-warning">
-        <div class="panel-heading"><h3 class="panel-title">Übergangsinventur für Dokumentänderungen</h3></div>
-        <div class="panel-body">
-            <p>Diese Bestandsaufnahme ist rein lesend. Sie zeigt, welche Zuordnungen und Jobs vor einer Änderung von Exportmodus, Dokumenthoheit, OSS-, E-Rechnungs-, Rule-11-Invoice- oder Kleinunternehmerprofil zu prüfen sind.</p>
-            <div class="table-responsive">
-                <table class="table table-condensed">
-                    <tbody>
-                    <tr><th scope="row">Typisierte Voucher</th><td>{$transitionInventory.typed_vouchers|default:0|escape:'html':'UTF-8'}</td><th scope="row">Typisierte Invoices</th><td>{$transitionInventory.typed_invoices|default:0|escape:'html':'UTF-8'} (davon {$transitionInventory.direct_invoices|default:0|escape:'html':'UTF-8'} im Direktbetrieb)</td></tr>
-                    <tr><th scope="row">Vollständig, Typ ungeklärt</th><td>{$transitionInventory.untyped_complete|default:0|escape:'html':'UTF-8'}</td><th scope="row">Ohne sevdesk-ID</th><td>{$transitionInventory.null_remote_mappings|default:0|escape:'html':'UTF-8'}</td></tr>
-                    <tr><th scope="row">Verwaiste Zuordnungen</th><td>{$transitionInventory.orphan_mappings|default:0|escape:'html':'UTF-8'}</td><th scope="row">Bezahlte, ungemappte Rechnungen ab Stichtag</th><td>{$transitionInventory.paid_unmapped|default:0|escape:'html':'UTF-8'}</td></tr>
-                    <tr><th scope="row">Aktive Exportjobs</th><td>{$transitionInventory.active_export_jobs|default:0|escape:'html':'UTF-8'}</td><th scope="row">Unklare Exportjobs</th><td>{$transitionInventory.ambiguous_export_jobs|default:0|escape:'html':'UTF-8'}</td></tr>
-                    <tr><th scope="row">Alte fehlgeschlagene Exportjobs</th><td>{$transitionInventory.failed_export_jobs|default:0|escape:'html':'UTF-8'}</td><th scope="row">Lokale Hinweise auf mögliche Remote-Dubletten</th><td>{$transitionInventory.possible_remote_duplicates|default:0|escape:'html':'UTF-8'}</td></tr>
-                    <tr><th scope="row">Offene Rechnungen des aktuellen Lebenszyklus</th><td>{$transitionInventory.open_invoices|default:0|escape:'html':'UTF-8'}</td><th scope="row">Zusatzdokumente</th><td>{$transitionInventory.related_reminders|default:0|escape:'html':'UTF-8'} Mahnungen, {$transitionInventory.related_cancellations|default:0|escape:'html':'UTF-8'} Stornos, {$transitionInventory.related_late_fee_vouchers|default:0|escape:'html':'UTF-8'} Gebührenbelege; sie werden beim Wechsel nicht verändert</td></tr>
-                    </tbody>
-                </table>
-            </div>
-            <p class="help-block">Ein Moduswechsel verändert keine bestehende Zuordnung und startet keinen Nachlauf. Mögliche Remote-Dubletten müssen vor einer Neuanlage in sevdesk geprüft werden.</p>
-            <div class="checkbox">
-                <label for="transition-inventory-confirmed">
-                    <input type="checkbox" id="transition-inventory-confirmed" name="transition_inventory_confirmed" value="1">
-                    Ich habe diese Übergangsinventur geprüft. Geplante Änderungen gelten nur für neue, noch nicht begonnene Dokumententscheidungen.
-                </label>
-            </div>
-        </div>
-    </div>
-
     <div class="panel panel-default">
-        <div class="panel-heading"><h3 class="panel-title">sevdesk-Verbindung</h3></div>
+        <div class="panel-heading"><h3 class="panel-title" id="setup-connection">sevdesk-Verbindung</h3></div>
         <div class="panel-body">
             <div class="form-group">
                 <label class="control-label" for="sevdesk-api-key">API-Token</label>
@@ -57,6 +50,15 @@
                     </span>
                 </div>
                 <small id="sevdesk-api-key-help" class="help-block">Leer lassen, um den gespeicherten Token beizubehalten. Der Token wird in Protokollen ausgeblendet.</small>
+            </div>
+
+            <div class="form-group">
+                <button type="button" class="btn btn-default" data-setup-references data-url="{$moduleLink|escape:'html':'UTF-8'}&amp;a=setupReferences">Konten und Auswahllisten laden</button>
+                <small class="help-block">Verwendet den eingegebenen Token, sonst den gespeicherten. Lädt Erlöskonten, Benutzer, Einheiten und Zahlungsmethoden, ohne Einstellungen zu speichern oder Exporte freizugeben.</small>
+                <div data-setup-reference-status role="status" aria-live="polite">
+                    {foreach from=$setupReferenceErrors item=referenceError}<p class="text-warning">{$referenceError|escape:'html':'UTF-8'}</p>{/foreach}
+                </div>
+                <noscript><p class="text-warning">Zum Laden der Auswahllisten vor dem Speichern bitte JavaScript aktivieren. Bekannte AccountDatev-IDs können Sie weiterhin direkt eintragen.</p></noscript>
             </div>
 
             <div class="form-group">
@@ -81,6 +83,32 @@
                     Ich bestätige, dass neue sevdesk-Kontakte mit <code>customerNumber=&lt;interne WHMCS-Client-ID&gt;</code> angelegt werden dürfen.
                 </label>
                 <small class="help-block">Ohne Bestätigung bleiben vorhandene Kontakt-IDs und exakt passende Kundennummerntreffer nutzbar; bei keinem Treffer wird kein neuer Kontakt angelegt.</small>
+            </div>
+        </div>
+    </div>
+
+    <div class="panel panel-warning">
+        <div class="panel-heading"><h3 class="panel-title">Übergangsinventur für Dokumentänderungen</h3></div>
+        <div class="panel-body">
+            <p>Diese Bestandsaufnahme ist rein lesend. Sie zeigt, welche Zuordnungen und Jobs vor einer Änderung von Exportmodus, Dokumenthoheit, OSS-, E-Rechnungs-, Rule-11-Invoice- oder Kleinunternehmerprofil zu prüfen sind.</p>
+            <div class="table-responsive">
+                <table class="table table-condensed">
+                    <tbody>
+                    <tr><th scope="row">Typisierte Voucher</th><td>{$transitionInventory.typed_vouchers|default:0|escape:'html':'UTF-8'}</td><th scope="row">Typisierte Invoices</th><td>{$transitionInventory.typed_invoices|default:0|escape:'html':'UTF-8'} (davon {$transitionInventory.direct_invoices|default:0|escape:'html':'UTF-8'} im Direktbetrieb)</td></tr>
+                    <tr><th scope="row">Vollständig, Typ ungeklärt</th><td>{$transitionInventory.untyped_complete|default:0|escape:'html':'UTF-8'}</td><th scope="row">Ohne sevdesk-ID</th><td>{$transitionInventory.null_remote_mappings|default:0|escape:'html':'UTF-8'}</td></tr>
+                    <tr><th scope="row">Verwaiste Zuordnungen</th><td>{$transitionInventory.orphan_mappings|default:0|escape:'html':'UTF-8'}</td><th scope="row">Bezahlte, ungemappte Rechnungen ab Stichtag</th><td>{$transitionInventory.paid_unmapped|default:0|escape:'html':'UTF-8'}</td></tr>
+                    <tr><th scope="row">Aktive Exportjobs</th><td>{$transitionInventory.active_export_jobs|default:0|escape:'html':'UTF-8'}</td><th scope="row">Unklare Exportjobs</th><td>{$transitionInventory.ambiguous_export_jobs|default:0|escape:'html':'UTF-8'}</td></tr>
+                    <tr><th scope="row">Alte fehlgeschlagene Exportjobs</th><td>{$transitionInventory.failed_export_jobs|default:0|escape:'html':'UTF-8'}</td><th scope="row">Lokale Hinweise auf mögliche Remote-Dubletten</th><td>{$transitionInventory.possible_remote_duplicates|default:0|escape:'html':'UTF-8'}</td></tr>
+                    <tr><th scope="row">Offene Rechnungen des aktuellen Lebenszyklus</th><td>{$transitionInventory.open_invoices|default:0|escape:'html':'UTF-8'}</td><th scope="row">Zusatzdokumente</th><td>{$transitionInventory.related_reminders|default:0|escape:'html':'UTF-8'} Mahnungen, {$transitionInventory.related_cancellations|default:0|escape:'html':'UTF-8'} Stornos, {$transitionInventory.related_late_fee_vouchers|default:0|escape:'html':'UTF-8'} Gebührenbelege; sie werden beim Wechsel nicht verändert</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <p class="help-block">Ein Moduswechsel verändert keine bestehende Zuordnung und startet keinen Nachlauf. Mögliche Remote-Dubletten müssen vor einer Neuanlage in sevdesk geprüft werden.</p>
+            <div class="checkbox">
+                <label for="transition-inventory-confirmed">
+                    <input type="checkbox" id="transition-inventory-confirmed" name="transition_inventory_confirmed" value="1">
+                    Ich habe diese Übergangsinventur geprüft. Geplante Änderungen gelten nur für neue, noch nicht begonnene Dokumententscheidungen.
+                </label>
             </div>
         </div>
     </div>
@@ -270,8 +298,15 @@
                             <input type="checkbox" id="invoice-discount-rule19-canary-confirmed" name="invoice_discount_rule19_canary_confirmed" value="on"{if $settings.invoice_discount_rule19_canary_current} checked{/if}>
                             Der separate Canary für einen festen <code>PromoHosting</code>-Rabatt mit Rule 19 und Zielsteuersatz wurde bestanden.
                         </label>
-                        <label for="invoice-discount-rule19-canary-rate">Im Canary geprüfter Zielsteuersatz</label>
-                        <input class="form-control" type="number" min="0.01" max="100" step="0.01" id="invoice-discount-rule19-canary-rate" name="invoice_discount_rule19_canary_rate" value="{$settings.invoice_discount_rule19_canary_rate|escape}">
+                    </div>
+                    <div class="form-group sd-setup-rate">
+                        <label class="control-label" for="invoice-discount-rule19-canary-rate">Zielsteuersatz der Rule-19-Rabattprüfung (%)</label>
+                        <details class="sd-info">
+                            <summary class="sd-info-trigger" aria-label="Hilfe zum Zielsteuersatz" title="Hilfe zum Zielsteuersatz"><i class="fas fa-info-circle" aria-hidden="true"></i></summary>
+                            <div class="sd-info-popover" role="note"><strong>Nur für die Rabattfreigabe</strong><span>„Canary“ bedeutet eine erfolgreich geprüfte Testrechnung im verbundenen sevDesk-Mandanten. Hier gehört deren Zielsteuersatz hinein, nicht die TaxRule-ID 19. Dieses Feld ändert keine WHMCS-Steuersätze und bestätigt keinen Test automatisch.</span></div>
+                        </details>
+                        <input class="form-control" type="text" inputmode="decimal" id="invoice-discount-rule19-canary-rate" name="invoice_discount_rule19_canary_rate" value="{$settings.invoice_discount_rule19_canary_rate|escape:'html':'UTF-8'}" placeholder="z. B. 21 oder 21,5" aria-describedby="invoice-discount-rule19-canary-rate-help" data-rule19-rate>
+                        <small id="invoice-discount-rule19-canary-rate-help" class="help-block">Nur erforderlich, wenn die Rule-19-Rabattprüfung oben bestätigt ist. Komma oder Punkt, höchstens zwei Nachkommastellen, ohne %-Zeichen. Ohne diese Rabattfreigabe darf das Feld leer bleiben.</small>
                         <small class="help-block">Die Freigaben werden an Steuerprofil, Länderklasse, Steuersatz und den aktuell verwendeten WHMCS-Netto-/Bruttomodus gebunden. Ändert sich einer dieser Werte, bleibt der Export bis zu einem neuen Canary gesperrt. ZUGFeRD mit Rabatt bleibt gesperrt.</small>
                     </div>
                 </div>
@@ -284,9 +319,14 @@
                         {if $sevUsers|@count}
                             <select id="invoice-sev-user" name="invoice_sev_user_id" class="form-control">
                                 <option value="">Bitte wählen</option>
+                                {assign var="referenceFound" value=false}
                                 {foreach from=$sevUsers item=reference}
+                                    {if $settings.invoice_sev_user_id == $reference.id}{assign var="referenceFound" value=true}{/if}
                                     <option value="{$reference.id|escape:'html':'UTF-8'}"{if $settings.invoice_sev_user_id == $reference.id} selected{/if}>{$reference.name|escape:'html':'UTF-8'} (ID {$reference.id|escape:'html':'UTF-8'})</option>
                                 {/foreach}
+                                {if $settings.invoice_sev_user_id && !$referenceFound}
+                                    <option value="{$settings.invoice_sev_user_id|escape:'html':'UTF-8'}" selected>Bisherige ID {$settings.invoice_sev_user_id|escape:'html':'UTF-8'} – nicht in der aktuellen Liste; bitte prüfen</option>
+                                {/if}
                             </select>
                         {else}
                             <input type="number" id="invoice-sev-user" name="invoice_sev_user_id" class="form-control" min="1" step="1" value="{$settings.invoice_sev_user_id|escape:'html':'UTF-8'}">
@@ -299,9 +339,14 @@
                         {if $unities|@count}
                             <select id="invoice-unity" name="invoice_unity_id" class="form-control">
                                 <option value="">Bitte wählen</option>
+                                {assign var="referenceFound" value=false}
                                 {foreach from=$unities item=reference}
+                                    {if $settings.invoice_unity_id == $reference.id}{assign var="referenceFound" value=true}{/if}
                                     <option value="{$reference.id|escape:'html':'UTF-8'}"{if $settings.invoice_unity_id == $reference.id} selected{/if}>{$reference.name|escape:'html':'UTF-8'} (ID {$reference.id|escape:'html':'UTF-8'})</option>
                                 {/foreach}
+                                {if $settings.invoice_unity_id && !$referenceFound}
+                                    <option value="{$settings.invoice_unity_id|escape:'html':'UTF-8'}" selected>Bisherige ID {$settings.invoice_unity_id|escape:'html':'UTF-8'} – nicht in der aktuellen Liste; bitte prüfen</option>
+                                {/if}
                             </select>
                         {else}
                             <input type="number" id="invoice-unity" name="invoice_unity_id" class="form-control" min="1" step="1" value="{$settings.invoice_unity_id|escape:'html':'UTF-8'}">
@@ -347,9 +392,14 @@
                                 {if $paymentMethods|@count}
                                     <select id="e-invoice-payment-method" name="e_invoice_payment_method_id" class="form-control">
                                         <option value="">Bitte wählen</option>
-                                        {foreach from=$paymentMethods item=reference}
+                                        {assign var="referenceFound" value=false}
+                                {foreach from=$paymentMethods item=reference}
+                                    {if $settings.e_invoice_payment_method_id == $reference.id}{assign var="referenceFound" value=true}{/if}
                                             <option value="{$reference.id|escape:'html':'UTF-8'}"{if $settings.e_invoice_payment_method_id == $reference.id} selected{/if}>{$reference.name|escape:'html':'UTF-8'} (ID {$reference.id|escape:'html':'UTF-8'})</option>
                                         {/foreach}
+                                {if $settings.e_invoice_payment_method_id && !$referenceFound}
+                                    <option value="{$settings.e_invoice_payment_method_id|escape:'html':'UTF-8'}" selected>Bisherige ID {$settings.e_invoice_payment_method_id|escape:'html':'UTF-8'} – nicht in der aktuellen Liste; bitte prüfen</option>
+                                {/if}
                                     </select>
                                 {else}
                                     <input type="number" id="e-invoice-payment-method" name="e_invoice_payment_method_id" class="form-control" min="1" step="1" value="{$settings.e_invoice_payment_method_id|escape:'html':'UTF-8'}">
@@ -371,7 +421,7 @@
                     </div>
                     <div class="checkbox">
                         <label for="e-invoice-profile-acknowledged">
-                            <input type="checkbox" id="e-invoice-profile-acknowledged" name="e_invoice_profile_acknowledged" value="1">
+                            <input type="checkbox" id="e-invoice-profile-acknowledged" name="e_invoice_profile_acknowledged" value="1"{if $settings.e_invoice_profile_acknowledged|default:'' === 'on'} checked{/if}>
                             <strong>Bei aktiviertem Profil erneut bestätigen:</strong> ZUGFeRD wird nur für deutsche Organisationen mit Rule 1 und gesetztem Admin-Opt-in verwendet; Behörden- und OSS-Fälle bleiben ausgeschlossen.
                         </label>
                     </div>
@@ -391,7 +441,7 @@
                     </div>
                     <div class="checkbox">
                         <label for="oss-profile-acknowledged">
-                            <input type="checkbox" id="oss-profile-acknowledged" name="oss_profile_acknowledged" value="1">
+                            <input type="checkbox" id="oss-profile-acknowledged" name="oss_profile_acknowledged" value="1"{if $settings.oss_profile_acknowledged|default:'' === 'on'} checked{/if}>
                             <strong>Bei Freigabe oder erneutem Speichern bestätigen:</strong> Alle betroffenen EU-B2C-Rechnungspositionen sind elektronische/digitale Leistungen und dürfen nach Rule 19 behandelt werden.
                         </label>
                     </div>
@@ -502,7 +552,7 @@
                             </div>
                             <div id="eu-b2c-confirmation" class="checkbox" data-visible-when="eu-b2c-mode:domestic_confirmed"{if $settings.eu_b2c_mode !== 'domestic_confirmed'} hidden{/if}>
                                 <label for="eu-b2c-confirmed">
-                                    <input type="checkbox" id="eu-b2c-confirmed" name="eu_b2c_acknowledged" value="1">
+                                    <input type="checkbox" id="eu-b2c-confirmed" name="eu_b2c_acknowledged" value="1"{if $settings.eu_b2c_acknowledged|default:'' === 'on'} checked{/if}>
                                     <strong>Erneute Bestätigung erforderlich:</strong> Für das aktuelle Geschäftsmodell und den betroffenen Zeitraum wurde die inländische Besteuerung von EU-B2C-Umsätzen fachlich geprüft.
                                 </label>
                             </div>
@@ -547,6 +597,12 @@
                 Die Kontenliste stammt aus Ihrem sevdesk-Mandanten; eine Kontoauswahl allein gibt keinen Steuerfall frei.
             </div>
 
+            <div class="alert alert-info" role="note">
+                <strong>Erlöskonten auswählen</strong>
+                <p>Fehlt die Auswahl, oben bei <a href="#setup-connection">sevdesk-Verbindung</a> den Token eingeben und „Konten und Auswahllisten laden“ anklicken. Die Liste zeigt Kontonummer, Kontoname und die interne AccountDatev-ID. Bei manueller Eingabe wird diese ID benötigt, nicht die DATEV-Kontonummer.</p>
+                <p>Diese Konten gelten für Voucher. Bei „Invoice only“ wählt sevDesk das Rechnungskonto selbst. Wählen Sie nur Konten und Steuerprofile, die für Ihre Leistungen geprüft sind.</p>
+            </div>
+
             <article class="panel panel-default sd-tax-profile" aria-labelledby="tax-profile-general-title">
                 <div class="panel-heading clearfix">
                     <span class="pull-right"><span class="label label-default">Rule 1</span></span>
@@ -577,7 +633,7 @@
                                         {/if}
                                     </select>
                                 {else}
-                                    <label class="control-label" for="account-general">sevdesk-AccountDatev-ID</label>
+                                    <label class="control-label" for="account-general">sevdesk-Erlöskonto (AccountDatev-ID)</label>
                                     <input type="number" id="account-general" name="accountingTypeGeneral" class="form-control" min="1" step="1" value="{$generalAccountId|escape:'html':'UTF-8'}" aria-describedby="account-general-help">
                                 {/if}
                                 <small id="account-general-help" class="help-block">Eine nicht mehr angebotene gespeicherte ID wird nicht stillschweigend gelöscht.</small>
@@ -630,7 +686,7 @@
                                         {/if}
                                     </select>
                                 {else}
-                                    <label class="control-label" for="account-eu-business">sevdesk-AccountDatev-ID</label>
+                                    <label class="control-label" for="account-eu-business">sevdesk-Erlöskonto (AccountDatev-ID)</label>
                                     <input type="number" id="account-eu-business" name="accountingTypeInterCommunityBusiness" class="form-control" min="1" step="1" value="{$euBusinessAccountId|escape:'html':'UTF-8'}" aria-describedby="account-eu-business-help">
                                 {/if}
                                 <small id="account-eu-business-help" class="help-block">Die Kontoauswahl aktiviert Rule 3 nicht automatisch. Fehlen Organisation, USt-ID, <code>taxexempt</code> oder Bestätigung, wird die Rechnung zum Klärfall.</small>
@@ -690,7 +746,7 @@
                                         {/if}
                                     </select>
                                 {else}
-                                    <label class="control-label" for="account-eu-consumer">sevdesk-AccountDatev-ID</label>
+                                    <label class="control-label" for="account-eu-consumer">sevdesk-Erlöskonto (AccountDatev-ID)</label>
                                     <input type="number" id="account-eu-consumer" name="accountingTypeInterCommunityConsumer" class="form-control" min="1" step="1" value="{$euConsumerAccountId|escape:'html':'UTF-8'}" aria-describedby="account-eu-consumer-help">
                                 {/if}
                                 <small id="account-eu-consumer-help" class="help-block">Bei der sicheren Standardeinstellung wird dieses Konto nicht verwendet. Erst die ausdrückliche EU-B2C-Bestätigung oben erlaubt die weitere Prüfung.</small>
@@ -743,7 +799,7 @@
                                         {/if}
                                     </select>
                                 {else}
-                                    <label class="control-label" for="account-third-country">sevdesk-AccountDatev-ID</label>
+                                    <label class="control-label" for="account-third-country">sevdesk-Erlöskonto (AccountDatev-ID)</label>
                                     <input type="number" id="account-third-country" name="accountingTypeThirdPartyCountry" class="form-control" min="1" step="1" value="{$thirdCountryAccountId|escape:'html':'UTF-8'}" aria-describedby="account-third-country-help">
                                 {/if}
                                 <small id="account-third-country-help" class="help-block">Wählen Sie nur ein Konto, das für den tatsächlichen Drittland-Fall fachlich freigegeben wurde.</small>
@@ -803,7 +859,7 @@
                                         {/if}
                                     </select>
                                 {else}
-                                    <label class="control-label" for="account-credit">sevdesk-AccountDatev-ID</label>
+                                    <label class="control-label" for="account-credit">sevdesk-Erlöskonto (AccountDatev-ID)</label>
                                     <input type="number" id="account-credit" name="accountingTypeCredit" class="form-control" min="1" step="1" value="{$creditAccountId|escape:'html':'UTF-8'}" aria-describedby="account-credit-help">
                                 {/if}
                                 <small id="account-credit-help" class="help-block">Ohne fachliche Bestätigung bleibt das Profil unabhängig von der Kontoauswahl blockiert.</small>
@@ -863,7 +919,7 @@
                                         {/if}
                                     </select>
                                 {else}
-                                    <label class="control-label" for="account-small-business">sevdesk-AccountDatev-ID</label>
+                                    <label class="control-label" for="account-small-business">sevdesk-Erlöskonto (AccountDatev-ID)</label>
                                     <input type="number" id="account-small-business" name="accountingTypeSmallBusinessOwner" class="form-control" min="1" step="1" value="{$smallBusinessAccountId|escape:'html':'UTF-8'}" aria-describedby="account-small-business-help">
                                 {/if}
                                 <small id="account-small-business-help" class="help-block">Das Konto muss Rule 11 und 0 % laut Receipt Guidance ausdrücklich erlauben.</small>

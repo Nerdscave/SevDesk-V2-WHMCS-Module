@@ -31,6 +31,7 @@ use WHMCS\Module\Addon\SevDesk\Service\InvoiceDiscountCapabilityPolicy;
 use WHMCS\Module\Addon\SevDesk\Service\InvoiceItemExportPolicy;
 use WHMCS\Module\Addon\SevDesk\Service\InvoiceItemNormalizer;
 use WHMCS\Module\Addon\SevDesk\Service\TaxPolicy;
+use WHMCS\Module\Addon\SevDesk\Service\ReferenceData;
 use WHMCS\Module\Addon\SevDesk\Service\WhmcsGateway;
 use WHMCS\Module\Addon\SevDesk\Service\WhmcsPaymentStructureService;
 use WHMCS\Module\Addon\SevDesk\Support\AdminInvoiceControls;
@@ -38,6 +39,8 @@ use WHMCS\Module\Addon\SevDesk\Support\AdvisoryLockName;
 use WHMCS\Module\Addon\SevDesk\Support\Csrf;
 use WHMCS\Module\Addon\SevDesk\Support\DocumentDeliveryContext;
 use WHMCS\Module\Addon\SevDesk\Support\QuickExportGuard;
+use WHMCS\Module\Addon\SevDesk\Support\SetupForm;
+use WHMCS\Module\Addon\SevDesk\Support\SetupValidationException;
 use WHMCS\Module\Addon\SevDesk\View;
 
 final class AdminController
@@ -76,9 +79,89 @@ final class AdminController
         ]);
     }
 
+    /** Read-only lookup, available before the setup review has been released. */
+    public function setupReferences(): void
+    {
+        $this->csrf->assertPost();
+        $this->startDirectResponse('application/json; charset=utf-8');
+        if (!headers_sent()) {
+            header('Cache-Control: no-store, private');
+        }
+        try {
+            $token = $_POST['sevdesk_api_key'] ?? '';
+            if (
+                !is_string($token) || strlen($token) > 512
+                || preg_match('/[\x00-\x20\x7F]/', trim($token)) === 1
+            ) {
+                throw new RuntimeException('Bitte einen gültigen API-Token ohne Leerzeichen eingeben.');
+            }
+            $token = trim($token);
+            if ($token === '' && trim((string) $this->application->config->get('sevdesk_api_key', '')) === '') {
+                throw new RuntimeException('Bitte zuerst den API-Token eingeben und dann die Auswahllisten laden.');
+            }
+            $result = $this->readSetupReferences($this->application->setupReferenceData($token));
+        } catch (Throwable $error) {
+            http_response_code(422);
+            $result = ['error' => get_class($error) === RuntimeException::class
+                ? $error->getMessage()
+                : 'Die Auswahllisten konnten nicht geladen werden. Bitte Verbindung und API-Token prüfen.'];
+        }
+        echo json_encode($result, JSON_THROW_ON_ERROR);
+        exit;
+    }
+
+    /** @return array<string, array<array-key, mixed>> */
+    private function readSetupReferences(ReferenceData $referenceData): array
+    {
+        $result = ['accountOptions' => [], 'sevUsers' => [], 'unities' => [], 'paymentMethods' => [], 'errors' => []];
+        $authenticationFailed = false;
+        foreach (
+            [
+            'accountOptions' => ['revenueAccounts', 'Erlöskonten'],
+            'sevUsers' => ['sevUsers', 'sevDesk-Benutzer'],
+            'unities' => ['unities', 'Einheiten'],
+            'paymentMethods' => ['paymentMethods', 'Zahlungsmethoden'],
+            ] as $key => [$method, $label]
+        ) {
+            if ($authenticationFailed) {
+                $result['errors'][$key] = $label . ': Bitte zuerst den API-Token prüfen.';
+                continue;
+            }
+            try {
+                $result[$key] = $referenceData->{$method}();
+                if ($result[$key] === []) {
+                    $result['errors'][$key] = $label . ': sevDesk hat keine auswählbaren Einträge geliefert. '
+                        . 'Vorhandene IDs bleiben erhalten; prüfen Sie die Einrichtung im sevDesk-Mandanten.';
+                }
+            } catch (Throwable $error) {
+                $authenticationFailed = $error instanceof ApiException && $error->isAuthenticationFailure();
+                $result['errors'][$key] = $label . ' konnten nicht geladen werden. '
+                    . ($error instanceof ApiException ? self::setupApiHelp($error)
+                        : 'Bitte erneut laden. Vorhandene IDs bleiben erhalten.');
+            }
+        }
+
+        return $result;
+    }
+
+    private static function setupApiHelp(ApiException $error): string
+    {
+        return match (true) {
+            $error->isAuthenticationFailure() => 'Bitte API-Token und Zugriffsrechte im sevDesk-Mandanten prüfen. '
+                . 'Die automatische Verarbeitung bleibt bis zur erfolgreichen Setup-Prüfung gesperrt.',
+            $error->httpStatus === 429 => 'sevDesk begrenzt gerade die Anfragen. Bitte kurz warten und erneut versuchen.',
+            $error->httpStatus !== null && $error->httpStatus >= 500 =>
+                'sevDesk ist vorübergehend nicht verfügbar. Bitte später erneut versuchen.',
+            $error->httpStatus === 422 => 'sevDesk hat die gewählte Konfiguration abgelehnt. '
+                . 'Bitte Konten, Steuerregeln und Pflichtreferenzen für den gewählten Dokumentmodus prüfen.',
+            default => 'Bitte Verbindung und API-Token prüfen und erneut versuchen.',
+        };
+    }
+
     public function setup(): void
     {
         $saveFailed = false;
+        $setupErrors = [];
         if ($this->isPost()) {
             $this->csrf->assertPost();
             try {
@@ -86,6 +169,8 @@ final class AdminController
                 $this->view->flash('success', 'Die Einstellungen wurden gespeichert. Das Speichern selbst hat keinen Export gestartet.', 'Konfiguration aktualisiert');
             } catch (Throwable $error) {
                 $saveFailed = true;
+                $setupErrors = $error instanceof SetupValidationException ? $error->fieldErrors : [];
+                $this->application->resetSetupReferences();
                 $this->flashSetupFailure($error);
             }
         }
@@ -164,32 +249,17 @@ final class AdminController
             }
         }
 
-        $accountOptions = [];
-        $sevUsers = [];
-        $unities = [];
-        $paymentMethods = [];
-        if ($storedToken !== '' && !$saveFailed) {
+        if ($saveFailed) {
+            $settings = SetupForm::draft($settings, $_POST);
+        }
+
+        $references = ['accountOptions' => [], 'sevUsers' => [], 'unities' => [], 'paymentMethods' => [], 'errors' => []];
+        if ($storedToken !== '') {
             try {
-                $accountOptions = $this->application->referenceData()->revenueAccounts();
-                $sevUsers = $this->application->referenceData()->sevUsers();
-                $unities = $this->application->referenceData()->unities();
-            } catch (Throwable $error) {
-                $this->view->flash(
-                    'warning',
-                    'Gespeicherte Referenzen bleiben erhalten, aber die sevdesk-Referenzdaten waren nicht vollständig erreichbar.',
-                    'sevdesk nicht erreichbar',
-                );
-            }
-            try {
-                $paymentMethods = $this->application->referenceData()->paymentMethods();
+                $references = $this->readSetupReferences($this->application->referenceData());
             } catch (Throwable) {
-                if (($settings['e_invoice_mode'] ?? 'off') !== 'off') {
-                    $this->view->flash(
-                        'warning',
-                        'Die gespeicherte Zahlungsmethode bleibt erhalten, konnte aber nicht read-only geprüft werden.',
-                        'E-Rechnungsreferenz nicht erreichbar',
-                    );
-                }
+                $references['errors']['accountOptions'] = 'Die sevDesk-Verbindung konnte nicht vorbereitet werden. '
+                    . 'Bitte den Systemcheck öffnen. Ihre bisherigen IDs bleiben erhalten.';
             }
         }
 
@@ -213,11 +283,16 @@ final class AdminController
 
         $this->render('setup.tpl', 'setup', [
             'settings' => $settings,
+            'setupErrors' => $setupErrors,
+            'setupReferenceErrors' => $references['errors'],
+            'setupSaveFailed' => $saveFailed,
+            'setupTokenNeedsReentry' => $saveFailed && trim((string) ($_POST['sevdesk_api_key'] ?? '')) !== '',
+            'setupSyncEnabled' => $this->application->config->bool('sync_enabled'),
             'customFields' => $customFields,
-            'accountOptions' => $accountOptions,
-            'sevUsers' => $sevUsers,
-            'unities' => $unities,
-            'paymentMethods' => $paymentMethods,
+            'accountOptions' => $references['accountOptions'],
+            'sevUsers' => $references['sevUsers'],
+            'unities' => $references['unities'],
+            'paymentMethods' => $references['paymentMethods'],
             'eInvoiceClientFields' => $eInvoiceClientFields,
             'emailTemplates' => $emailTemplates,
             'whmcsTemplateDeliverySupported' => $this->application->whmcs
@@ -2108,12 +2183,12 @@ final class AdminController
 
     private function flashSetupFailure(Throwable $error): void
     {
-        if (get_class($error) === RuntimeException::class) {
+        if (get_class($error) === RuntimeException::class || $error instanceof SetupValidationException) {
             $message = $error->getMessage();
         } elseif ($error instanceof ApiException) {
             $message = 'Die sevdesk-Prüfung konnte nicht abgeschlossen werden'
                 . ($error->httpStatus !== null ? ' (HTTP ' . $error->httpStatus . ')' : '')
-                . '.';
+                . '. ' . self::setupApiHelp($error);
         } else {
             $reference = substr(
                 hash('sha256', get_class($error) . '|' . microtime(true)),
@@ -2174,14 +2249,14 @@ final class AdminController
         $tokenChanged = $token !== '';
         if ($token !== '') {
             if (strlen($token) > 512 || preg_match('/[\x00-\x20\x7F]/', $token) === 1) {
-                throw new RuntimeException('Der API-Token enthält ungültige Zeichen.');
+                throw new SetupValidationException(['sevdesk-api-key' => 'Der API-Token enthält ungültige Zeichen.']);
             }
             $this->application->config->set('sevdesk_api_key', $token);
         }
 
         $date = $this->parseIsoDate((string) ($_POST['import_after'] ?? ''));
         if ($date === null) {
-            throw new RuntimeException('Bitte einen gültigen Exportstichtag wählen.');
+            throw new SetupValidationException(['import-after' => 'Bitte einen gültigen Exportstichtag wählen.']);
         }
         $smallBusinessOwner = isset($_POST['smallBusinessOwner']);
         $smallBusinessUntilInput = trim((string) ($_POST['small_business_until'] ?? ''));
@@ -2189,11 +2264,11 @@ final class AdminController
             ? null
             : $this->parseIsoDate($smallBusinessUntilInput);
         if ($smallBusinessUntilInput !== '' && !($smallBusinessUntil instanceof DateTimeImmutable)) {
-            throw new RuntimeException('Bitte einen gültigen Kleinunternehmer-Stichtag wählen.');
+            throw new SetupValidationException(['small-business-until' => 'Bitte einen gültigen Kleinunternehmer-Stichtag wählen.']);
         }
         $customFieldId = (int) ($_POST['custom_field_id'] ?? 0);
         if ($customFieldId < 1 || !Capsule::table('tblcustomfields')->where('id', $customFieldId)->where('type', 'client')->exists()) {
-            throw new RuntimeException('Das gewählte WHMCS-Kundenfeld existiert nicht.');
+            throw new SetupValidationException(['custom-field-id' => 'Das gewählte WHMCS-Kundenfeld existiert nicht.']);
         }
         $customerNumberContactCreationConfirmed = isset($_POST['customer_number_contact_creation_confirmed']);
 
@@ -2396,6 +2471,9 @@ final class AdminController
         $invoiceDiscountRuleNineteenRate = trim(
             (string) ($_POST['invoice_discount_rule19_canary_rate'] ?? ''),
         );
+        if ($invoiceDiscountRuleNineteenCanaryConfirmed) {
+            $invoiceDiscountRuleNineteenRate = SetupForm::rule19Rate($invoiceDiscountRuleNineteenRate);
+        }
         $invoiceDiscountRuleOneCapabilityKey = self::requestedDiscountCapabilityKey(
             $invoiceDiscountRuleOneCanaryConfirmed,
             'domestic',
@@ -2821,7 +2899,10 @@ final class AdminController
         foreach ($numericSettings as $setting) {
             $value = trim((string) ($_POST[$setting] ?? ''));
             if ($value !== '' && preg_match('/^\d+$/', $value) !== 1) {
-                throw new RuntimeException('Konto- und TaxRule-IDs müssen numerisch sein.');
+                throw new SetupValidationException([
+                    SetupForm::numericFieldId($setting) => 'Bitte für dieses Konto bzw. diese Tax Rule eine numerische ID eingeben. '
+                        . 'Bei Erlöskonten ist die AccountDatev-ID erforderlich, nicht die DATEV-Kontonummer.',
+                ]);
             }
             $this->application->config->set($setting, $value);
         }
@@ -3040,6 +3121,9 @@ final class AdminController
             );
         }
 
+        if ($taxRule === '19') {
+            $taxRate = SetupForm::rule19Rate($taxRate);
+        }
         try {
             $rateMinor = Decimal::toMinorUnits($taxRate);
         } catch (\InvalidArgumentException) {
@@ -3142,9 +3226,9 @@ final class AdminController
                 '19',
                 trim((string) ($_POST['invoice_discount_rule19_canary_rate'] ?? '')),
             ),
-            'invoice_discount_rule19_canary_rate' => trim(
-                (string) ($_POST['invoice_discount_rule19_canary_rate'] ?? ''),
-            ),
+            'invoice_discount_rule19_canary_rate' => isset($_POST['invoice_discount_rule19_canary_confirmed'])
+                ? SetupForm::rule19Rate((string) ($_POST['invoice_discount_rule19_canary_rate'] ?? ''))
+                : trim((string) ($_POST['invoice_discount_rule19_canary_rate'] ?? '')),
             'invoice_sev_user_id' => trim((string) ($_POST['invoice_sev_user_id'] ?? '')),
             'invoice_unity_id' => trim((string) ($_POST['invoice_unity_id'] ?? '')),
             'e_invoice_mode' => trim((string) ($_POST['e_invoice_mode'] ?? 'off')),

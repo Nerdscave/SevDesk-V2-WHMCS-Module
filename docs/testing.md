@@ -515,6 +515,31 @@ Zu prüfen:
 
 ## UI- und Bedienprüfung
 
+Die Setupregressionen in `SetupFormTest`, `AdminSetupReferencesTest` und
+`AdminSetupBehaviorTest` prüfen Formularentwürfe ohne Token-/Quarantäneübernahme,
+exakte Komma-/Punktwerte, ungültige und fehlende bestätigte Zielsteuersätze,
+den inaktiven Rabattpfad, Token-Rollback mit Hook-Sicherheitsstopp sowie GET-only
+Referenzlisten mit Teilfehlern und 401-Abbruch. Die Referenzaktion benötigt einen
+CSRF-geprüften POST und darf weder Settings freigeben noch Belege schreiben.
+
+Zusätzlich im Browser prüfen:
+
+- Bei erster Einrichtung Token eingeben und Listen laden, ohne Kontaktfeld,
+  Konten oder Bestandsfreigaben vorher ausfüllen zu müssen. Token und andere
+  Formulareingaben bleiben beim Nachladen im Browser erhalten.
+- Zielsteuersatz mit `21`, `21,5` und `21.50` eintragen. Leeres Feld bei aktiver
+  Rabattbestätigung sowie `21%`, `21.555`, negative Werte und Werte über 100
+  zeigen einen verständlichen Fehler; ohne Bestätigung blockiert das Feld nicht.
+- Nach Speicherfehlern geänderte Konten, Mailtexte, Daten und angehakte wie
+  abgewählte Einstellungen kontrollieren. Der Fehlerlink fokussiert das Feld.
+  Ein neu eingegebener Token muss erneut eingetragen werden; die Oberfläche
+  nennt das ausdrücklich. Bestandsfreigaben bleiben unbestätigt.
+- Beim Nachladen einen Referenzfehler, eine leere Liste und eine unbekannte
+  bisherige ID simulieren. Keine Auswahl darf still verschwinden. Ein während
+  des Ladens geänderter Token verwirft die Antwort des früheren Tokens.
+- Hilfe und Fehlernavigation per Tastatur bedienen; Prozentfeld und Hilfe bei
+  375, 768 und 1280 Pixeln prüfen. Laden der Listen erzeugt keinen Export.
+
 Diese Punkte werden manuell oder mit passenden Browsertests geprüft:
 
 - leere Suche, ungültige Datumsspanne und sehr großer Zeitraum;

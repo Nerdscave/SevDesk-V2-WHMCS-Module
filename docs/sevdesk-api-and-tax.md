@@ -456,6 +456,16 @@ Rules 18/20 findet ebenfalls kein Remote-Write statt.
 
 Erlaubt ein Voucher-Konto laut Guidance nur `AUSFUHREN`, muss jede andere Rule lokal vor PDF-, Kontakt- oder Voucher-Write scheitern.
 
+### Eingabe des Rule-19-Rabattsteuersatzes im Setup
+
+Der bestätigte Rabatt-Canary benötigt einen expliziten Zielsteuersatz. Das Setup
+akzeptiert Komma oder Punkt, höchstens zwei Nachkommastellen und Werte von 0,01
+bis 100 Prozent ohne Prozentzeichen. Es normalisiert einen bestätigten Wert
+verlustfrei (z. B. `21,5` zu `21.50`) und lehnt zusätzliche Nachkommastellen ab,
+statt einen anderen Capability-Key durch Rundung freizugeben. Ohne aktivierte
+Rule-19-Rabattbestätigung ist der Wert optional und erteilt keine Freigabe.
+Die Formaterklärung schlägt keinen fachlich richtigen Landessteuersatz vor.
+
 ## Beträge und Positionen
 
 - Dezimalwerte werden ohne binäre Rundungsartefakte normalisiert.

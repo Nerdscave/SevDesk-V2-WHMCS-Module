@@ -519,6 +519,26 @@ Funktionale Legacy-Einstellungen bleiben erhalten. Hinzu kommen insbesondere:
 
 Operative Werte werden ausschließlich über die CSRF-geschützte Setupseite geändert. Unbekannte Altwerte und Lizenzfelder bleiben beim Upgrade unangetastet.
 
+Fehlgeschlagene Setup-POSTs zeigen einen ausschließlich für die Antwort erzeugten
+Formularentwurf aus explizit erlaubten Eingabefeldern. Dieser Entwurf ändert keine
+Konfiguration und landet weder in Session noch Browser-Storage. Token werden nicht
+zurückgegeben; Quarantäne-Token und Inventurfingerprint stammen weiterhin aus dem
+aktuellen Bestand. Die beiden Bestandsfreigaben müssen erneut bestätigt werden.
+Das Formular nennt getrennt die ungespeicherten Eingaben und den tatsächlich
+persistierten Synchronisationszustand. Der vor der Validierung gesetzte
+Hook-Sicherheitsstopp bleibt bei einem Rollback erhalten.
+
+Die CSRF-geschützte POST-Aktion `setupReferences` liest Konten, Benutzer, Einheiten
+und Zahlungsmethoden auch vor der Setupfreigabe. Ein eingegebener Token wird nur
+für diese Vorschau verwendet; er ersetzt weder den gespeicherten Token noch den
+aktiven API-Client. Die Antwort enthält nur Auswahldaten und bereinigte Hinweise,
+keine Secrets. Einzelne Referenzfehler lassen die anderen Listen nutzbar; 401/403
+setzt weiterhin die globalen Sicherheitsgates und beendet weitere Reads. Die
+Vorschau hebt keine Quarantäne und keinen Authentifizierungsalarm auf. Nach einem
+fehlgeschlagenen Speichern werden request-lokale API-/Referenz-Caches verworfen,
+damit keine Referenzen eines zurückgerollten Tokenwechsels erscheinen.
+
+
 ## Persistente Jobdaten
 
 Die vorhandenen Tabellen `mod_sevdesk_jobs` und `mod_sevdesk_job_items` bleiben ausreichend. Neue Exporte verwenden `action=export_document`. `export_voucher` und `reconcile_voucher` bleiben für bestehende Jobs und Recovery lesbar. Zusatzdokumente verwenden `create_invoice_reminder`, `cancel_invoice` und `export_late_fee_voucher`.

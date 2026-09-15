@@ -269,6 +269,10 @@ final class TemplateContractTest extends TestCase
         );
         self::assertEqualsCanonicalizing(array_keys(self::TAX_PROFILES), $profileMatches[1]);
 
+        $profileMarkup = '';
+        foreach (array_keys(self::TAX_PROFILES) as $profileId) {
+            $profileMarkup .= $this->taxProfile($setup, $profileId);
+        }
         $informationMatches = [];
         self::assertSame(
             count(self::TAX_PROFILES),
@@ -278,7 +282,7 @@ final class TemplateContractTest extends TestCase
                 . '(?=[^>]*\baria-label="[^"]+")[^>]*>.*?<\/summary>\s*'
                 . '<div\b(?=[^>]*\bclass="[^"]*\bsd-info-popover\b[^"]*")'
                 . '(?=[^>]*\brole="(?:note|tooltip)")[^>]*>.*?<\/div>\s*<\/details>/s',
-                $setup,
+                $profileMarkup,
                 $informationMatches
             ),
             'Each tax profile needs a native, keyboard-focusable details/summary explanation.'

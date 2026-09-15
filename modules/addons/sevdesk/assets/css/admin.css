@@ -237,3 +237,31 @@
         animation: none;
     }
 }
+
+/* Der längere Prozentfeld-Hinweis bleibt auch im schmalen Setup sichtbar. */
+.sd-admin .sd-setup-rate {
+    position: relative;
+}
+
+.sd-admin .sd-setup-rate .sd-info {
+    position: static;
+}
+
+.sd-admin .sd-setup-rate .sd-info-trigger {
+    align-items: center;
+    justify-content: center;
+    min-height: 24px;
+    min-width: 24px;
+}
+
+.sd-admin .sd-setup-rate .sd-info-popover {
+    left: 0;
+    max-width: 100%;
+    transform: none;
+}
+
+.sd-admin .sd-setup-rate .sd-info:not([open]) > .sd-info-popover {
+    opacity: 0;
+    pointer-events: none;
+    visibility: hidden;
+}

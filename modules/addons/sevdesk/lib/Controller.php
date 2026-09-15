@@ -15,6 +15,7 @@ final class Controller
         $routes = [
             'index' => 'index',
             'setup' => 'setup',
+            'setupReferences' => 'setupReferences',
             'singleImport' => 'singleImport',
             'quickExport' => 'quickExport',
             'massImport' => 'massImport',

@@ -118,11 +118,30 @@ final class Application
         if ($token === '') {
             throw new RuntimeException('No sevdesk API token is configured.');
         }
+
+        return $this->client = $this->createClient($token);
+    }
+
+    /** Preview a token without storing it or replacing the active client. */
+    public function setupReferenceData(#[\SensitiveParameter] string $token): ReferenceData
+    {
+        return $token === '' ? $this->referenceData() : new ReferenceData($this->createClient($token));
+    }
+
+    public function resetSetupReferences(): void
+    {
+        // A rolled-back token change must not leave its tenant's references in the response.
+        $this->client = null;
+        $this->referenceData = null;
+    }
+
+    private function createClient(#[\SensitiveParameter] string $token): SevdeskClient
+    {
         if (!class_exists(Client::class)) {
             throw new RuntimeException('The Guzzle HTTP client shipped with WHMCS is unavailable.');
         }
 
-        return $this->client = new SevdeskClient(
+        return new SevdeskClient(
             new Client(),
             $token,
             'https://my.sevdesk.de/api/v1',
